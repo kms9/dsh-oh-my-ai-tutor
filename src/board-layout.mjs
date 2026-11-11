@@ -100,21 +100,22 @@ export function assignTopics(elements, topics, concepts = []) {
 const overlaps = (p, q) => !(p.x + p.width <= q.x || q.x + q.width <= p.x || p.y + p.height <= q.y || q.y + q.height <= p.y);
 
 /**
- * Display layout of the sections (view only, nothing is stored).
+ * Display layout of the sections (view only, nothing is stored). `columns` (default 2, the grid 按主题整理 stores)
+ * may be raised for wide canvases such as the whole-workbench view.
  * Returns { assignment, frames, offsetOf(cardId) → { dx, dy }, groupOffset(topicId | null) → { dx, dy } }.
  * Frames are pairwise disjoint and every card, drawn at stored + offset, lies inside its own frame. Free notes keep
  * their stored position unless that would put them over a section; then they go below the last row.
  */
-export function packSections(elements, topics, concepts = [], assignment = assignTopics(elements, topics, concepts)) {
+export function packSections(elements, topics, concepts = [], assignment = assignTopics(elements, topics, concepts), { columns = SECTION.columns } = {}) {
   const cards = elements.filter((e) => e.type !== 'arrow');
   const groups = topics.map((t, index) => ({ id: t.id, title: t.title, index, members: cards.filter((c) => assignment.get(c.id) === t.id) }))
     .filter((g) => g.members.length);
   for (const g of groups) { const b = bbox(g.members); g.stored = { ...b, height: b.height + SECTION.pad }; }
-  const colW = Array.from({ length: SECTION.columns }, (_, j) => Math.max(SECTION_W, ...groups.filter((_, i) => i % SECTION.columns === j).map((g) => g.stored.width)));
+  const colW = Array.from({ length: columns }, (_, j) => Math.max(columns === SECTION.columns ? SECTION_W : 0, ...groups.filter((_, i) => i % columns === j).map((g) => g.stored.width)));
   const colX = colW.map((_, j) => SECTION.origin + colW.slice(0, j).reduce((a, w) => a + w + SECTION.sectionGap, 0));
   let y = SECTION.origin;
-  for (let i = 0; i < groups.length; i += SECTION.columns) {
-    const row = groups.slice(i, i + SECTION.columns);
+  for (let i = 0; i < groups.length; i += columns) {
+    const row = groups.slice(i, i + columns);
     row.forEach((g, j) => { g.frame = { x: colX[j], y, width: g.stored.width, height: g.stored.height }; });
     y += Math.max(...row.map((g) => g.stored.height)) + SECTION.sectionGap;
   }

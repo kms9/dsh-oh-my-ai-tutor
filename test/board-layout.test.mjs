@@ -84,8 +84,8 @@ test('flow helpers: edge sides, graph clusters, readable fit', () => {
 });
 
 /** Pairwise-disjoint frames, every card drawn inside its own frame and over no other frame. */
-function assertPacked(els, label) {
-  const L = packSections(els, topics, concepts);
+function assertPacked(els, label, columns = 2) {
+  const L = packSections(els, topics, concepts, undefined, { columns });
   const f = L.frames;
   for (let i = 0; i < f.length; i++) for (let j = i + 1; j < f.length; j++) assert.ok(!overlap(f[i], f[j]), `${label}: sections ${f[i].title} / ${f[j].title} overlap`);
   for (const c of els.filter((e) => e.type !== 'arrow')) {
@@ -112,6 +112,7 @@ test('packed sections: the interleaved pre-v5 board is drawn with no overlapping
   const stored = sectionFrames(els, topics, concepts);
   assert.ok(stored.some((a, i) => stored.some((b, j) => j > i && overlap(a, b))), 'stored layout overlaps');
   assertPacked(els, 'pre-v5');
+  assertPacked(els, 'pre-v5, 3 columns (whole workbench)', 3);
 });
 
 test('packed sections: seeded and 按主题整理 boards are drawn exactly where they are stored (all offsets 0)', () => {
@@ -140,5 +141,6 @@ test('packed sections: a card dragged far away, AI notes beside cards and random
     const els = seeded.map((e) => ({ ...e, x: Math.round(rnd() * 1400), y: Math.round(rnd() * 1400) }));
     for (let n = 0; n < 4; n++) els.push({ id: `rn-${n}`, type: 'note', text: 'n', x: Math.round(rnd() * 1600), y: Math.round(rnd() * 1600), ...BOARD_CARD });
     assertPacked(els, `random ${k}`);
+    assertPacked(els, `random ${k}, 3 columns`, 3);
   }
 });

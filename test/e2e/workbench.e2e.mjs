@@ -604,7 +604,9 @@ await step('board (React Flow): seed from syllabus → cards in topic sections +
   await page.click('[data-testid=board-zoom-full]');
   await page.waitForSelector('[data-testid=tutor-workbench][data-mm-zoom=full]');
   await eventually(async () => assert.ok((await page.locator('[data-testid=board]').boundingBox()).width > 1100));
+  await page.click('[data-testid=board-fit]'); await page.waitForTimeout(300);
   await assertSectionsClean(page, 'whole workbench');
+  assert.equal(await page.getAttribute('[data-testid=board]', 'data-overflow'), 'false', 'the whole board fits the whole workbench at a readable zoom (3 sections per row)');
   await page.screenshot({ path: join(shots, '06b-board-whole-workbench.png') });
   // the interactive board steps below run on the enlarged board (as a learner editing a big board would)
 });

@@ -110,7 +110,9 @@ const BoardFlowInner = forwardRef(function BoardFlowInner(props, ref) {
   const seen = useRef(null);
 
   // Sections are packed for display (never overlapping); a card is drawn at stored + its section offset.
-  const layout = useMemo(() => packSections(elements, topics, concepts), [elements, topics, concepts]);
+  // wide canvases (整个工作台) pack three sections per row so a whole course fits at a readable zoom
+  const [columns, setColumns] = useState(2);
+  const layout = useMemo(() => packSections(elements, topics, concepts, undefined, { columns }), [elements, topics, concepts, columns]);
   const layoutRef = useRef(layout); layoutRef.current = layout;
   const assignment = layout.assignment;
   const topicIndex = useMemo(() => new Map(topics.map((t, i) => [t.id, i])), [topics]);
@@ -316,6 +318,8 @@ const BoardFlowInner = forwardRef(function BoardFlowInner(props, ref) {
     onFit?.({ overflow: v.overflow, zoom: v.zoom });
   }, [rf, size.w, size.h, onFit]);
   fitRef.current = fit;
+  useEffect(() => { if (size.w && size.h) setColumns(size.w / size.h > 1.6 ? 3 : 2); }, [size.w, size.h]);
+  useEffect(() => { if (size.w && size.h && live.length) { const t = setTimeout(() => fitRef.current?.(), 30); return () => clearTimeout(t); } return undefined; }, [columns]); // eslint-disable-line react-hooks/exhaustive-deps
   const hasCards = live.length > 0;
   useEffect(() => { if (size.w && size.h && hasCards) fit(); }, [size.w, size.h, hasCards]); // eslint-disable-line react-hooks/exhaustive-deps
 
