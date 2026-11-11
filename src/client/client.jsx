@@ -1,0 +1,47 @@
+import React from 'react';
+import css from './workbench.css';
+import { Workbench } from './Workbench.jsx';
+import { TutorToolCard } from './ToolCard.jsx';
+
+export const name = 'dsh-oh-my-ai-tutor';
+export const inject = ['slots', 'sidebarRightTabs', 'sidebarRight', 'connection'];
+const KIND = 'tutor-workbench';
+const CARD_TOOLS = ['tutor_visualize', 'tutor_outline_edit', 'tutor_board_patch', 'tutor_board_read'];
+
+/** Browser half: right-sidebar "AI 学习工作台" tab + graphic tool cards in the conversation (dsh-whiteboard's mounting pattern). */
+export function apply(ctx) {
+  const style = document.createElement('style');
+  style.dataset.dshOhMyAiTutor = 'true';
+  style.textContent = css;
+  ctx.effect(() => { document.head.append(style); return () => style.remove(); });
+
+  const api = {
+    async call(method, payload) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(new Error('学习状态请求超时（10 秒）')), 10000);
+      try {
+        const result = await ctx.connection.rpc.call('/api', 'dsh-oh-my-ai-tutor', { method, payload }, controller.signal);
+        if (!result.ok) { const e = new Error(result.error.message); e.code = result.error.code; throw e; }
+        return result.value;
+      } finally { clearTimeout(timer); }
+    },
+  };
+  const openWorkbench = (view) => ctx.sidebarRight.openTab(KIND, { params: { view } });
+
+  function Body({ useTabInfo }) {
+    const info = useTabInfo();
+    const params = info.tab.navigation?.params ?? {};
+    return <Workbench api={api} visible={info.tab.visible !== false} initialView={params.view} navRevision={info.tab.navigation?.revision} />;
+  }
+  function Title() { return 'AI 学习工作台'; }
+  ctx.effect(() => ctx.sidebarRightTabs.register({
+    id: 'dsh-oh-my-ai-tutor', kind: KIND, priority: 'extension', keepMounted: true, title: () => 'AI 学习工作台',
+    guide: [{ id: 'tutor-workbench', order: 40, title: () => 'AI 学习工作台', description: () => '课程大纲、思维导图、知识图谱与白板，你和 AI 一起编辑' }],
+  }));
+  ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({ name: 'sidebar.right.pane.tab', key: KIND }, Body)));
+  ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({ name: 'sidebar.right.pane.tab.title', key: KIND }, Title)));
+  function Card(props) { return <TutorToolCard {...props} openWorkbench={openWorkbench} />; }
+  for (const tool of CARD_TOOLS) {
+    ctx.effect(() => ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({ name: 'tool.call.toolview', key: tool }, Card)));
+  }
+}

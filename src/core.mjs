@@ -198,15 +198,12 @@ function finiteNumber(value, field, min = -100_000, max = 100_000) {
 function boardOf(s, courseId) {
   return s.boards[courseId] ?? { courseId, revision: 0, elements: [] };
 }
-const CARD = { width: 196, height: 72 };
-/** Deterministic grouped layout: one column per syllabus topic, cards stacked by subtopic order. */
+const CARD = { width: 164, height: 66 };
+/** Deterministic seed layout (same grid as the workbench design): two columns in syllabus order. */
 export function boardLayoutFor(course, conceptId) {
-  const topics = course.syllabus.topics;
-  for (let ti = 0; ti < topics.length; ti++) {
-    const si = topics[ti].subtopics.findIndex((x) => x.conceptId === conceptId);
-    if (si >= 0) return { x: 40 + ti * 236, y: 40 + si * 104 };
-  }
-  return { x: 40, y: 40 };
+  const order = course.syllabus.topics.flatMap((t) => t.subtopics.map((x) => x.conceptId));
+  const i = Math.max(0, order.indexOf(conceptId));
+  return { x: 22 + (i % 2) * 216, y: 30 + Math.floor(i / 2) * 112 };
 }
 function boardPatch(s, course, board, operations, now, actor, maxOps = 100) {
   if (!Array.isArray(operations) || !operations.length || operations.length > maxOps) throw new Error(`operations must contain 1..${maxOps} items`);

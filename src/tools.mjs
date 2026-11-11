@@ -12,6 +12,10 @@ export const VIEWS = Object.freeze(['outline', 'mindmap', 'graph', 'board', 'whi
 const obj = { type: 'object', additionalProperties: true };
 const opsArray = { type: 'array', required: true, items: obj };
 
+const OP_LABEL = { addTopic: '加主题', renameTopic: '改主题名', moveTopic: '移动主题', removeTopic: '删主题', addSubtopic: '加知识点',
+  renameSubtopic: '改知识点名', moveSubtopic: '移动知识点', removeSubtopic: '删知识点', add: '添加', update: '修改', delete: '删除' };
+const summarize = (prefix, ops) => `${prefix}（${[...new Set((Array.isArray(ops) ? ops : []).map((o) => OP_LABEL[o?.op] ?? o?.op))].join('、')}）`;
+
 function parsePayload(text) {
   let payload;
   try { payload = JSON.parse(text); } catch { throw new Error('payload_json must be valid JSON'); }
@@ -72,7 +76,7 @@ export function toolSpecs(store) {
       async execute(args) {
         const payload = { courseId: requireCourseId(args), operations: args.operations };
         if (args.syllabusRevision !== undefined) payload.syllabusRevision = args.syllabusRevision;
-        const out = await store.mutate('course.editOutline', payload, undefined, { actor: 'ai' });
+        const out = await store.mutate('course.editOutline', payload, undefined, { actor: 'ai', summary: summarize('AI 编辑大纲/导图', args.operations) });
         const state = await store.read();
         return { revision: out.revision, applied: out.result.applied, outline: projectCourse(state, payload.courseId, 'outline') };
       },
@@ -103,8 +107,8 @@ export function toolSpecs(store) {
       async execute(args) {
         const courseId = requireCourseId(args);
         const out = args.seed === true
-          ? await store.mutate('board.seed', { courseId, baseRevision: args.baseRevision }, undefined, { actor: 'ai' })
-          : await store.mutate('board.patch', { courseId, baseRevision: args.baseRevision, operations: args.operations }, undefined, { actor: 'ai' });
+          ? await store.mutate('board.seed', { courseId, baseRevision: args.baseRevision }, undefined, { actor: 'ai', summary: 'AI 从大纲生成白板' })
+          : await store.mutate('board.patch', { courseId, baseRevision: args.baseRevision, operations: args.operations }, undefined, { actor: 'ai', summary: summarize('AI 编辑白板', args.operations) });
         const state = await store.read();
         return { ...out.result, board: liveBoard(state, state.courses[courseId]) };
       },

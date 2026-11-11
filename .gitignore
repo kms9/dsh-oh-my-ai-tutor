@@ -6,3 +6,5 @@ node_modules/
 learning/
 state.json
 *.tmp
+.e2e-out/
+lib/

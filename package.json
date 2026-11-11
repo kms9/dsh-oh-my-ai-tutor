@@ -8,16 +8,63 @@
     ".": "./src/index.mjs",
     "./core": "./src/core.mjs",
     "./projections": "./src/projections.mjs",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./client": "./lib/client.js"
   },
-  "files": ["src", "docs", "skills", "examples", "cordis.patch.yml", "README.md", "LICENSE"],
+  "files": [
+    "src",
+    "lib",
+    "docs",
+    "skills",
+    "examples",
+    "scripts",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "demo": "node scripts/demo.mjs"
+    "demo": "node scripts/demo.mjs",
+    "build": "node scripts/build.mjs",
+    "e2e": "node scripts/build.mjs && node test/e2e/workbench.e2e.mjs",
+    "workbench": "node scripts/workbench-server.mjs"
   },
-  "engines": { "node": ">=24.9.0" },
-  "peerDependencies": { "@deepseek-ai/dsh-tools": ">=0.2.1-0 <0.3.0-0" },
-  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
-  "keywords": ["dsh-plugin", "deepseek-harness", "ai-tutor", "learning", "knowledge-graph"],
-  "license": "MIT"
+  "engines": {
+    "node": ">=24.9.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": ">=0.2.1-0 <0.3.0-0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web",
+      "external": [
+        "react",
+        "react-dom"
+      ]
+    }
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "ai-tutor",
+    "learning",
+    "knowledge-graph"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
+    "esbuild": "0.25.12",
+    "playwright": "1.65.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  }
 }
