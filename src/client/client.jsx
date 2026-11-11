@@ -1,9 +1,9 @@
 import React from 'react';
 import workbenchCss from './workbench.css';
-import mindElixirCss from 'mind-elixir/style.css';
-import reactFlowCss from '@xyflow/react/dist/style.css';
-const css = `${mindElixirCss}\n${reactFlowCss}\n${workbenchCss}`;
+const css = workbenchCss;
 import { Workbench } from './Workbench.jsx';
+import { setChunkLoader } from './chunks.jsx';
+/* global __omtRequireAsync -- the host module loader's require.async, captured by the bundle banner (scripts/build.mjs) */
 import { TutorToolCard } from './ToolCard.jsx';
 
 export const name = 'dsh-oh-my-ai-tutor';
@@ -17,7 +17,18 @@ export function apply(ctx) {
   const style = document.createElement('style');
   style.dataset.dshOhMyAiTutor = 'true';
   style.textContent = css;
-  ctx.effect(() => { document.head.append(style); return () => style.remove(); });
+  ctx.effect(() => { document.head.append(style); return () => { style.remove(); document.querySelectorAll('style[data-dsh-oh-my-ai-tutor-chunk]').forEach((el) => el.remove()); }; });
+  // Heavy views are package-local chunks (lib/client.flow.js, lib/client.mindmap.js), loaded on first use.
+  // Their CSS goes in BEFORE the workbench styles so ours still win at equal specificity.
+  setChunkLoader(async (name) => {
+    if (typeof __omtRequireAsync !== 'function') throw new Error('host module loader has no require.async');
+    const mod = await __omtRequireAsync(`./client.${name}.js`);
+    if (mod.css && !document.querySelector(`style[data-dsh-oh-my-ai-tutor-chunk="${name}"]`)) {
+      const el = document.createElement('style'); el.dataset.dshOhMyAiTutorChunk = name; el.textContent = mod.css;
+      document.head.insertBefore(el, style.isConnected ? style : null);
+    }
+    return mod;
+  });
 
   const api = {
     async call(method, payload) {

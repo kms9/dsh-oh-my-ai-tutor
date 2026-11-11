@@ -1,9 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { GraphFlow, BoardFlow } from './flow.jsx';
+import { lazyComponent } from './chunks.jsx';
 import { arrangeOps } from '../board-layout.mjs';
-import { MindElixirMap } from './mindmap.jsx';
 import { markdownToHtml, MASTERY_LABEL, ACTION_LABEL, relTime } from './layout.mjs';
 
+// heavy views load on first use (DSH: package-local chunks lib/client.flow.js and lib/client.mindmap.js)
+const BoardFlow = lazyComponent('flow', 'BoardFlow');
+const GraphFlow = lazyComponent('flow', 'GraphFlow');
+const MindElixirMap = lazyComponent('mindmap', 'MindElixirMap');
 const ZOOM_TABS = ['mindmap', 'graph', 'board'];
 const TABS = [['outline', '课程大纲'], ['mindmap', '思维导图'], ['graph', '知识图谱'], ['board', '知识白板']];
 const PHASES = [['plan_pending', '01 · 课时计划'], ['teaching', '02 · 分段讲解'], ['review_pending', '03 · Review'], ['summary_pending', '04 · 笔记']];
@@ -491,24 +494,57 @@ function ZoomButtons({ zoom, setZoom, prefix, what }) {
   );
 }
 
+const GRAPH_HINT = '悬停或点击：高亮一跳邻居；双击主题：收起 / 展开它的知识点；双击知识点：展开它关系所在的主题；拖动节点时力导向会带动邻居（只改这次的摆放，不保存）。';
+const GRAPH_LAZY = 60; // same as LAZY_THRESHOLD in graph-flow.jsx: bigger courses start collapsed
 function GraphView({ view, topics, selected, onSelect, conceptById, relations, zoom, setZoom, fill, rootRef, wide }) {
   const c = conceptById.get(selected) ?? (view.nodes[0] && conceptById.get(view.nodes[0].id));
   const related = relations.filter((r) => r.from === c?.id || r.to === c?.id);
   const wrapRef = useRef(null);
   const flowRef = useRef(null);
   const [fitInfo, setFitInfo] = useState({ overflow: false });
+  const [layout, setLayout] = useState('force');
+  const [query, setQuery] = useState('');
+  const [pathMode, setPathMode] = useState(false);
+  const [pathInfo, setPathInfo] = useState(null);
+  const [collapsed, setCollapsed] = useState(() => (view.nodes.length > GRAPH_LAZY ? new Set(topics.map((t) => t.id)) : new Set()));
   const height = useFillHeight(wrapRef, rootRef, fill, 460, zoom === 'off' ? 150 : 0);
+  const hits = query.trim() ? view.nodes.filter((n) => n.label.toLowerCase().includes(query.trim().toLowerCase())).length
+    + topics.filter((t) => t.title.toLowerCase().includes(query.trim().toLowerCase())).length : 0;
+  const allCollapsed = topics.length > 0 && topics.every((t) => collapsed.has(t.id));
+  const findFirst = () => {
+    const q = query.trim().toLowerCase(); if (!q) return;
+    const n = view.nodes.find((x) => x.label.toLowerCase().includes(q));
+    if (n) { setCollapsed((s) => { const next = new Set(s); next.delete(n.topicId); return next; }); onSelect(n.id); setTimeout(() => flowRef.current?.centreOn(n.id), 80); }
+  };
   return (
     <div data-testid="graph-view">
-      <div className="title2"><span>语义知识图谱 <span className="small">{view.nodes.length} 个知识点 · {view.edges.length} 条候选关系</span></span>
+      <div className="title2"><span>语义知识图谱 <span className="small">{view.nodes.length} 个知识点 · {topics.length} 个主题 · {view.edges.length} 条候选关系</span></span>
         <span className="tools">
-          <button className="tbtn" onClick={() => flowRef.current?.fit()} data-testid="graph-fit" title="缩放到能看到全部知识点（不小于可读字号）">适配</button>
+          <button className="tbtn" onClick={() => flowRef.current?.fit()} data-testid="graph-fit" title="缩放到能看到全部节点（不小于可读字号）">适配</button>
           <ZoomButtons zoom={zoom} setZoom={setZoom} prefix="graph" what="图谱" />
         </span>
       </div>
-      {fitInfo.overflow && <div className="small rf-hint">图谱比画布大：拖动空白处或滚轮平移，Ctrl+滚轮缩放，或点「放大」。</div>}
+      <div className="tools rfbar kgbar" data-testid="graph-toolbar">
+        <input className="kgsearch" type="search" placeholder="搜索知识点 / 主题" value={query} data-testid="graph-search"
+          onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') findFirst(); if (e.key === 'Escape') setQuery(''); }} />
+        {query.trim() ? <span className="small" data-testid="graph-hits">{hits} 个匹配</span> : null}
+        <span className="seg" role="group" aria-label="布局">
+          <button className={`tbtn ${layout === 'force' ? 'on' : ''}`} data-testid="graph-layout-force" onClick={() => setLayout('force')} title="d3-force 力导向布局">力导向</button>
+          <button className={`tbtn ${layout === 'hierarchical' ? 'on' : ''}`} data-testid="graph-layout-hierarchical" onClick={() => setLayout('hierarchical')} title="dagre 层级布局（主题 → 知识点，左 → 右）">层级</button>
+        </span>
+        <button className="tbtn" data-testid="graph-collapse-all" onClick={() => setCollapsed(allCollapsed ? new Set() : new Set(topics.map((t) => t.id)))}>{allCollapsed ? '全部展开' : '全部收起'}</button>
+        <button className={`tbtn ${pathMode ? 'on' : ''}`} data-testid="graph-path" onClick={() => { setPathMode((v) => !v); setPathInfo(null); }} title="依次点两个节点，高亮它们之间的最短路径">{pathMode ? '路径：点两个节点' : '路径'}</button>
+      </div>
+      <div className="small rf-hint" data-testid="graph-status" title={GRAPH_HINT}>
+        {pathInfo?.path ? <span className="kgpath">最短路径（{pathInfo.path.edges.length} 步）：{pathInfo.labels.join(' → ')}</span>
+          : pathInfo?.ends?.length === 2 ? '这两个节点之间没有路径（中间的主题可能被收起，或确实没有关系）。'
+          : pathMode ? (pathInfo?.ends?.length === 1 ? '已选起点，再点终点。' : '先点起点，再点终点。')
+          : fitInfo.overflow ? '图谱比画布大：拖动空白处或滚轮平移，或点右上角「放大」。' : GRAPH_HINT}
+      </div>
       <div className="rfhost" ref={wrapRef}>
-        <GraphFlow ref={flowRef} nodes={view.nodes} edges={view.edges} topics={topics} selectedId={c?.id} onSelect={onSelect} height={height} minimap={wide} onFit={(f) => setFitInfo((x) => (x.overflow === f.overflow ? x : f))} />
+        <GraphFlow ref={flowRef} view={view} topics={topics} selectedId={selected} onSelect={onSelect} height={height} minimap={wide}
+          layout={layout} query={query} pathMode={pathMode} collapsed={collapsed} setCollapsed={setCollapsed} onPath={setPathInfo}
+          onFit={(f) => setFitInfo((x) => (x.overflow === f.overflow ? x : f))} />
       </div>
       {c && (
         <div className="card" data-testid="graph-detail">
@@ -517,7 +553,7 @@ function GraphView({ view, topics, selected, onSelect, conceptById, relations, z
           <p className="small">理解状态：{MASTERY_LABEL[c.mastery]}（{c.mastery}）。{related.length ? `相关候选关系：${related.map((r) => `${conceptById.get(r.from)?.title} —${r.type}→ ${conceptById.get(r.to)?.title}`).join('；')}。` : '暂无候选关系。'}这里只展示候选关系，不把图形箭头误认为已验证知识。</p>
         </div>
       )}
-      <p className="legend">按课程主题分区，颜色对应主题；虚线箭头为候选语义关系（关系类型和来源审查属于 Knowledge Graph 的领域层）。点知识点看详情，左栏目录同步高亮。</p>
+      <p className="legend">圆点颜色 = 课程主题（大圆是主题，小圆是知识点，外圈颜色是理解状态）；细线箭头 = 主题包含知识点（来自大纲）；<b style={{ color: '#9a6b16' }}>金色虚线箭头</b> = 候选语义关系，标签是关系类型。收起主题后，它的知识点的关系会接到主题圆上（×n 表示合并了几条）。</p>
     </div>
   );
 }

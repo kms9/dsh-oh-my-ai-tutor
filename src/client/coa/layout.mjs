@@ -1,0 +1,295 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Ported from aws/context-ontology-accelerator
+//   packages/web-app/src/components/graph/layout.ts @ d28c001cfcc0460cbd1ec1b356a63dcad272790e
+// Modifications (dsh-oh-my-ai-tutor, 2026-11-11): TypeScript → JavaScript (types removed, interfaces turned into
+// JSDoc typedefs); no behavioural change. Licensed under the Apache License, Version 2.0 (see THIRD_PARTY_NOTICES.md).
+
+/**
+ * Pure layout helpers for the ontology graph.
+ *
+ * A proposed ontology is a *schema graph*, not a tree: most edges are foreign
+ * keys with no natural "up", and real-world proposals split into several
+ * disconnected sub-schemas plus a long tail of classes with no relationships at
+ * all. A single hierarchical (dagre) pass puts every root of every component in
+ * rank 0, which renders as one screen-wide strip with the interesting structure
+ * squeezed underneath it.
+ *
+ * `layoutForceGraph` does what WebVOWL does instead: a force-directed layout per
+ * connected component (so each sub-schema becomes a compact cluster), then packs
+ * the components into a roughly landscape rectangle, largest first. Everything
+ * here is synchronous and deterministic so it can be unit-tested on positions.
+ */
+import {
+  forceCenter,
+  forceCollide,
+  forceLink,
+  forceManyBody,
+  forceSimulation,
+} from "d3-force";
+
+/** @typedef {{x: number, y: number}} Point */
+
+/** @typedef {{source: string, target: string}} LayoutEdge */
+
+/**
+ * @typedef {object} ForceLayoutOptions
+ * @property {number} [nodeSize] Rendered node diameter in px; drives collision radius and packing size.
+ * @property {number} [linkDistance] Preferred edge length in px.
+ * @property {number} [componentGap] Gap between packed components in px.
+ * @property {number} [aspect] Target width/height ratio of the packed result.
+ * @property {number} [iterations] Simulation ticks per component.
+ */
+
+const DEFAULTS = {
+  nodeSize: 80,
+  linkDistance: 330,
+  componentGap: 175,
+  aspect: 2.4,
+  iterations: 300,
+};
+
+/**
+ * A node is a "hub" that drives per-component spacing and label stagger when
+ * its degree reaches this threshold.
+ */
+export const HUB_DEGREE_THRESHOLD = 5;
+
+/**
+ * Upper clamp on the per-component spacing scale, so one 100-spoke hub does
+ * not blow its component out of the packed frame.
+ */
+export const COMPONENT_SCALE_MAX = 3.5;
+
+/**
+ * Per-component spacing scale: a subgraph with a popular hub gets more room
+ * than a 3-node side cluster. Shared by `layoutForceGraph` (static homes) and
+ * `useLiveForceSimulation` (live link distance), so the two never disagree
+ * about where a node wants to live.
+ */
+export function componentScale(maxDegree) {
+  const raw = Math.sqrt(Math.max(1, maxDegree / HUB_DEGREE_THRESHOLD));
+  return Math.min(raw, COMPONENT_SCALE_MAX);
+}
+
+/** Ids of nodes that appear in no edge (degree 0). */
+export function isolatedNodeIds(nodeIds, edges) {
+  const linked = new Set();
+  for (const e of edges) {
+    linked.add(e.source);
+    linked.add(e.target);
+  }
+  return new Set(nodeIds.filter((id) => !linked.has(id)));
+}
+
+/**
+ * Connected components (undirected), largest first; ties keep input order so
+ * the result is stable for a given input.
+ */
+export function connectedComponents(nodeIds, edges) {
+  const adjacency = new Map();
+  for (const id of nodeIds) adjacency.set(id, []);
+  for (const e of edges) {
+    // Edges to nodes not in the set (e.g. filtered out) are ignored.
+    if (!adjacency.has(e.source) || !adjacency.has(e.target)) continue;
+    adjacency.get(e.source)?.push(e.target);
+    adjacency.get(e.target)?.push(e.source);
+  }
+
+  const seen = new Set();
+  const components = [];
+  for (const start of nodeIds) {
+    if (seen.has(start)) continue;
+    const component = [];
+    const stack = [start];
+    seen.add(start);
+    while (stack.length) {
+      const id = stack.pop();
+      if (id === undefined) break;
+      component.push(id);
+      for (const next of adjacency.get(id) ?? []) {
+        if (!seen.has(next)) {
+          seen.add(next);
+          stack.push(next);
+        }
+      }
+    }
+    components.push(component);
+  }
+  return components.sort((a, b) => b.length - a.length);
+}
+
+
+/** Deterministic PRNG so the simulation's tie-break jitter is reproducible. */
+function seededRandom(seed) {
+  let state = seed >>> 0;
+  return () => {
+    // Park–Miller minimal standard LCG.
+    state = (state * 48271) % 2147483647;
+    return state / 2147483647;
+  };
+}
+
+/**
+ * Force-directed positions for one connected component, centred on (0, 0).
+ * Runs the simulation to completion synchronously.
+ */
+export function forceLayoutComponent(nodeIds, edges, opts = {}) {
+  const o = { ...DEFAULTS, ...opts };
+  const positions = new Map();
+  if (nodeIds.length === 0) return positions;
+  if (nodeIds.length === 1) {
+    positions.set(nodeIds[0], { x: 0, y: 0 });
+    return positions;
+  }
+
+  const ids = new Set(nodeIds);
+  const simNodes = nodeIds.map((id) => ({ id }));
+  const links = edges
+    .filter((e) => ids.has(e.source) && ids.has(e.target))
+    .map((e) => ({ source: e.source, target: e.target }));
+
+  const simulation = forceSimulation(simNodes)
+    .randomSource(seededRandom(nodeIds.length * 7919 + links.length))
+    .force(
+      "link",
+      forceLink(links)
+        .id((n) => n.id)
+        .distance(o.linkDistance)
+        .strength(0.7),
+    )
+    .force("charge", forceManyBody().strength(-o.linkDistance * 4.5))
+    .force("collide", forceCollide(o.nodeSize / 2 + 18).iterations(2))
+    .force("center", forceCenter(0, 0))
+    .stop();
+
+  simulation.tick(o.iterations);
+
+  for (const n of simNodes) {
+    positions.set(n.id, { x: n.x ?? 0, y: n.y ?? 0 });
+  }
+  return positions;
+}
+
+/** @typedef {{width: number, height: number}} Box */
+
+/**
+ * Pack boxes (given largest-first) into rows whose total width targets
+ * `aspect`. Within a row, boxes shorter than the row are stacked vertically in
+ * the same column while they fit, so small clusters fill the space beside a
+ * tall one instead of each taking a full-height slot. Returns the top-left
+ * offset of each box in input order.
+ *
+ * ponytail: this is shelf packing with column stacking; a skyline/MaxRects
+ * packer would tighten it further if graphs ever reach many hundreds of
+ * classes.
+ */
+export function packComponents(boxes, gap, aspect) {
+  if (boxes.length === 0) return [];
+  const totalArea = boxes.reduce(
+    (sum, b) => sum + (b.width + gap) * (b.height + gap),
+    0,
+  );
+  const widest = Math.max(...boxes.map((b) => b.width));
+  const targetWidth = Math.max(widest, Math.sqrt(totalArea * aspect));
+
+  const offsets = new Array(boxes.length);
+  let x = 0; // left edge of the current column
+  let y = 0; // top of the current row
+  let rowHeight = 0; // set by the first (tallest) box in the row
+  let colWidth = 0; // widest box in the current column
+  let colY = 0; // next free y inside the current column
+
+  boxes.forEach((box, i) => {
+    const fitsInColumn = colWidth > 0 && colY + box.height <= rowHeight;
+    if (fitsInColumn) {
+      offsets[i] = { x, y: y + colY };
+      colY += box.height + gap;
+      colWidth = Math.max(colWidth, box.width);
+      return;
+    }
+    // Start a new column; wrap to a new row if it would overflow the target.
+    if (colWidth > 0) x += colWidth + gap;
+    if (x > 0 && x + box.width > targetWidth) {
+      x = 0;
+      y += rowHeight + gap;
+      rowHeight = 0;
+    }
+    if (rowHeight === 0) rowHeight = box.height;
+    offsets[i] = { x, y };
+    colWidth = box.width;
+    colY = box.height + gap;
+  });
+  return offsets;
+}
+
+/**
+ * Lay out the whole graph: force layout per connected component, then pack the
+ * components. Returns a top-left position (React Flow convention) per node id.
+ */
+export function layoutForceGraph(nodeIds, edges, opts = {}) {
+  const o = { ...DEFAULTS, ...opts };
+  const components = connectedComponents(nodeIds, edges);
+
+  // Lay out each component around its own origin and measure its bounding box.
+  // Spacing scales *per component* with that component's own maxDegree, so a
+  // 24-spoke hub cluster blooms while a 3-node side cluster stays compact.
+  // Sqrt scaling matches the exact knob OntologyGraphFlow uses when it chose
+  // to drive this at the global level, but applied one component at a time.
+  const laidOut = components.map((ids) => {
+    const idSet = new Set(ids);
+    const degree = new Map();
+    for (const e of edges) {
+      if (!idSet.has(e.source) || !idSet.has(e.target)) continue;
+      degree.set(e.source, (degree.get(e.source) ?? 0) + 1);
+      degree.set(e.target, (degree.get(e.target) ?? 0) + 1);
+    }
+    let compMaxDeg = 0;
+    for (const d of degree.values()) if (d > compMaxDeg) compMaxDeg = d;
+    const scale = componentScale(compMaxDeg);
+    const positions = forceLayoutComponent(ids, edges, {
+      ...o,
+      linkDistance: o.linkDistance * scale,
+    });
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const p of positions.values()) {
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x);
+      maxY = Math.max(maxY, p.y);
+    }
+    return {
+      positions,
+      minX,
+      minY,
+      box: {
+        width: maxX - minX + o.nodeSize,
+        height: maxY - minY + o.nodeSize,
+      },
+    };
+  });
+
+  const offsets = packComponents(
+    laidOut.map((c) => c.box),
+    o.componentGap,
+    o.aspect,
+  );
+
+  const result = new Map();
+  laidOut.forEach((component, i) => {
+    const offset = offsets[i];
+    for (const [id, p] of component.positions) {
+      // Shift so the component's top-left node sits at the packed offset, and
+      // convert the node centre to React Flow's top-left anchor.
+      result.set(id, {
+        x: p.x - component.minX + offset.x,
+        y: p.y - component.minY + offset.y,
+      });
+    }
+  });
+  return result;
+}

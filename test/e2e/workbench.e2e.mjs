@@ -79,31 +79,145 @@ await step('initial render reads the real state (no hard-coded ZPD lesson)', asy
   await page.screenshot({ path: join(shots, '01-initial-graph.png') });
 });
 
-await step('graph (React Flow): 15 knowledge points in topic clusters, candidate relation dashed, click selects, enlarge shows all', async () => {
+const G = '[data-testid=graph-flow]';
+const kgNode = (id, p = page) => p.locator(`${G} .kg-node[data-node-id="${id}"]`);
+const kgBox = (id) => page.evaluate((id) => { const r = document.querySelector(`[data-testid=graph-flow] .kg-node[data-node-id="${id}"]`)?.getBoundingClientRect(); return r ? { x: r.x + r.width / 2, y: r.y + r.height / 2 } : null; }, id);
+const kgBoxes = () => page.evaluate(() => [...document.querySelectorAll('[data-testid=graph-flow] .kg-node')].map((n) => { const r = n.getBoundingClientRect(); return { id: n.dataset.nodeId, x: r.x, y: r.y, w: r.width, h: r.height }; }));
+/** the live d3-force simulation flies in and settles; wait until no node moves for a few frames */
+const graphStill = async () => {
+  let last = '';
+  for (let i = 0; i < 40; i++) {
+    const now = JSON.stringify((await kgBoxes()).map((b) => [Math.round(b.x), Math.round(b.y)]));
+    if (now === last) return; last = now; await page.waitForTimeout(250);
+  }
+  throw new Error('graph never settled');
+};
+const awayFromGraph = async () => { const c = await page.locator(G).boundingBox(); await page.mouse.move(c.x + 4, c.y + c.height - 4); };
+const overlapCount = (bx, pad = 2) => bx.flatMap((p, i) => bx.slice(i + 1).filter((q) => p.x < q.x + q.w - pad && q.x < p.x + p.w - pad && p.y < q.y + q.h - pad && q.y < p.y + p.h - pad)).length;
+
+await step('graph (React Flow, after AWS OntologyGraphFlow): circles per topic colour, directed labelled relation, force layout settles', async () => {
   await tab('graph');
-  await page.waitForSelector('[data-testid=graph-flow] .rf-kp');
-  assert.equal(await page.locator('[data-testid=graph-flow] .rf-kp').count(), 15);
-  assert.equal(await page.locator('[data-testid=graph-flow] .rf-cluster').count(), (await topics()).length);
-  const edge = page.locator('[data-testid=graph-flow] .react-flow__edge');
-  assert.equal(await edge.count(), 1);
-  assert.match(await edge.locator('path').first().getAttribute('style'), /stroke-dasharray/, 'candidate relation is dashed');
-  assert.match(await page.textContent('[data-testid=graph-flow] .react-flow__edge-text'), /前置 · 候选/);
-  assert.ok(Number(await page.getAttribute('[data-testid=graph-flow]', 'data-scale')) >= 0.8, 'readable zoom');
-  // click a knowledge point: the detail card follows
-  const n = page.locator('[data-testid=graph-flow] .rf-kp').nth(3);
-  const title = (await n.locator('.rf-title').textContent()).trim();
-  await n.click();
-  await eventually(async () => assert.match(await page.textContent('[data-testid=graph-detail] b'), new RegExp(title.replace(/[()（）+|?.*\[\]]/g, '.'))));
+  await page.waitForSelector(`${G} .kg-concept`);
+  assert.equal(await page.getAttribute(G, 'data-layout'), 'force');
+  assert.equal(await page.locator(`${G} .kg-concept`).count(), 15);
+  assert.equal(await page.locator(`${G} .kg-topic`).count(), (await topics()).length);
+  const colours = await page.evaluate(() => new Set([...document.querySelectorAll('[data-testid=graph-flow] .kg-topic')].map((n) => n.style.getPropertyValue('--c'))).size);
+  assert.equal(colours, (await topics()).length, 'one colour per topic (category)');
+  const rel = page.locator(`${G} .react-flow__edge.kg-rel`);
+  assert.equal(await rel.count(), 1);
+  assert.match(await rel.locator('path').first().getAttribute('style'), /stroke-dasharray/, 'candidate relation is dashed');
+  assert.match(await rel.locator('path').first().getAttribute('marker-end') ?? '', /url\(/, 'directed (arrow head)');
+  assert.match(await page.textContent(`${G} .kg-elabel`), /前置 · 候选/);
+  assert.equal(await page.locator(`${G} .react-flow__edge.kg-contains`).count(), 15);
+  assert.ok(await page.locator(`${G} [data-testid=graph-legend]`).count() === 1, 'legend');
+  await graphStill();
+  assert.ok(Number(await page.getAttribute(G, 'data-scale')) >= 0.8, 'readable zoom');
+  assert.equal(overlapCount(await kgBoxes()), 0, 'no two circles overlap after the force layout');
+  assert.equal(await page.locator(`${G} .kg-node.dim`).count(), 0, 'nothing dimmed before any hover / click');
+});
+
+await step('graph: hover and click highlight the one-hop neighbourhood; click selects (detail card)', async () => {
+  const st = await readState(); const r0 = Object.values(st.relations)[0];
+  await kgNode(r0.from).hover();
+  await eventually(async () => assert.equal(await page.getAttribute(G, 'data-mode'), 'hover'));
+  assert.equal(await page.locator(`${G} .kg-node[data-node-id="${r0.to}"].dim`).count(), 0, 'related knowledge point lit');
+  assert.ok(await page.locator(`${G} .kg-node.dim`).count() >= 10, 'others dimmed');
+  await awayFromGraph();
+  await eventually(async () => assert.equal(await page.getAttribute(G, 'data-mode'), ''));
+  await kgNode(r0.from).click();
+  await awayFromGraph();
+  await eventually(async () => assert.match(await page.textContent('[data-testid=graph-detail] b'), new RegExp(st.concepts[r0.from].title.replace(/[()（）+|?.*\[\]]/g, '.'))));
+  await eventually(async () => assert.equal(await page.getAttribute(G, 'data-mode'), 'focus'));
+  assert.equal(await page.locator(`${G} .kg-node.sel`).count(), 1);
+  assert.equal(await page.locator(`${G} .kg-node[data-node-id="${r0.to}"].dim`).count(), 0);
+  assert.equal(await page.locator(`${G} .react-flow__edge.kg-rel.hot`).count(), 1, 'its relation lit');
   await page.screenshot({ path: join(shots, '01b-graph-right-column.png') });
-  // enlarge to the whole workbench: every node inside the canvas
+});
+
+await step('graph: search highlights matches; double-click a topic collapses it (React Flow hidden), relations re-attach; expand again', async () => {
+  await page.fill('[data-testid=graph-search]', '间隔');
+  await eventually(async () => assert.match(await page.textContent('[data-testid=graph-hits]'), /^\d+ 个匹配/));
+  const hits = Number((await page.textContent('[data-testid=graph-hits]')).match(/\d+/)[0]);
+  assert.ok(hits >= 2);
+  assert.equal(await page.getAttribute(G, 'data-mode'), 'search');
+  assert.equal(await page.locator(`${G} .kg-node.hit`).count(), hits);
+  await page.fill('[data-testid=graph-search]', '');
+  await eventually(async () => assert.notEqual(await page.getAttribute(G, 'data-mode'), 'search'));
+  const st = await readState(); const r0 = Object.values(st.relations)[0];
+  const tid = st.concepts[r0.from].topicId;
+  const inTopic = Object.values(st.concepts).filter((c) => c.topicId === tid).length;
+  await kgNode(`topic:${tid}`).dblclick();
+  await eventually(async () => assert.equal(await page.locator(`${G} .kg-concept`).count(), 15 - inTopic));
+  assert.equal(await kgNode(`topic:${tid}`).getAttribute('data-collapsed'), 'true');
+  assert.equal((await kgNode(`topic:${tid}`).locator('.kg-badge').textContent()).trim(), `+${inTopic}`);
+  await eventually(async () => assert.equal(await page.locator(`${G} .react-flow__edge.kg-rel.agg`).count(), 1, 'the relation now starts at the collapsed topic'));
+  await awayFromGraph(); await graphStill();
+  await page.screenshot({ path: join(shots, '01d-graph-collapsed.png') });
+  // double-click the relation's target: lazily reveals the collapsed topic its relation comes from
+  await kgNode(r0.to).dblclick();
+  await eventually(async () => assert.equal(await page.locator(`${G} .kg-concept`).count(), 15));
+  await page.click('[data-testid=graph-collapse-all]');
+  await eventually(async () => assert.equal(await page.locator(`${G} .kg-concept`).count(), 0));
+  await page.click('[data-testid=graph-collapse-all]');
+  await eventually(async () => assert.equal(await page.locator(`${G} .kg-concept`).count(), 15));
+  await awayFromGraph(); await graphStill();
+});
+
+await step('graph: path between two nodes is highlighted; dagre (层级) ↔ force layout switch', async () => {
+  const st = await readState(); const r0 = Object.values(st.relations)[0];
+  const sib = Object.values(st.concepts).find((c) => c.topicId === st.concepts[r0.from].topicId && c.id !== r0.from);
+  await page.click('[data-testid=graph-path]');
+  await kgNode(sib.id).click();
+  await kgNode(r0.to).click();
+  await awayFromGraph();
+  await eventually(async () => assert.match(await page.textContent('[data-testid=graph-status]'), /最短路径（\d+ 步）/));
+  assert.equal(await page.getAttribute(G, 'data-mode'), 'path');
+  assert.equal(await page.locator(`${G} .kg-node.end`).count(), 2);
+  assert.ok(await page.locator(`${G} .react-flow__edge.hot`).count() >= 2, 'path edges lit');
+  await page.screenshot({ path: join(shots, '01e-graph-path.png') });
+  await page.click('[data-testid=graph-path]');
+  await page.click('[data-testid=graph-layout-hierarchical]');
+  await eventually(async () => assert.equal(await page.getAttribute(G, 'data-layout'), 'hierarchical'));
+  await eventually(async () => {
+    const bx = await kgBoxes();
+    assert.equal(overlapCount(bx), 0, 'dagre: no overlap');
+    const t = bx.find((b) => b.id.startsWith('topic:')), c = bx.find((b) => !b.id.startsWith('topic:'));
+    assert.ok(c.x > t.x, 'left → right layers');
+  });
+  await page.screenshot({ path: join(shots, '01f-graph-dagre.png') });
+  await page.click('[data-testid=graph-layout-force]');
+  await eventually(async () => assert.equal(await page.getAttribute(G, 'data-layout'), 'force'));
+  await graphStill();
+});
+
+await step('graph: dragging a node runs the live d3-force simulation (fx/fy pin, neighbours follow) and writes nothing', async () => {
+  const st = await readState(); const rev = st.revision;
+  const t = (await topics())[1]; const tid = `topic:${t.id}`;
+  const kid = Object.values(st.concepts).find((c) => c.topicId === t.id).id;
+  const a = await kgBox(tid), k0 = await kgBox(kid);
+  await page.mouse.move(a.x, a.y); await page.mouse.down();
+  for (let i = 1; i <= 14; i++) { await page.mouse.move(a.x + (90 * i) / 14, a.y + (60 * i) / 14); await page.waitForTimeout(16); }
+  await page.waitForTimeout(400);
+  const mid = await kgBox(tid), kmid = await kgBox(kid);
+  assert.ok(Math.hypot(mid.x - a.x - 90, mid.y - a.y - 60) < 20, 'dragged node pinned under the pointer');
+  assert.ok(Math.hypot(kmid.x - k0.x, kmid.y - k0.y) > 8, 'a contained knowledge point followed while dragging');
+  await page.mouse.up();
+  await awayFromGraph(); await graphStill();
+  const a1 = await kgBox(tid);
+  assert.ok(Math.hypot(a1.x - a.x - 90, a1.y - a.y - 60) < 40, 'released node keeps (about) its new place');
+  assert.equal((await readState()).revision, rev, 'view-only: no write');
+});
+
+await step('graph: enlarge to the whole workbench shows every node', async () => {
   await page.click('[data-testid=graph-zoom]');
   await page.waitForSelector('[data-testid=tutor-workbench][data-mm-zoom=wide]');
   await page.click('[data-testid=graph-zoom-full]');
   await page.waitForSelector('[data-testid=tutor-workbench][data-mm-zoom=full]');
+  await page.click('[data-testid=graph-fit]');
   await eventually(async () => {
     const r = await page.evaluate(() => {
       const c = document.querySelector('[data-testid=graph-flow]').getBoundingClientRect();
-      const ns = [...document.querySelectorAll('[data-testid=graph-flow] .rf-kp')].map((x) => x.getBoundingClientRect());
+      const ns = [...document.querySelectorAll('[data-testid=graph-flow] .kg-node')].map((x) => x.getBoundingClientRect());
       return { clipped: ns.filter((x) => x.left < c.left - 1 || x.right > c.right + 1 || x.top < c.top - 1 || x.bottom > c.bottom + 1).length, w: c.width };
     });
     assert.ok(r.w > 1100, `whole workbench (${r.w}px)`);
@@ -573,6 +687,21 @@ await step('board: AI edits via tutor_board_read/patch refresh the board live, h
   assert.equal(await page.getAttribute('[data-testid=board]', 'data-revision'), String(r.revision));
   console.log(`     AI note on screen ${ms} ms after the write`);
   await page.screenshot({ path: join(shots, '08-board-after-ai.png') });
+});
+
+await step('graph: an AI relation.propose shows up live as a new directed, labelled candidate edge', async () => {
+  await tab('graph');
+  await page.waitForSelector(`${G} .kg-concept`);
+  const n0 = await page.locator(`${G} .react-flow__edge.kg-rel`).count();
+  const st = await readState(); const cs = Object.values(st.concepts).filter((c) => c.courseId === cid && c.status !== 'archived');
+  const has = (a, b) => Object.values(st.relations).some((r) => (r.from === a.id && r.to === b.id) || (r.from === b.id && r.to === a.id));
+  let pair; for (const a of cs) { for (const b of cs) if (a.id !== b.id && a.topicId !== b.topicId && !has(a, b)) { pair = [a, b]; break; } if (pair) break; }
+  await tools.tutor_write.execute({ action: 'relation.propose', payload_json: JSON.stringify({ from: pair[0].id, to: pair[1].id, type: 'relatedTo', note: 'e2e AI' }) });
+  const t0 = Date.now();
+  await eventually(async () => assert.equal(await page.locator(`${G} .react-flow__edge.kg-rel`).count(), n0 + 1));
+  console.log(`     AI relation on the graph ${Date.now() - t0} ms after the write`);
+  await page.screenshot({ path: join(shots, '08c-graph-after-ai.png') });
+  await tab('board');
 });
 
 await step('CAS: a stale learner drag is rejected, the board reloads and says so (no overwrite)', async () => {

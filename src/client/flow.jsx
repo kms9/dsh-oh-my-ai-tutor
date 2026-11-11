@@ -1,7 +1,7 @@
 import React, { createContext, forwardRef, useCallback, useContext, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { ReactFlow, ReactFlowProvider, Background, BackgroundVariant, MiniMap, Handle, Position, MarkerType, ConnectionMode, applyNodeChanges, useReactFlow } from '@xyflow/react';
 import { sectionFrames, assignTopics } from '../board-layout.mjs';
-import { edgeSides, bestGraphLayout, fitViewport, unionBounds, RELATION_LABEL } from './flow-layout.mjs';
+import { edgeSides, fitViewport, unionBounds, RELATION_LABEL } from './flow-layout.mjs';
 import { MASTERY_LABEL, safeColor } from './layout.mjs';
 
 export const TOPIC_COLORS = ['#6273dd', '#3f9d8f', '#d0883a', '#b0569a', '#5b8ed6', '#7d8a3c', '#c0564b', '#4e6a8a'];
@@ -312,75 +312,4 @@ const BoardFlowInner = forwardRef(function BoardFlowInner(props, ref) {
 
 export const BoardFlow = forwardRef(function BoardFlow(props, ref) {
   return <ReactFlowProvider><BoardFlowInner {...props} ref={ref} /></ReactFlowProvider>;
-});
-
-/* ----------------------------------------------------------------- knowledge graph ------------------------------ */
-
-function GraphNode({ data, selected }) {
-  const n = data.n;
-  return (
-    <div className={`rf-kp ${selected || data.sel ? 'sel' : ''} ${n.mastery ?? ''}`} style={{ '--accent': data.color }} data-node-id={n.id} title={`${n.label} · ${MASTERY_LABEL[n.mastery] ?? ''}`}>
-      <SideHandles connectable={false} />
-      <div className="rf-title">{n.label}</div>
-      <span className={`rf-mastery ${n.mastery ?? ''}`}><i />{MASTERY_LABEL[n.mastery] ?? '未验证'}</span>
-    </div>
-  );
-}
-function ClusterNode({ data }) {
-  return <div className="rf-section rf-cluster" style={{ '--accent': data.color }} data-cluster={data.id}><div className="rf-section-title"><span>{data.title}</span><em>{data.count}</em></div></div>;
-}
-const graphNodeTypes = { kp: GraphNode, cluster: ClusterNode };
-
-/** Read-only semantic graph on React Flow: topic clusters, candidate relations dashed, click selects a knowledge point. */
-const GraphFlowInner = forwardRef(function GraphFlowInner({ nodes: kps, edges: rels, topics, selectedId, onSelect, height, minimap = false, onFit }, ref) {
-  const rf = useReactFlow();
-  const wrapRef = useRef(null);
-  const [size, setSize] = useState({ w: 0, h: 0 });
-  useEffect(() => {
-    const el = wrapRef.current; if (!el || typeof ResizeObserver === 'undefined') return undefined;
-    const ro = new ResizeObserver(([en]) => setSize({ w: Math.round(en.contentRect.width), h: Math.round(en.contentRect.height) }));
-    ro.observe(el); return () => ro.disconnect();
-  }, []);
-  // re-pick the arrangement only when the canvas changes noticeably (not on every pixel of a resize)
-  const bucket = `${Math.round(size.w / 60)}x${Math.round(size.h / 60)}`;
-  const layout = useMemo(() => bestGraphLayout(kps, rels, topics, size.w, size.h), [kps, rels, topics, bucket]); // eslint-disable-line react-hooks/exhaustive-deps
-  const columns = `${layout.columns}x${layout.inner}`;
-  const tIndex = useMemo(() => new Map(topics.map((t, i) => [t.id, i])), [topics]);
-  const nodes = useMemo(() => [
-    ...layout.clusters.map((c) => ({ id: `cluster:${c.id}`, type: 'cluster', position: { x: c.x, y: c.y }, width: c.width, height: c.height,
-      data: { id: c.id, title: c.title, count: c.count, color: c.index >= 0 ? colorAt(c.index) : FREE }, draggable: false, selectable: false, focusable: false, zIndex: 0, style: { pointerEvents: 'none' } })),
-    ...kps.map((n) => { const p = layout.positions.get(n.id); return { id: n.id, type: 'kp', position: { x: p.x, y: p.y }, width: p.width, height: p.height,
-      data: { n, sel: n.id === selectedId, color: tIndex.has(n.topicId) ? colorAt(tIndex.get(n.topicId)) : FREE }, draggable: false, zIndex: 2 }; }),
-  ], [layout, kps, selectedId, tIndex]);
-  const edges = useMemo(() => rels.filter((e) => layout.positions.has(e.from) && layout.positions.has(e.to)).map((e) => {
-    const [sh, th] = edgeSides(layout.positions.get(e.from), layout.positions.get(e.to));
-    const candidate = e.status === 'candidate';
-    return { id: e.id, source: e.from, target: e.to, sourceHandle: sh, targetHandle: th, type: 'default', zIndex: 1, selectable: false,
-      label: `${RELATION_LABEL[e.type] ?? e.type}${candidate ? ' · 候选' : ''}`, data: { edgeId: e.id }, className: 'rf-rel',
-      style: { stroke: RELATION_EDGE, strokeWidth: 2, strokeDasharray: candidate ? '6 4' : undefined },
-      markerEnd: { type: MarkerType.ArrowClosed, color: RELATION_EDGE, width: 18, height: 18 },
-      labelStyle: { fontSize: 12, fill: '#6a4f12', fontWeight: 600 }, labelBgStyle: { fill: '#fff8e6', fillOpacity: 0.95 }, labelBgPadding: [5, 3], labelBgBorderRadius: 5 };
-  }), [rels, layout]);
-  const [fitState, setFitState] = useState({ overflow: false, zoom: 1 });
-  const fit = useCallback(() => {
-    const v = fitViewport(unionBounds(layout.clusters), size.w, size.h, { minZoom: MIN_READABLE_ZOOM });
-    rf.setViewport({ x: v.x, y: v.y, zoom: v.zoom });
-    setFitState({ overflow: v.overflow, zoom: v.zoom });
-    onFit?.({ overflow: v.overflow, zoom: v.zoom });
-  }, [rf, layout, size.w, size.h, onFit]);
-  useEffect(() => { if (size.w && size.h) fit(); }, [size.w, size.h, layout.clusters.length, columns]); // eslint-disable-line react-hooks/exhaustive-deps
-  useImperativeHandle(ref, () => ({ fit, zoomBy(f) { const v = rf.getViewport(); rf.setViewport({ ...v, zoom: Math.min(1.8, Math.max(0.3, v.zoom * f)) }, { duration: 120 }); } }), [fit, rf]);
-  return (
-    <div className="rf-wrap rf-graph" ref={wrapRef} style={{ height }} data-testid="graph-flow" data-scale={fitState.zoom.toFixed(2)} data-overflow={String(fitState.overflow)} data-layout={columns}>
-      <ReactFlow nodes={nodes} edges={edges} nodeTypes={graphNodeTypes} onNodeClick={(_e, n) => n.type === 'kp' && onSelect?.(n.id)}
-        connectionMode={ConnectionMode.Loose} nodesDraggable={false} nodesConnectable={false} elementsSelectable={false} deleteKeyCode={null} disableKeyboardA11y zoomOnDoubleClick={false}
-        panOnScroll zoomOnScroll={false} zoomOnPinch minZoom={0.3} maxZoom={1.8} proOptions={{ hideAttribution: false }} defaultViewport={{ x: 0, y: 0, zoom: 1 }}>
-        <Background variant={BackgroundVariant.Dots} gap={19} size={1.4} color="#dbe1ee" />
-        {minimap && <MiniMap pannable zoomable nodeColor={(n) => (n.type === 'cluster' ? `${n.data.color}22` : n.data?.color ?? '#9aa6c4')} nodeStrokeWidth={0} maskColor="rgba(240,243,250,.7)" style={{ width: 168, height: 110 }} />}
-      </ReactFlow>
-    </div>
-  );
-});
-export const GraphFlow = forwardRef(function GraphFlow(props, ref) {
-  return <ReactFlowProvider><GraphFlowInner {...props} ref={ref} /></ReactFlowProvider>;
 });

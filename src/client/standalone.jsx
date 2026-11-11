@@ -1,10 +1,13 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import workbenchCss from './workbench.css';
-import mindElixirCss from 'mind-elixir/style.css';
-import reactFlowCss from '@xyflow/react/dist/style.css';
-const css = `${mindElixirCss}\n${reactFlowCss}\n${workbenchCss}`;
+import * as flowChunk from './chunk-flow.jsx';
+import * as mindmapChunk from './chunk-mindmap.jsx';
+import { setChunkLoader } from './chunks.jsx';
+const css = `${mindmapChunk.css}\n${flowChunk.css}\n${workbenchCss}`;
 import { Workbench } from './Workbench.jsx';
+// The harness bundles the view chunks statically (DSH loads them on demand from lib/client.<name>.js).
+setChunkLoader((name) => ({ flow: flowChunk, mindmap: mindmapChunk })[name]);
 import { TutorToolCard } from './ToolCard.jsx';
 
 /** Standalone harness (same component, same RPC envelope) for e2e tests and design comparison outside DSH. */
