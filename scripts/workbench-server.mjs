@@ -14,7 +14,7 @@ if (!statePath) { console.error('--state is required'); process.exit(2); }
 const port = Number(arg('--port', 4180));
 const handler = createRpcHandler(new JsonTutorStore(statePath));
 const page = `<!doctype html><html lang="zh-CN"><head><link rel="icon" href="data:,"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>oh-my-ai-tutor · 学习工作台</title></head><body><div id="root"></div><script src="/standalone.js"></script></body></html>`;
-createServer(async (req, res) => {
+const server = createServer(async (req, res) => {
   try {
     if (req.method === 'POST' && req.url === `/api/${ENDPOINT}`) {
       const chunks = []; for await (const c of req) chunks.push(c);
@@ -26,4 +26,5 @@ createServer(async (req, res) => {
     if (req.url === '/' || req.url.startsWith('/?')) { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end(page); return; }
     res.writeHead(404); res.end('not found');
   } catch (e) { res.writeHead(500); res.end(String(e?.message ?? e)); }
-}).listen(port, '127.0.0.1', () => console.log(`workbench harness http://127.0.0.1:${port}/ state=${statePath}`));
+});
+server.listen(port, '127.0.0.1', () => console.log(`workbench harness http://127.0.0.1:${server.address().port}/ state=${statePath}`));

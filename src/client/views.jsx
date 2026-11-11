@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { mindmapLayout, graphLayout, wrapLabel, rectExit, edgeRoute, boardBounds, MASTERY_LABEL } from './layout.mjs';
+import { mindmapLayout, graphLayout, wrapLabel, rectExit, edgeRoute, boardBounds, MASTERY_LABEL, safeColor } from './layout.mjs';
 
 export const TOPIC_COLORS = ['#6273dd', '#3f9d8f', '#d0883a', '#b0569a', '#5b8ed6', '#7d8a3c', '#c0564b', '#4e6a8a'];
 const MASTERY_STROKE = { unverified: '#bbc6df', developing: '#e3a63b', demonstrated: '#47a36a' };
@@ -125,12 +125,14 @@ export function GraphSvg({ nodes, edges, topicOrder = [], selectedId, onSelect, 
 }
 
 /** Course board. Editable: drag to move, click to select, link mode (click source then target), double-click note to edit. */
-export function BoardCanvas({ elements, editable = false, selectedId, onSelect, onMove, linkMode = false, onLink, onEditNote, scale = 1, height, testId = 'board' }) {
+export function BoardCanvas({ elements, editable = false, selectedId, onSelect, onMove, linkMode = false, onLink, onEditNote, scale = 1, height, testId = 'board', revision }) {
   const [local, setLocal] = useState({});
   const [linkFrom, setLinkFrom] = useState(null);
-  const [editing, setEditing] = useState(null);
+  const [editing, setEditing] = useState(null); // { id, draft, rev }
   const dragRef = useRef(null);
-  useEffect(() => { setLocal({}); }, [elements]);
+  const linkRev = useRef(revision);
+  // A poll that brings new elements must not yank the card under the pointer back: keep the dragged card's local position.
+  useEffect(() => { setLocal((s) => { const d = dragRef.current; return d && s[d.id] ? { [d.id]: s[d.id] } : {}; }); }, [elements]);
   useEffect(() => { if (!linkMode) setLinkFrom(null); }, [linkMode]);
   const cards = elements.filter((e) => e.type !== 'arrow').map((e) => (local[e.id] ? { ...e, ...local[e.id] } : e));
   const byId = new Map(cards.map((c) => [c.id, c]));
@@ -142,7 +144,7 @@ export function BoardCanvas({ elements, editable = false, selectedId, onSelect, 
     e.stopPropagation();
     if (linkMode) return;
     e.currentTarget.setPointerCapture?.(e.pointerId);
-    dragRef.current = { id: c.id, sx: e.clientX, sy: e.clientY, ox: c.x, oy: c.y, moved: false };
+    dragRef.current = { id: c.id, sx: e.clientX, sy: e.clientY, ox: c.x, oy: c.y, moved: false, rev: revision };
   }
   function move(e, c) {
     const d = dragRef.current;
@@ -157,11 +159,11 @@ export function BoardCanvas({ elements, editable = false, selectedId, onSelect, 
     dragRef.current = null;
     if (linkMode && editable) {
       e.stopPropagation();
-      if (!linkFrom) { setLinkFrom(c.id); return; }
-      if (linkFrom !== c.id) onLink?.(linkFrom, c.id);
+      if (!linkFrom) { setLinkFrom(c.id); linkRev.current = revision; return; }
+      if (linkFrom !== c.id) onLink?.(linkFrom, c.id, linkRev.current);
       setLinkFrom(null); return;
     }
-    if (d && d.moved) { onMove?.(c.id, d.x, d.y); return; }
+    if (d && d.moved) { onMove?.(c.id, d.x, d.y, d.rev); return; }
     onSelect?.(c.id);
   }
   return (
@@ -186,15 +188,22 @@ export function BoardCanvas({ elements, editable = false, selectedId, onSelect, 
           {cards.map((c) => (
             <div key={c.id} data-element={c.id} data-type={c.type} data-concept={c.conceptId ?? ''}
               className={`boardnode${c.type === 'note' ? ' note' : ''}${selectedId === c.id ? ' sel' : ''}${linkFrom === c.id ? ' linksrc' : ''}${c.stale ? ' stale' : ''}${c.mastery && c.mastery !== 'unverified' ? ' ' + c.mastery : ''}`}
-              style={{ left: c.x, top: c.y, width: c.width, height: c.height, background: c.color || undefined }}
+              style={{ left: c.x, top: c.y, width: c.width, height: c.height, background: safeColor(c.color) }}
               title={c.type === 'concept' ? `${c.text} · ${MASTERY_LABEL[c.mastery] ?? ''}` : c.text}
               onPointerDown={(e) => down(e, c)} onPointerMove={(e) => move(e, c)} onPointerUp={(e) => up(e, c)}
-              onDoubleClick={() => editable && c.type === 'note' && setEditing(c.id)}>
-              {editing === c.id
-                ? <textarea autoFocus defaultValue={c.text} style={{ width: '100%', height: '100%', border: 0, background: 'transparent', font: 'inherit', resize: 'none', textAlign: 'center' }}
+              onDoubleClick={() => editable && c.type === 'note' && setEditing({ id: c.id, draft: c.text, rev: revision })}>
+              {editing?.id === c.id
+                ? <textarea autoFocus defaultValue={editing.draft} style={{ width: '100%', height: '100%', border: 0, background: 'transparent', font: 'inherit', resize: 'none', textAlign: 'center' }}
                     onPointerDown={(e) => e.stopPropagation()}
-                    onBlur={(e) => { setEditing(null); const v = e.target.value.trim(); if (v && v !== c.text) onEditNote?.(c.id, v); }}
-                    onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); e.currentTarget.blur(); } if (e.key === 'Escape') setEditing(null); }} />
+                    onBlur={async (e) => {
+                      const v = e.target.value.trim(), ed = editing;
+                      setEditing(null);
+                      if (!v || v === c.text) return;
+                      const ok = await onEditNote?.(c.id, v, ed.rev);
+                      // conflict: reopen with the draft (against the board now on screen) instead of losing the text
+                      if (ok === false) setEditing({ id: c.id, draft: v, rev: undefined });
+                    }}
+                    onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); e.currentTarget.blur(); } if (e.key === 'Escape') { e.currentTarget.value = c.text; setEditing(null); } }} />
                 : c.text}
               {c.updatedBy && editable ? <span className="by">{c.updatedBy === 'learner' ? '你' : 'AI'}</span> : null}
             </div>

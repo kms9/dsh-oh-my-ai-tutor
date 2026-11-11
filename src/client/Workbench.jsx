@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { MindmapSvg, GraphSvg, BoardCanvas, TOPIC_COLORS } from './views.jsx';
+import { GraphSvg, BoardCanvas } from './views.jsx';
+import { MindElixirMap } from './mindmap.jsx';
 import { markdownToHtml, MASTERY_LABEL, ACTION_LABEL, relTime } from './layout.mjs';
 
 const TABS = [['outline', '课程大纲'], ['mindmap', '思维导图'], ['graph', '知识图谱'], ['board', '知识白板']];
@@ -33,13 +34,28 @@ function useElementWidth() {
   return [ref, w];
 }
 
+/**
+ * Inline rename. `onCommit` resolves true when saved; on false (conflict / error) the editor stays open with the
+ * learner's draft so nothing typed is lost, and the learner decides whether to save again.
+ */
 function InlineEdit({ value, onCommit, onCancel, testId }) {
   const [v, setV] = useState(value);
+  const inflight = useRef(false);
+  const done = useRef(false);
+  const commit = async () => {
+    if (inflight.current || done.current) return;
+    const t = v.trim();
+    if (!t || t === value) { done.current = true; onCancel(); return; }
+    inflight.current = true;
+    const ok = await onCommit(t);
+    inflight.current = false;
+    if (ok) done.current = true;
+  };
   return (
     <input className="inline" autoFocus value={v} data-testid={testId} onChange={(e) => setV(e.target.value)}
       onPointerDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}
-      onKeyDown={(e) => { if (e.key === 'Enter') { const t = v.trim(); t && t !== value ? onCommit(t) : onCancel(); } if (e.key === 'Escape') onCancel(); }}
-      onBlur={() => { const t = v.trim(); t && t !== value ? onCommit(t) : onCancel(); }} />
+      onKeyDown={(e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') { done.current = true; onCancel(); } }}
+      onBlur={() => { if (!inflight.current && !done.current) commit(); }} />
   );
 }
 
@@ -63,32 +79,47 @@ export function Workbench({ api, visible = true, initialView, navRevision, pollM
   const revRef = useRef(-1);
   const courseRef = useRef(null);
   courseRef.current = courseId;
+  // Poll ordering: every workbench request gets a sequence number; a response older than the last applied one is dropped.
+  const seqRef = useRef(0);
+  const appliedRef = useRef(0);
+  const [disconnected, setDisconnected] = useState(false);
 
   useEffect(() => { if (initialView && TABS.some(([k]) => k === initialView)) setTab(initialView); }, [initialView, navRevision]);
 
   const reload = useCallback(async () => {
+    const seq = ++seqRef.current;
     const next = await api.call('workbench', { courseId: courseRef.current ?? undefined });
+    if (seq < appliedRef.current) return null; // a newer response already landed
+    appliedRef.current = seq;
     revRef.current = next.revision;
-    setModel(next); setError('');
+    setModel(next); setError(''); setDisconnected(false);
     return next;
   }, [api]);
 
   useEffect(() => { reload().catch((e) => setError(e.message)); }, [reload, courseId]);
   useEffect(() => {
     if (!visible) return undefined;
-    let stop = false;
+    let stop = false, inflight = false;
     const tick = async () => {
+      if (inflight) return; // never stack polls behind a slow host
+      inflight = true;
       try {
         const head = await api.call('head', {});
+        if (!stop) setDisconnected(false);
         if (!stop && head.revision !== revRef.current) await reload();
-      } catch (e) { if (!stop) setError(e.message); }
+      } catch (e) { if (!stop) { setError(e.message); setDisconnected(true); } }
+      finally { inflight = false; }
     };
     const t = setInterval(tick, pollMs);
     return () => { stop = true; clearInterval(t); };
   }, [api, reload, visible, pollMs]);
 
   const flash = (text, err = false) => { setNotice({ text, err }); setTimeout(() => setNotice((n) => (n && n.text === text ? null : n)), err ? 6000 : 2600); };
-  const mutate = useCallback(async (action, input, summary, okText) => {
+  /**
+   * One learner write. Never retries with a newer revision by itself: on conflict it re-reads, says so and returns false,
+   * so the caller keeps its draft (rename box, note) and the learner decides.
+   */
+  const mutate = useCallback(async (action, input, summary, okText, { draft = false } = {}) => {
     setBusy(true);
     try {
       await api.call('mutate', { action, input, summary });
@@ -96,8 +127,10 @@ export function Workbench({ api, visible = true, initialView, navRevision, pollM
       if (okText) flash(okText);
       return true;
     } catch (e) {
-      const conflict = /changed|conflict/i.test(e.message);
-      flash(conflict ? 'AI 或其他窗口刚改过这里，已刷新到最新版本，请再操作一次。' : `未保存：${e.message}`, true);
+      const conflict = e.code === 'tutor/conflict' || /changed|conflict/i.test(e.message);
+      flash(conflict
+        ? (draft ? 'AI 或其他窗口刚改过这里，没有保存。已读到最新版本，你的草稿还在，确认后再保存一次。' : 'AI 或其他窗口刚改过这里，没有保存。已刷新到最新版本，请看一眼再操作。')
+        : `未保存：${e.message}`, true);
       await reload().catch(() => {});
       return false;
     } finally { setBusy(false); }
@@ -113,7 +146,8 @@ export function Workbench({ api, visible = true, initialView, navRevision, pollM
   const topics = course.syllabus.topics;
   const conceptById = new Map(concepts.map((c) => [c.id, c]));
   const syllabusRevision = course.syllabus.revision;
-  const outlineEdit = (operations, summary) => mutate('course.editOutline', { courseId: course.id, syllabusRevision, operations }, summary, '已保存到课程大纲（思维导图同步更新）');
+  // `rev` = the outline revision that was on screen when the gesture began (locked by the caller); default = rendered one.
+  const outlineEdit = (operations, summary, rev = syllabusRevision, opts) => mutate('course.editOutline', { courseId: course.id, syllabusRevision: rev, operations }, summary, '已保存到课程大纲（思维导图同步更新）', opts);
 
   const lessons = model.lessons.slice().sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
   const lesson = lessons.find((l) => l.id === lessonId) ?? lessons.find((l) => l.status !== 'complete') ?? lessons.at(-1) ?? null;
@@ -135,7 +169,9 @@ export function Workbench({ api, visible = true, initialView, navRevision, pollM
                 {model.courses.map((c) => <option key={c.id} value={c.id}>{c.title}</option>)}
               </select>
             )}
-            <span className="chip src" data-testid="sync-chip">实时 · 第 {model.revision} 版</span>
+            {disconnected
+              ? <span className="chip warn" data-testid="sync-chip" title={error}>已断开 · 显示第 {model.revision} 版</span>
+              : <span className="chip src" data-testid="sync-chip">实时 · 第 {model.revision} 版</span>}
           </div>
         </header>
       )}
@@ -231,9 +267,9 @@ export function Workbench({ api, visible = true, initialView, navRevision, pollM
           </nav>
           {/* zero-height sticky toast: saving/conflict notices never shift the layout under the pointer */}
           <div className="noticebar">{notice && <div className={`notice ${notice.err ? 'err' : ''}`} data-testid="notice" role="status">{notice.text}</div>}</div>
-          {(tab === 'outline' || tab === 'mindmap') && <ApprovalBanner course={course} busy={busy} onApprove={() => mutate('course.approve', { courseId: course.id }, '学习者批准大纲', '大纲已批准')} />}
-          {tab === 'outline' && <OutlineView topics={topics} busy={busy} edit={outlineEdit} selected={selectedConcept?.id} onSelect={setSelected} />}
-          {tab === 'mindmap' && <MindmapView view={views.mindmap} topics={topics} busy={busy} edit={outlineEdit} selected={selectedConcept?.id} onSelectConcept={setSelected} width={rightWidth} />}
+          {(tab === 'outline' || tab === 'mindmap') && <ApprovalBanner course={course} busy={busy} onApprove={() => mutate('course.approve', { courseId: course.id, syllabusRevision }, `学习者批准大纲第 ${syllabusRevision} 版`, '大纲已批准')} />}
+          {tab === 'outline' && <OutlineView topics={topics} busy={busy} edit={outlineEdit} syllabusRevision={syllabusRevision} selected={selectedConcept?.id} onSelect={setSelected} />}
+          {tab === 'mindmap' && <MindmapView view={views.mindmap} topics={topics} busy={busy} edit={outlineEdit} syllabusRevision={syllabusRevision} selected={selectedConcept?.id} onSelectConcept={setSelected} flash={flash} wide={rightWidth >= 640} />}
           {tab === 'graph' && <GraphView view={views.graph} topics={topics} selected={selectedConcept?.id} onSelect={setSelected} conceptById={conceptById} relations={model.relations} width={rightWidth > 80 ? rightWidth - 4 : undefined} />}
           {tab === 'board' && <BoardView view={views.board} course={course} concepts={concepts} busy={busy} mutate={mutate} onSelectConcept={setSelected} />}
           <Activity events={model.events} />
@@ -264,15 +300,43 @@ function ApprovalBanner({ course, busy, onApprove }) {
   );
 }
 
-function OutlineView({ topics, busy, edit, selected, onSelect }) {
+function OutlineView({ topics, busy, edit, syllabusRevision, selected, onSelect }) {
   const [editing, setEditing] = useState(null);
   const [drag, setDrag] = useState(null);
   const [over, setOver] = useState(null);
-  const dropSub = (target, topic) => {
+  const lockRef = useRef(null); // outline revision on screen when a rename / drag began
+  const startEdit = (id) => { lockRef.current = syllabusRevision; setEditing(id); };
+  const commitRename = async (ops, summary) => {
+    const ok = await edit(ops, summary, lockRef.current ?? syllabusRevision, { draft: true });
+    if (ok) setEditing(null);
+    // conflict: keep the editor open with the draft; the next Enter is an explicit learner retry against what is now on screen
+    else lockRef.current = null;
+    return ok;
+  };
+  useEffect(() => { if (editing && lockRef.current === null) lockRef.current = syllabusRevision; }, [editing, syllabusRevision]);
+  /** Drop position from the pointer: upper half of a row = before it, lower half = after it. */
+  const half = (e) => { const r = e.currentTarget.getBoundingClientRect(); return e.clientY - r.top <= r.height / 2 ? 'before' : 'after'; };
+  const dropSub = (e, target, topic) => {
     const src = drag; setDrag(null); setOver(null);
     if (!src || src.kind !== 'sub') return;
-    if (target) edit([{ op: 'moveSubtopic', subtopicId: src.id, toTopicId: topic.id, toIndex: target.index }], `拖动知识点「${src.title}」`);
-    else edit([{ op: 'moveSubtopic', subtopicId: src.id, toTopicId: topic.id }], `拖动知识点「${src.title}」到「${topic.title}」`);
+    let beforeId = null;
+    if (target) {
+      if (half(e) === 'before') beforeId = target.id;
+      else { const rest = topic.subtopics.filter((x) => x.id !== src.id); const i = rest.findIndex((x) => x.id === target.id); beforeId = rest[i + 1]?.id ?? null; }
+      if (beforeId === src.id) return;
+    }
+    edit([{ op: 'moveSubtopic', subtopicId: src.id, toTopicId: topic.id, beforeId }], target ? `拖动知识点「${src.title}」` : `拖动知识点「${src.title}」到「${topic.title}」`, src.rev);
+  };
+  const dropTopic = (e, t) => {
+    const d = drag; setDrag(null); setOver(null);
+    if (!d || d.kind !== 'topic' || d.id === t.id) return;
+    let beforeId = t.id;
+    if (half(e) === 'after') { const rest = topics.filter((x) => x.id !== d.id); const i = rest.findIndex((x) => x.id === t.id); beforeId = rest[i + 1]?.id ?? null; }
+    edit([{ op: 'moveTopic', topicId: d.id, beforeId }], `移动主题「${d.title}」`, d.rev);
+  };
+  const step = (kind, list, i, dir, item) => {
+    const beforeId = dir < 0 ? list[i - 1].id : (list[i + 2]?.id ?? null);
+    return edit([kind === 'topic' ? { op: 'moveTopic', topicId: item.id, beforeId } : { op: 'moveSubtopic', subtopicId: item.id, beforeId }], `${dir < 0 ? '上移' : '下移'}${kind === 'topic' ? '主题' : '知识点'}「${item.title}」`);
   };
   return (
     <div data-testid="outline-view">
@@ -282,109 +346,98 @@ function OutlineView({ topics, busy, edit, selected, onSelect }) {
       </div>
       {topics.map((t, i) => (
         <div className="card" key={t.id} data-topic-id={t.id}
-          draggable={editing == null} onDragStart={(e) => { if (e.target !== e.currentTarget) return; setDrag({ kind: 'topic', id: t.id, title: t.title, index: i }); }}
+          draggable={editing == null} onDragStart={(e) => { if (e.target !== e.currentTarget) return; setDrag({ kind: 'topic', id: t.id, title: t.title, index: i, rev: syllabusRevision }); }}
+          onDragEnd={() => { setDrag(null); setOver(null); }}
           onDragOver={(e) => { if (drag) { e.preventDefault(); } }}
-          onDrop={(e) => { e.preventDefault(); if (drag?.kind === 'topic' && drag.id !== t.id) { const d = drag; setDrag(null); edit([{ op: 'moveTopic', topicId: d.id, toIndex: i }], `移动主题「${d.title}」`); } else if (drag?.kind === 'sub') dropSub(null, t); }}>
+          onDrop={(e) => { e.preventDefault(); if (drag?.kind === 'topic') dropTopic(e, t); else if (drag?.kind === 'sub') dropSub(e, null, t); }}>
           <div className={`tophead ${over === t.id ? 'dragover' : ''}`} onDragEnter={() => drag?.kind === 'sub' && setOver(t.id)}>
-            <span className="grow" onDoubleClick={() => setEditing(t.id)}>
+            <span className="grow" onDoubleClick={() => startEdit(t.id)}>
               {editing === t.id
-                ? <InlineEdit value={t.title} testId="inline-edit" onCancel={() => setEditing(null)} onCommit={(v) => { setEditing(null); edit([{ op: 'renameTopic', topicId: t.id, title: v }], `重命名主题为「${v}」`); }} />
+                ? <InlineEdit value={t.title} testId="inline-edit" onCancel={() => setEditing(null)} onCommit={(v) => commitRename([{ op: 'renameTopic', topicId: t.id, title: v }], `重命名主题为「${v}」`)} />
                 : <b>{i + 1}. {t.title}</b>}
             </span>
             <span className="rowtools">
-              <button className="tbtn" title="重命名" onClick={() => setEditing(t.id)}>改名</button>
-              <button className="tbtn" title="上移" disabled={busy || i === 0} onClick={() => edit([{ op: 'moveTopic', topicId: t.id, toIndex: i - 1 }], `上移主题「${t.title}」`)}>↑</button>
-              <button className="tbtn" title="下移" disabled={busy || i === topics.length - 1} onClick={() => edit([{ op: 'moveTopic', topicId: t.id, toIndex: i + 1 }], `下移主题「${t.title}」`)}>↓</button>
+              <button className="tbtn" title="重命名" onClick={() => startEdit(t.id)}>改名</button>
+              <button className="tbtn" title="上移" disabled={busy || i === 0} onClick={() => step('topic', topics, i, -1, t)}>↑</button>
+              <button className="tbtn" title="下移" disabled={busy || i === topics.length - 1} onClick={() => step('topic', topics, i, 1, t)}>↓</button>
               <button className="tbtn" title="添加知识点" disabled={busy} onClick={() => edit([{ op: 'addSubtopic', topicId: t.id, title: '新知识点' }], `在「${t.title}」下添加知识点`)}>＋</button>
               <button className="tbtn danger" title="删除主题" disabled={busy || topics.length === 1} onClick={() => edit([{ op: 'removeTopic', topicId: t.id }], `删除主题「${t.title}」`)}>✕</button>
             </span>
           </div>
           {t.subtopics.map((s, j) => (
             <div key={s.id} className={`treerow ${selected === s.conceptId ? 'sel' : ''} ${over === s.id ? 'dragover' : ''}`} data-subtopic-id={s.id}
-              draggable={editing == null} onDragStart={(e) => { e.stopPropagation(); setDrag({ kind: 'sub', id: s.id, title: s.title, index: j }); }}
+              draggable={editing == null} onDragStart={(e) => { e.stopPropagation(); setDrag({ kind: 'sub', id: s.id, title: s.title, index: j, rev: syllabusRevision }); }}
+              onDragEnd={() => { setDrag(null); setOver(null); }}
               onDragEnter={() => drag?.kind === 'sub' && setOver(s.id)} onDragOver={(e) => drag?.kind === 'sub' && e.preventDefault()}
-              onDrop={(e) => { e.preventDefault(); e.stopPropagation(); if (drag?.kind === 'sub' && drag.id !== s.id) dropSub({ index: j }, t); else { setDrag(null); setOver(null); } }}
-              onClick={() => onSelect(s.conceptId)} onDoubleClick={() => setEditing(s.id)}>
+              onDrop={(e) => { e.preventDefault(); e.stopPropagation(); if (drag?.kind === 'sub' && drag.id !== s.id) dropSub(e, s, t); else { setDrag(null); setOver(null); } }}
+              onClick={() => onSelect(s.conceptId)} onDoubleClick={() => startEdit(s.id)}>
               <span className="grow">
                 {editing === s.id
-                  ? <InlineEdit value={s.title} testId="inline-edit" onCancel={() => setEditing(null)} onCommit={(v) => { setEditing(null); edit([{ op: 'renameSubtopic', subtopicId: s.id, title: v }], `重命名知识点为「${v}」`); }} />
+                  ? <InlineEdit value={s.title} testId="inline-edit" onCancel={() => setEditing(null)} onCommit={(v) => commitRename([{ op: 'renameSubtopic', subtopicId: s.id, title: v }], `重命名知识点为「${v}」`)} />
                   : <>{i + 1}.{j + 1} {s.title}　<span className="small">知识点</span></>}
               </span>
               <span className="rowtools">
-                <button className="tbtn" title="上移" disabled={busy || j === 0} onClick={(e) => { e.stopPropagation(); edit([{ op: 'moveSubtopic', subtopicId: s.id, toIndex: j - 1 }], `上移知识点「${s.title}」`); }}>↑</button>
-                <button className="tbtn" title="下移" disabled={busy || j === t.subtopics.length - 1} onClick={(e) => { e.stopPropagation(); edit([{ op: 'moveSubtopic', subtopicId: s.id, toIndex: j + 1 }], `下移知识点「${s.title}」`); }}>↓</button>
+                <button className="tbtn" title="上移" disabled={busy || j === 0} onClick={(e) => { e.stopPropagation(); step('sub', t.subtopics, j, -1, s); }}>↑</button>
+                <button className="tbtn" title="下移" disabled={busy || j === t.subtopics.length - 1} onClick={(e) => { e.stopPropagation(); step('sub', t.subtopics, j, 1, s); }}>↓</button>
                 <button className="tbtn danger" title="删除知识点" disabled={busy || t.subtopics.length === 1} onClick={(e) => { e.stopPropagation(); edit([{ op: 'removeSubtopic', subtopicId: s.id }], `删除知识点「${s.title}」`); }}>✕</button>
               </span>
             </div>
           ))}
         </div>
       ))}
-      <p className="legend">双击标题可改名，拖动卡片或知识点可调序；修改会写入同一份课程状态，AI 用 tutor_outline_edit 编辑的也是这份大纲。</p>
+      <p className="legend">双击标题可改名，拖到一行的上半部分放在它前面、下半部分放在它后面；修改会写入同一份课程状态，AI 用 tutor_outline_edit 编辑的也是这份大纲。</p>
     </div>
   );
 }
 
-function MindmapView({ view, topics, busy, edit, selected, onSelectConcept, width }) {
-  const [sel, setSel] = useState(null);
-  const [collapsed, setCollapsed] = useState(() => new Set());
-  const [mode, setMode] = useState('graphic');
-  const [renaming, setRenaming] = useState(false);
+const MM_MODES = [['side', '导图'], ['right', '逻辑图'], ['list', '列表']];
+function MindmapView({ view, topics, busy, edit, syllabusRevision, selected, onSelectConcept, flash, wide }) {
+  const [sel, setSel] = useState(null); // { id, kind, topicId?, conceptId? } from the mind map selection
+  const [mode, setMode] = useState('side');
+  const mapRef = useRef(null);
   const h = view.hierarchy;
   const node = sel && (sel.kind === 'topic' ? topics.find((t) => t.id === sel.id) : topics.flatMap((t) => t.subtopics.map((s) => ({ ...s, topic: t }))).find((s) => s.id === sel.id));
   const topicIdx = node && sel.kind === 'topic' ? topics.indexOf(node) : -1;
   const subIdx = node && sel.kind === 'sub' ? node.topic.subtopics.findIndex((s) => s.id === node.id) : -1;
-  const ops = {
-    up: () => sel.kind === 'topic' ? edit([{ op: 'moveTopic', topicId: node.id, toIndex: topicIdx - 1 }], `思维导图：上移「${node.title}」`) : edit([{ op: 'moveSubtopic', subtopicId: node.id, toIndex: subIdx - 1 }], `思维导图：上移「${node.title}」`),
-    down: () => sel.kind === 'topic' ? edit([{ op: 'moveTopic', topicId: node.id, toIndex: topicIdx + 1 }], `思维导图：下移「${node.title}」`) : edit([{ op: 'moveSubtopic', subtopicId: node.id, toIndex: subIdx + 1 }], `思维导图：下移「${node.title}」`),
-    remove: async () => { const ok = sel.kind === 'topic' ? await edit([{ op: 'removeTopic', topicId: node.id }], `思维导图：删除「${node.title}」`) : await edit([{ op: 'removeSubtopic', subtopicId: node.id }], `思维导图：删除「${node.title}」`); if (ok) setSel(null); },
-    add: () => edit([{ op: 'addSubtopic', topicId: sel.kind === 'topic' ? node.id : node.topic.id, title: '新知识点', ...(sel.kind === 'sub' ? { index: subIdx + 1 } : {}) }], '思维导图：添加知识点'),
-    rename: (v) => sel.kind === 'topic' ? edit([{ op: 'renameTopic', topicId: node.id, title: v }], `思维导图：重命名为「${v}」`) : edit([{ op: 'renameSubtopic', subtopicId: node.id, title: v }], `思维导图：重命名为「${v}」`),
-  };
-  const onDrop = (src, target) => {
-    if (src.kind === 'topic') {
-      const ti = target.kind === 'topic' ? target.index : topics.findIndex((t) => t.id === target.parentId);
-      if (ti >= 0 && topics[ti].id !== src.id) edit([{ op: 'moveTopic', topicId: src.id, toIndex: ti }], `思维导图：拖动「${src.title}」`);
-    } else if (target.kind === 'topic') edit([{ op: 'moveSubtopic', subtopicId: src.id, toTopicId: target.id }], `思维导图：把「${src.title}」移到「${target.title}」`);
-    else edit([{ op: 'moveSubtopic', subtopicId: src.id, toTopicId: target.parentId, toIndex: target.index }], `思维导图：拖动「${src.title}」`);
-  };
+  const selectedSubId = topics.flatMap((t) => t.subtopics).find((s) => s.conceptId === selected)?.id;
+  const submit = (ops, summary, rev, opts) => edit(ops, summary, rev, opts);
   return (
     <div data-testid="mindmap-view">
       <div className="title2">课程思维导图
-        <span className="tools">
-          <button className={`tbtn ${mode === 'graphic' ? 'on' : ''}`} onClick={() => setMode('graphic')}>导图</button>
-          <button className={`tbtn ${mode === 'list' ? 'on' : ''}`} onClick={() => setMode('list')}>列表</button>
+        <span className="tools" data-testid="mindmap-modes">
+          {MM_MODES.map(([k, label]) => <button key={k} className={`tbtn ${mode === k ? 'on' : ''}`} data-mode={k} onClick={() => setMode(k)}>{label}</button>)}
         </span>
       </div>
       <div className="card">
         <span className="tag">基于课程大纲</span>
-        {mode === 'graphic' ? (
+        {mode !== 'list' ? (
           <>
             <div className="tools" style={{ marginTop: 12, minHeight: 26 }} data-testid="mindmap-toolbar">
-              {node ? (
-                renaming ? <span style={{ flex: 1 }}><InlineEdit value={node.title} testId="mm-rename" onCancel={() => setRenaming(false)} onCommit={(v) => { setRenaming(false); ops.rename(v); }} /></span> : <>
-                  <span className="small" style={{ marginRight: 6, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>已选：{node.title}</span>
-                  <button className="tbtn" disabled={busy} onClick={() => setRenaming(true)}>改名</button>
-                  <button className="tbtn" disabled={busy || (sel.kind === 'topic' ? topicIdx === 0 : subIdx === 0)} onClick={ops.up}>上移</button>
-                  <button className="tbtn" disabled={busy || (sel.kind === 'topic' ? topicIdx === topics.length - 1 : subIdx === node.topic.subtopics.length - 1)} onClick={ops.down}>下移</button>
-                  <button className="tbtn" disabled={busy} onClick={ops.add}>＋ 子节点</button>
-                  <button className="tbtn danger" disabled={busy || (sel.kind === 'topic' ? topics.length === 1 : node.topic.subtopics.length === 1)} onClick={ops.remove}>删除</button>
-                </>
-              ) : <span className="small">点选节点后可改名、调序、删减；也可以直接拖动节点到别的位置。</span>}
+              {node ? <>
+                <span className="small" style={{ marginRight: 6, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>已选：{node.title}</span>
+                <button className="tbtn" disabled={busy} onClick={() => mapRef.current?.beginRename(node.id)}>改名</button>
+                <button className="tbtn" disabled={busy || (sel.kind === 'topic' ? topicIdx === 0 : subIdx === 0)} onClick={() => mapRef.current?.run('step', { id: node.id, dir: -1 })}>上移</button>
+                <button className="tbtn" disabled={busy || (sel.kind === 'topic' ? topicIdx === topics.length - 1 : subIdx === node.topic.subtopics.length - 1)} onClick={() => mapRef.current?.run('step', { id: node.id, dir: 1 })}>下移</button>
+                <button className="tbtn" disabled={busy} onClick={() => mapRef.current?.run(sel.kind === 'topic' ? 'addChild' : 'insertSibling', sel.kind === 'topic' ? { parentId: node.id } : { id: node.id, position: 'after' })}>＋ {sel.kind === 'topic' ? '子节点' : '同级'}</button>
+                <button className="tbtn danger" disabled={busy || (sel.kind === 'topic' ? topics.length === 1 : node.topic.subtopics.length === 1)} onClick={async () => { if (await mapRef.current?.run('remove', { ids: [node.id] })) setSel(null); }}>删除</button>
+              </> : <span className="small">拖动节点可调序或换到别的主题；双击改名；选中后 Tab 加子节点、Enter 加同级、Delete 删除。只有两层：主题 → 知识点。</span>}
+              <span style={{ flex: 1 }} />
+              <button className="tbtn" onClick={() => mapRef.current?.fit()} data-testid="mindmap-fit" title="缩放到能看到全部节点">适配全部</button>
             </div>
             <div className="mm">
-              <MindmapSvg hierarchy={h} availableWidth={width > 120 ? width - 40 : undefined} editable selectedId={sel?.id ?? topics.flatMap((t) => t.subtopics).find((s) => s.conceptId === selected)?.id}
-                onSelect={(n) => { if (n.kind === 'root') { setSel(null); return; } setSel({ id: n.id, kind: n.kind }); setRenaming(false); if (n.conceptId) onSelectConcept(n.conceptId); }}
-                onDrop={onDrop} collapsed={collapsed} onToggle={(id) => setCollapsed((s) => { const x = new Set(s); x.has(id) ? x.delete(id) : x.add(id); return x; })} />
+              <MindElixirMap ref={mapRef} hierarchy={h} syllabusRevision={syllabusRevision} direction={mode} submit={submit} notify={flash}
+                selectedId={sel?.id ?? selectedSubId} height={wide ? 560 : 440}
+                onSelect={(n) => { if (!n || n.kind === 'root') { setSel(null); return; } setSel(n); if (n.conceptId) onSelectConcept(n.conceptId); }} />
             </div>
           </>
         ) : (
-          <>
+          <div data-testid="mindmap-list">
             <div className="treerow" style={{ fontWeight: 700, marginTop: 12 }}>◉ {h.title}</div>
             <div className="treelevel">{topics.map((t) => <React.Fragment key={t.id}><div className="treerow">● {t.title}</div><div className="treelevel">{t.subtopics.map((s) => <div key={s.id} className="treerow" onClick={() => onSelectConcept(s.conceptId)}>└ {s.title}</div>)}</div></React.Fragment>)}</div>
-          </>
+          </div>
         )}
       </div>
-      <p className="legend">导图只表达课程包含关系，不自动产生“知识前置/因果”语义边。导图与课程大纲是同一份数据：在这里调序或删减，大纲同步变化；AI 也可以用 tutor_outline_edit 做同样的修改。</p>
+      <p className="legend">导图只表达课程包含关系，不自动产生“知识前置/因果”语义边。导图与课程大纲是同一份数据：在这里调序、改名或删减，大纲同步变化；AI 用 tutor_outline_edit 改的也会实时出现在这里（你正在拖动或改名时，会等你做完再刷新）。</p>
     </div>
   );
 }
@@ -415,20 +468,19 @@ function BoardView({ view, course, concepts, busy, mutate, onSelectConcept }) {
   const els = view.elements;
   const onBoard = new Set(els.filter((e) => e.type === 'concept').map((e) => e.conceptId));
   const missing = concepts.filter((c) => !onBoard.has(c.id)).length;
-  const patch = (operations, summary, ok) => mutate('board.patch', { courseId: course.id, baseRevision: view.boardRevision, operations }, summary, ok);
+  // `rev` = board revision on screen when the gesture began (BoardCanvas locks it at pointer-down / double-click)
+  const patch = (operations, summary, ok, rev = view.boardRevision, opts) => mutate('board.patch', { courseId: course.id, baseRevision: rev, operations }, summary, ok, opts);
   const selEl = els.find((e) => e.id === sel);
-  useEffect(() => {
-    const onKey = (e) => {
-      if ((e.key === 'Delete' || e.key === 'Backspace') && selEl && !/INPUT|TEXTAREA/.test(document.activeElement?.tagName ?? '')) {
-        e.preventDefault(); patch([{ op: 'delete', id: selEl.id }], `白板：删除「${selEl.text ?? '连线'}」`, '已从白板删除'); setSel(null);
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  });
+  const rootRef = useRef(null);
+  // Delete key only: scoped to the board root, ignored when focus is outside it or in a text field (no Backspace).
+  const onKeyDown = (e) => {
+    if (e.key !== 'Delete' || !selEl) return;
+    if (!rootRef.current?.contains(e.target) || /INPUT|TEXTAREA|SELECT/.test(e.target.tagName) || e.target.isContentEditable) return;
+    e.preventDefault(); patch([{ op: 'delete', id: selEl.id }], `白板：删除「${selEl.text ?? '连线'}」`, '已从白板删除'); setSel(null);
+  };
   const maxY = els.filter((e) => e.type !== 'arrow').reduce((m, e) => Math.max(m, e.y + e.height), 0);
   return (
-    <div data-testid="board-view">
+    <div data-testid="board-view" ref={rootRef} tabIndex={-1} onKeyDown={onKeyDown} style={{ outline: 'none' }}>
       <div className="title2">知识白板 <span className="small">· 第 {view.boardRevision} 版 · {els.filter((e) => e.type !== 'arrow').length} 张卡片</span></div>
       <div className="tools" style={{ marginBottom: 8 }} data-testid="board-toolbar">
         <button className="tbtn" disabled={busy || !missing} onClick={() => mutate('board.seed', { courseId: course.id, baseRevision: view.boardRevision }, '白板：从大纲生成知识点卡片', '已生成白板卡片')} data-testid="board-seed">{missing ? `从大纲生成（${missing}）` : '已同步大纲'}</button>
@@ -441,11 +493,11 @@ function BoardView({ view, course, concepts, busy, mutate, onSelectConcept }) {
         <button className="tbtn" onClick={() => setScale((s) => Math.min(1.6, +(s + 0.15).toFixed(2)))} title="放大">＋</button>
       </div>
       {els.length ? (
-        <BoardCanvas elements={els} editable selectedId={sel} scale={scale} linkMode={linkMode}
-          onSelect={(id) => { setSel(id); const e = els.find((x) => x.id === id); if (e?.conceptId) onSelectConcept(e.conceptId); }}
-          onMove={(id, x, y) => patch([{ op: 'update', id, x, y }], `白板：移动「${els.find((e) => e.id === id)?.text ?? id}」`)}
-          onLink={(from, to) => { setLinkMode(false); patch([{ op: 'add', type: 'arrow', from, to }], '白板：连线', '已连线'); }}
-          onEditNote={(id, text) => patch([{ op: 'update', id, text }], '白板：编辑便签', '便签已保存')} />
+        <BoardCanvas elements={els} editable selectedId={sel} scale={scale} linkMode={linkMode} revision={view.boardRevision}
+          onSelect={(id) => { setSel(id); rootRef.current?.focus({ preventScroll: true }); const e = els.find((x) => x.id === id); if (e?.conceptId) onSelectConcept(e.conceptId); }}
+          onMove={(id, x, y, rev) => patch([{ op: 'update', id, x, y }], `白板：移动「${els.find((e) => e.id === id)?.text ?? id}」`, undefined, rev)}
+          onLink={(from, to, rev) => { setLinkMode(false); patch([{ op: 'add', type: 'arrow', from, to }], '白板：连线', '已连线', rev); }}
+          onEditNote={(id, text, rev) => patch([{ op: 'update', id, text }], '白板：编辑便签', '便签已保存', rev, { draft: true })} />
       ) : (
         <div className="board" data-testid="board"><div className="empty" style={{ padding: 24 }}>白板还是空的。点「从大纲生成」放入全部知识点卡片，或让 AI 用 tutor_board_patch 布置白板。</div></div>
       )}
