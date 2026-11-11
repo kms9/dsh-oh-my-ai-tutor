@@ -23,18 +23,20 @@ const THEME = {
  * syllabusRevision that was on screen when the gesture began). AI edits arrive through props and are applied
  * with refresh() only when no gesture or submit is in flight, so a drag / rename is never interrupted.
  */
-export const MindElixirMap = forwardRef(function MindElixirMap({ hierarchy, syllabusRevision, direction = 'side', submit, notify, onSelect, selectedId, height = 520 }, ref) {
+/** Smallest zoom "fit" may use: 13 px topics stay ≥ 10 px. Bigger maps keep this size and are panned (drag the background / wheel) or enlarged. */
+export const MIN_READABLE_SCALE = 0.8;
+export const MindElixirMap = forwardRef(function MindElixirMap({ hierarchy, syllabusRevision, direction = 'side', submit, notify, onSelect, onFit, selectedId, height = 520 }, ref) {
   const elRef = useRef(null);
   const meRef = useRef(null);
   const st = useRef({ shownRev: syllabusRevision, pointer: false, editing: false, submitting: false, pending: null, expanded: new Map(), userZoomed: false, index: indexHierarchy(hierarchy), key: '' });
-  const props = useRef({}); props.current = { hierarchy, syllabusRevision, submit, notify, onSelect, direction };
+  const props = useRef({}); props.current = { hierarchy, syllabusRevision, submit, notify, onSelect, onFit, direction };
 
   const find = (id) => { try { return meRef.current?.findEle(id) ?? null; } catch { return null; } }; // findEle throws when absent
   const fit = () => {
     const me = meRef.current; if (!me) return;
     const nodes = me.nodes, box = me.container;
     if (!nodes || !box.offsetWidth) return;
-    // fit the real content box (all topics) with a margin, then centre it — never clip a node
+    // fit the real content box (all topics) with a margin, but never below a readable zoom; then centre it
     const tpcs = nodes.querySelectorAll('.me-tpc');
     if (!tpcs.length) return;
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -42,13 +44,26 @@ export const MindElixirMap = forwardRef(function MindElixirMap({ hierarchy, syll
     const nb = nodes.getBoundingClientRect();
     for (const t of tpcs) { const r = t.getBoundingClientRect(); minX = Math.min(minX, r.left); minY = Math.min(minY, r.top); maxX = Math.max(maxX, r.right); maxY = Math.max(maxY, r.bottom); }
     const w = (maxX - minX) / scale + 48, h = (maxY - minY) / scale + 48;
-    const s = Math.max(0.25, Math.min(1.15, box.clientWidth / w, box.clientHeight / h));
+    const want = Math.min(1.15, box.clientWidth / w, box.clientHeight / h);
+    const s = Math.max(MIN_READABLE_SCALE, want);
     me.scale(s);
     const nb2 = nodes.getBoundingClientRect(), cb = box.getBoundingClientRect();
     const k = s / scale;
-    const cx = nb2.left + ((minX + maxX) / 2 - nb.left) * k, cy = nb2.top + ((minY + maxY) / 2 - nb.top) * k;
-    me.move(cb.left + cb.width / 2 - cx, cb.top + cb.height / 2 - cy);
+    const at = (x, y) => [nb2.left + (x - nb.left) * k, nb2.top + (y - nb.top) * k];
+    let [cx, cy] = at((minX + maxX) / 2, (minY + maxY) / 2);
+    let dx = cb.left + cb.width / 2 - cx, dy = cb.top + cb.height / 2 - cy;
+    const overflow = want < MIN_READABLE_SCALE;
+    if (overflow) {
+      // too big to show readably: keep the root in view (logic chart: root at the left edge) and the top row visible
+      const [l, t] = at(minX, minY);
+      if (props.current.direction === 'right' && w * s > cb.width) dx = cb.left + 24 - l;
+      if (h * s > cb.height) dy = cb.top + 24 - t;
+    }
+    me.move(dx, dy);
     st.current.userZoomed = false;
+    elRef.current?.setAttribute('data-scale', s.toFixed(2));
+    elRef.current?.setAttribute('data-overflow', String(overflow));
+    props.current.onFit?.({ scale: s, overflow });
   };
 
   const apply = (h, rev) => {
@@ -61,6 +76,7 @@ export const MindElixirMap = forwardRef(function MindElixirMap({ hierarchy, syll
       me.refresh(toMindData(h, s.expanded));
       s.key = key;
       const el = sel && find(sel); if (el) try { me.selectNode(el); } catch { /* node gone */ }
+      if (!s.userZoomed) requestAnimationFrame(fit); // keep every node visible after an AI / outline change
     }
     s.shownRev = rev;
   };
@@ -134,6 +150,14 @@ export const MindElixirMap = forwardRef(function MindElixirMap({ hierarchy, syll
     const down = () => { s.pointer = true; };
     const up = () => { if (!s.pointer) return; s.pointer = false; setTimeout(flush, 0); };
     me.container.addEventListener('pointerdown', down, true);
+    // mind-elixir detects double-clicks from pointerup handler timing (300 ms); on a busy main thread (a big
+    // workbench re-render after the first click) that misses. The native dblclick uses event timestamps.
+    const dbl = (e) => {
+      const tpc = e.target.closest?.('.me-tpc');
+      if (!tpc || !me.editable || me.container.querySelector('#input-box')) return;
+      try { me.selectNode(tpc); me.beginEdit(tpc); } catch { /* node replaced */ }
+    };
+    me.container.addEventListener('dblclick', dbl);
     window.addEventListener('pointerup', up); window.addEventListener('pointercancel', up);
     requestAnimationFrame(fit);
     const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => { if (!s.userZoomed) fit(); }) : null;

@@ -72,6 +72,14 @@ export function Workbench({ api, visible = true, initialView, navRevision, pollM
   const [notice, setNotice] = useState(null);
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState(initialView && TABS.some(([k]) => k === initialView) ? initialView : 'graph');
+  const [mmZoom, setMmZoom] = useState('off'); // 'off' | 'wide' (centre + right column) | 'full' (whole workbench)
+  const zoom = tab === 'mindmap' ? mmZoom : 'off';
+  useEffect(() => {
+    if (zoom === 'off') return undefined;
+    const onKey = (e) => { if (e.key === 'Escape' && !e.target.closest?.('#input-box')) setMmZoom('off'); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [zoom]);
   const [courseId, setCourseId] = useState(null);
   const [selected, setSelected] = useState(null); // conceptId
   const [lessonId, setLessonId] = useState(null);
@@ -159,7 +167,7 @@ export function Workbench({ api, visible = true, initialView, navRevision, pollM
   const selectedConcept = conceptById.get(selected) ?? concepts[0];
 
   return (
-    <div className={`omt ${widthClass}`} ref={rootRef} data-testid="tutor-workbench" data-revision={model.revision}>
+    <div className={`omt ${widthClass}${zoom !== 'off' ? ` mmz-${zoom}` : ''}`} ref={rootRef} data-testid="tutor-workbench" data-revision={model.revision} data-mm-zoom={zoom}>
       {chrome && (
         <header className="omt-header">
           <div className="mark">oh-my-<i>ai-tutor</i> <span className="small">/ DSH 学习工作台</span></div>
@@ -269,7 +277,7 @@ export function Workbench({ api, visible = true, initialView, navRevision, pollM
           <div className="noticebar">{notice && <div className={`notice ${notice.err ? 'err' : ''}`} data-testid="notice" role="status">{notice.text}</div>}</div>
           {(tab === 'outline' || tab === 'mindmap') && <ApprovalBanner course={course} busy={busy} onApprove={() => mutate('course.approve', { courseId: course.id, syllabusRevision }, `学习者批准大纲第 ${syllabusRevision} 版`, '大纲已批准')} />}
           {tab === 'outline' && <OutlineView topics={topics} busy={busy} edit={outlineEdit} syllabusRevision={syllabusRevision} selected={selectedConcept?.id} onSelect={setSelected} />}
-          {tab === 'mindmap' && <MindmapView view={views.mindmap} topics={topics} busy={busy} edit={outlineEdit} syllabusRevision={syllabusRevision} selected={selectedConcept?.id} onSelectConcept={setSelected} flash={flash} wide={rightWidth >= 640} />}
+          {tab === 'mindmap' && <MindmapView view={views.mindmap} topics={topics} busy={busy} edit={outlineEdit} syllabusRevision={syllabusRevision} selected={selectedConcept?.id} onSelectConcept={setSelected} flash={flash} wide={rightWidth >= 640} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} />}
           {tab === 'graph' && <GraphView view={views.graph} topics={topics} selected={selectedConcept?.id} onSelect={setSelected} conceptById={conceptById} relations={model.relations} width={rightWidth > 80 ? rightWidth - 4 : undefined} />}
           {tab === 'board' && <BoardView view={views.board} course={course} concepts={concepts} busy={busy} mutate={mutate} onSelectConcept={setSelected} />}
           <Activity events={model.events} />
@@ -391,10 +399,35 @@ function OutlineView({ topics, busy, edit, syllabusRevision, selected, onSelect 
 }
 
 const MM_MODES = [['side', '导图'], ['right', '逻辑图'], ['list', '列表']];
-function MindmapView({ view, topics, busy, edit, syllabusRevision, selected, onSelectConcept, flash, wide }) {
+/** Height that fills the rest of the workbench below `el` (the right column scrolls, so add its scrollTop back). */
+function useFillHeight(el, root, enabled, fallback) {
+  const [h, setH] = useState(fallback);
+  const measure = useCallback(() => {
+    const e = el.current, r = root.current;
+    if (!enabled || !e || !r) { setH((x) => (x === fallback ? x : fallback)); return; }
+    const scroller = e.closest('.right');
+    const top = e.getBoundingClientRect().top + (scroller?.scrollTop ?? 0);
+    const next = Math.max(420, Math.round(r.getBoundingClientRect().bottom - top - 20));
+    setH((x) => (Math.abs(x - next) > 2 ? next : x));
+  }, [el, root, enabled, fallback]);
+  useEffect(() => { measure(); }); // cheap; banners above the map change its top
+  useEffect(() => {
+    window.addEventListener('resize', measure);
+    const ro = typeof ResizeObserver !== 'undefined' && root.current ? new ResizeObserver(measure) : null;
+    ro?.observe(root.current);
+    return () => { window.removeEventListener('resize', measure); ro?.disconnect(); };
+  }, [measure, root]);
+  return h;
+}
+
+const MM_HINT = '拖动节点可调序或换到别的主题；双击改名；选中后 Tab 加子节点、Enter 加同级、Delete 删除；拖动空白处或滚轮平移，Ctrl+滚轮缩放。只有两层：主题 → 知识点。';
+function MindmapView({ view, topics, busy, edit, syllabusRevision, selected, onSelectConcept, flash, wide, zoom = 'off', setZoom, fill, rootRef }) {
   const [sel, setSel] = useState(null); // { id, kind, topicId?, conceptId? } from the mind map selection
   const [mode, setMode] = useState('side');
+  const [fitInfo, setFitInfo] = useState({ overflow: false });
   const mapRef = useRef(null);
+  const wrapRef = useRef(null);
+  const height = useFillHeight(wrapRef, rootRef, fill && mode !== 'list', wide ? 560 : 440);
   const h = view.hierarchy;
   const node = sel && (sel.kind === 'topic' ? topics.find((t) => t.id === sel.id) : topics.flatMap((t) => t.subtopics.map((s) => ({ ...s, topic: t }))).find((s) => s.id === sel.id));
   const topicIdx = node && sel.kind === 'topic' ? topics.indexOf(node) : -1;
@@ -405,28 +438,31 @@ function MindmapView({ view, topics, busy, edit, syllabusRevision, selected, onS
     <div data-testid="mindmap-view">
       <div className="title2">课程思维导图
         <span className="tools" data-testid="mindmap-modes">
+          {mode !== 'list' && <button className="tbtn" onClick={() => mapRef.current?.fit()} data-testid="mindmap-fit" title="缩放到能看到全部节点（不小于可读字号）">适配</button>}
+          {mode !== 'list' && zoom === 'off' && <button className="tbtn" onClick={() => setZoom('wide')} data-testid="mindmap-zoom" title="导图临时占用中栏 + 右栏（Esc 还原）">放大</button>}
+          {mode !== 'list' && zoom === 'wide' && <button className="tbtn" onClick={() => setZoom('full')} data-testid="mindmap-zoom-full" title="导图占用整个工作台（Esc 还原）">整个工作台</button>}
+          {zoom !== 'off' && <button className="tbtn on" onClick={() => setZoom('off')} data-testid="mindmap-zoom-off" title="还原三栏（Esc）">还原</button>}
           {MM_MODES.map(([k, label]) => <button key={k} className={`tbtn ${mode === k ? 'on' : ''}`} data-mode={k} onClick={() => setMode(k)}>{label}</button>)}
         </span>
       </div>
-      <div className="card">
-        <span className="tag">基于课程大纲</span>
+      <div className={`card ${mode !== 'list' ? 'mmcard' : ''}`}>
+        {mode === 'list' && <span className="tag">基于课程大纲</span>}
         {mode !== 'list' ? (
           <>
-            <div className="tools" style={{ marginTop: 12, minHeight: 26 }} data-testid="mindmap-toolbar">
+            {/* fixed height: selecting a node must not shift the map under the pointer (a double-click would miss) */}
+            <div className="tools mmbar" data-testid="mindmap-toolbar">
               {node ? <>
-                <span className="small" style={{ marginRight: 6, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>已选：{node.title}</span>
+                <span className="small mmsel" title={node.title}>已选：{node.title}</span>
                 <button className="tbtn" disabled={busy} onClick={() => mapRef.current?.beginRename(node.id)}>改名</button>
                 <button className="tbtn" disabled={busy || (sel.kind === 'topic' ? topicIdx === 0 : subIdx === 0)} onClick={() => mapRef.current?.run('step', { id: node.id, dir: -1 })}>上移</button>
                 <button className="tbtn" disabled={busy || (sel.kind === 'topic' ? topicIdx === topics.length - 1 : subIdx === node.topic.subtopics.length - 1)} onClick={() => mapRef.current?.run('step', { id: node.id, dir: 1 })}>下移</button>
                 <button className="tbtn" disabled={busy} onClick={() => mapRef.current?.run(sel.kind === 'topic' ? 'addChild' : 'insertSibling', sel.kind === 'topic' ? { parentId: node.id } : { id: node.id, position: 'after' })}>＋ {sel.kind === 'topic' ? '子节点' : '同级'}</button>
                 <button className="tbtn danger" disabled={busy || (sel.kind === 'topic' ? topics.length === 1 : node.topic.subtopics.length === 1)} onClick={async () => { if (await mapRef.current?.run('remove', { ids: [node.id] })) setSel(null); }}>删除</button>
-              </> : <span className="small">拖动节点可调序或换到别的主题；双击改名；选中后 Tab 加子节点、Enter 加同级、Delete 删除。只有两层：主题 → 知识点。</span>}
-              <span style={{ flex: 1 }} />
-              <button className="tbtn" onClick={() => mapRef.current?.fit()} data-testid="mindmap-fit" title="缩放到能看到全部节点">适配全部</button>
+              </> : <span className="small mmhint" title={MM_HINT}>{fitInfo.overflow ? '导图比画布大：拖动空白处平移，或点右上角「放大」。' : MM_HINT}</span>}
             </div>
-            <div className="mm">
+            <div className="mm" ref={wrapRef}>
               <MindElixirMap ref={mapRef} hierarchy={h} syllabusRevision={syllabusRevision} direction={mode} submit={submit} notify={flash}
-                selectedId={sel?.id ?? selectedSubId} height={wide ? 560 : 440}
+                selectedId={sel?.id ?? selectedSubId} height={height} onFit={(f) => setFitInfo((x) => (x.overflow === f.overflow ? x : f))}
                 onSelect={(n) => { if (!n || n.kind === 'root') { setSel(null); return; } setSel(n); if (n.conceptId) onSelectConcept(n.conceptId); }} />
             </div>
           </>

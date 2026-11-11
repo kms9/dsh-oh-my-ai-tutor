@@ -220,7 +220,31 @@ await step('mind map: mind-elixir renders the outline as a balanced map, fitted 
     const ts = [...r.querySelectorAll('.me-tpc')].map((t) => t.getBoundingClientRect());
     return { n: ts.length, clipped: ts.filter((x) => x.left < c.left - 1 || x.right > c.right + 1 || x.top < c.top - 1 || x.bottom > c.bottom + 1).length };
   });
-  await eventually(async () => { const k = await inside(); assert.equal(k.n, 1 + tops + subs); assert.equal(k.clipped, 0, `${k.clipped} nodes clipped`); });
+  const mmAttr = (n) => page.getAttribute('[data-testid=mindmap-elixir]', n);
+  // fit never goes below a readable zoom; when the map is bigger than that, the overflow is reported (pan or enlarge)
+  await eventually(async () => {
+    const k = await inside(); assert.equal(k.n, 1 + tops + subs);
+    assert.ok(Number(await mmAttr('data-scale')) >= 0.8, 'readable zoom');
+    if (await mmAttr('data-overflow') !== 'true') assert.equal(k.clipped, 0, `${k.clipped} nodes clipped`);
+  });
+  const h0 = (await page.locator('[data-testid=mindmap-elixir]').boundingBox()).height;
+  assert.ok(h0 >= 420, `canvas fills the column (${h0}px)`);
+  // enlarge: centre + right column, then the whole workbench; Esc restores
+  await page.click('[data-testid=mindmap-zoom]');
+  await page.waitForSelector('[data-testid=tutor-workbench][data-mm-zoom=wide]');
+  assert.equal(await page.locator('[data-testid=tutor-workbench] .center').isVisible(), false);
+  await page.click('[data-testid=mindmap-zoom-full]');
+  await page.waitForSelector('[data-testid=tutor-workbench][data-mm-zoom=full]');
+  await eventually(async () => {
+    const box = await page.locator('[data-testid=mindmap-elixir]').boundingBox();
+    assert.ok(box.width >= 1100 && box.height > h0 * 0.95, `whole workbench canvas ${box.width}x${box.height}`);
+    assert.ok(Number(await mmAttr('data-scale')) >= 0.8);
+    if (await mmAttr('data-overflow') !== 'true') assert.equal((await inside()).clipped, 0);
+  });
+  await page.screenshot({ path: join(shots, '04c-mindmap-enlarged.png') });
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('[data-testid=tutor-workbench][data-mm-zoom=off]');
+  assert.ok(await page.locator('[data-testid=tutor-workbench] .center').isVisible());
   assert.ok(await page.locator('[data-testid=mindmap-elixir] .lhs').count() > 0 && await page.locator('[data-testid=mindmap-elixir] .rhs').count() > 0, 'balanced left/right');
   await page.screenshot({ path: join(shots, '04a-mindmap-side.png') });
   await page.click('[data-testid=mindmap-modes] [data-mode=right]');
@@ -228,7 +252,8 @@ await step('mind map: mind-elixir renders the outline as a balanced map, fitted 
   await eventually(async () => {
     const leftOfRoot = await page.evaluate(() => { const r = document.querySelector('[data-testid=mindmap-elixir]'); const root = r.querySelector('.me-root .me-tpc, .me-root').getBoundingClientRect(); return [...r.querySelectorAll('.me-main > .me-wrapper > .me-parent > .me-tpc')].filter((t) => t.getBoundingClientRect().right < root.left).length; });
     assert.equal(leftOfRoot, 0, 'logic chart: every topic to the right of the root');
-    assert.equal((await inside()).clipped, 0);
+    assert.ok(Number(await mmAttr('data-scale')) >= 0.8);
+    if (await mmAttr('data-overflow') !== 'true') assert.equal((await inside()).clipped, 0);
   });
   await page.screenshot({ path: join(shots, '04b-mindmap-logic.png') });
   await page.click('[data-testid=mindmap-modes] [data-mode=list]');
@@ -236,6 +261,9 @@ await step('mind map: mind-elixir renders the outline as a balanced map, fitted 
   assert.equal(await page.locator('[data-testid=mindmap-list] .treelevel .treelevel .treerow').count(), subs);
   await page.click('[data-testid=mindmap-modes] [data-mode=side]');
   await page.waitForSelector('[data-testid=mindmap-elixir] .me-tpc');
+  // the interactive steps below use the enlarged map (how a learner edits a big map); the zoom only applies on this tab
+  await page.click('[data-testid=mindmap-zoom]'); await page.click('[data-testid=mindmap-zoom-full]');
+  await page.waitForSelector('[data-testid=tutor-workbench][data-mm-zoom=full]');
 });
 
 await step('mind map: manual select → 上移 / 删除 via toolbar (course.editOutline, actor learner)', async () => {
@@ -299,11 +327,9 @@ await step('mind map: only two levels — adding under a knowledge point / dropp
 
 await step('mind map: double-click rename and Tab on a topic add through the outline', async () => {
   const t = (await topics())[0];
-  // the map may still be re-rendering the previous step's refresh; retry the double-click until the editor opens
-  await eventually(async () => {
-    await page.dblclick(mmNode(t.id));
-    await page.waitForSelector('[data-testid=mindmap-elixir] #input-box', { timeout: 1500 });
-  }, 9000);
+  // no retry on purpose: the toolbar has a fixed height (selection never shifts the map) and the native dblclick opens the editor
+  await page.dblclick(mmNode(t.id));
+  await page.waitForSelector('[data-testid=mindmap-elixir] #input-box');
   await page.keyboard.press('ControlOrMeta+a');
   await page.keyboard.type('什么是间隔重复（导图改名）');
   await page.keyboard.press('Enter');

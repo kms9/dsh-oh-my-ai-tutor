@@ -137,6 +137,24 @@
 .omt.w-narrow .right{overflow:visible;border-left:0}
 .omt.w-narrow header.omt-header{padding:0 14px}
 .omt.w-narrow .hdr-right .chip.src{display:none}
+/* mind map: compact chrome so the canvas gets the height; temporary enlargement over the centre (+ side) column */
+.omt .card.mmcard{padding:8px 10px;margin:8px 0}
+.omt .mmcard .mm{margin-top:6px}
+.omt .mmbar{height:28px;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;align-items:center;scrollbar-width:none}
+.omt .mmbar .tbtn{flex:none}
+.omt .mmsel{margin-right:6px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:0 1 auto}
+.omt .mmhint{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.omt.mmz-wide .center,.omt.mmz-full .center,.omt.mmz-full .side{display:none}
+.omt.mmz-wide .app{grid-template-columns:260px minmax(0,1fr)}
+.omt.mmz-full .app{grid-template-columns:minmax(0,1fr)}
+.omt.w-mid.mmz-wide .app{grid-template-columns:220px minmax(0,1fr)}
+.omt.mmz-wide .right,.omt.mmz-full .right{grid-column:auto;border-top:0}
+.omt.w-mid.mmz-wide .right,.omt.w-mid.mmz-full .right{grid-column:auto}
+.omt.w-mid.mmz-full .app{grid-template-columns:minmax(0,1fr)}
+/* enlarged map: drop the column header, legend and activity so the canvas gets the space */
+.omt.mmz-wide .righthead,.omt.mmz-full .righthead,.omt.mmz-wide [data-testid=mindmap-view] .legend,.omt.mmz-full [data-testid=mindmap-view] .legend,.omt.mmz-wide [data-testid=activity],.omt.mmz-full [data-testid=activity]{display:none}
+.omt.mmz-wide .right .banner,.omt.mmz-full .right .banner{padding-top:6px;padding-bottom:6px;margin:6px 0}
+.omt.mmz-wide .right .title2,.omt.mmz-full .right .title2{margin-bottom:4px}
 /* chat card */
 .omt-card{font-family:Inter,-apple-system,"PingFang SC","Noto Sans CJK SC",sans-serif;border:1px solid #e1e7ed;border-radius:11px;background:#fbfcfd;padding:12px 14px;margin:6px 0;color:#1b2737;max-width:720px}
 .omt-card .hd{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
