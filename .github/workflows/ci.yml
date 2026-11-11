@@ -10,5 +10,26 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+      - run: npm ci
       - run: npm test
       - run: npm pack --dry-run
+  e2e:
+    # Playwright end-to-end run against the standalone workbench harness. No model / DeepSeek key needed:
+    # AI edits are driven through the same tool functions the agent would call.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run e2e
+        env:
+          PW_CHANNEL: bundled
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-out
+          path: .e2e-out/
