@@ -39,6 +39,7 @@ export const MindElixirMap = forwardRef(function MindElixirMap({ hierarchy, syll
     // fit the real content box (all topics) with a margin, but never below a readable zoom; then centre it
     const tpcs = nodes.querySelectorAll('.me-tpc');
     if (!tpcs.length) return;
+    me.map.style.transition = 'none'; // measure settled positions, not a running pan animation
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     const scale = me.scaleVal || 1;
     const nb = nodes.getBoundingClientRect();
@@ -59,7 +60,10 @@ export const MindElixirMap = forwardRef(function MindElixirMap({ hierarchy, syll
       if (props.current.direction === 'right' && w * s > cb.width) dx = cb.left + 24 - l;
       if (h * s > cb.height) dy = cb.top + 24 - t;
     }
-    me.move(dx, dy);
+    // set the translation directly: me.move() clamps each step to the node box, which left big maps off-canvas
+    const m = /translate3d\(\s*(-?[\d.]+)px,\s*(-?[\d.]+)px/.exec(me.map.style.transform || '');
+    const x0 = m ? Number(m[1]) : 0, y0 = m ? Number(m[2]) : 0;
+    me.map.style.transform = `translate3d(${x0 + dx}px, ${y0 + dy}px, 0) scale(${s})`;
     st.current.userZoomed = false;
     elRef.current?.setAttribute('data-scale', s.toFixed(2));
     elRef.current?.setAttribute('data-overflow', String(overflow));
