@@ -1,0 +1,73 @@
+{
+  "revision": 6,
+  "kind": "whiteboard-seed",
+  "boardBinding": "REQUIRED: whiteboard_list/read in the owning DSH Session",
+  "operations": [
+    {
+      "op": "add",
+      "id": "kp-kp-b0736478-1404-482e-afbe-081dc60de41a",
+      "type": "rectangle",
+      "x": 0,
+      "y": 0,
+      "width": 210,
+      "height": 90,
+      "text": "最近发展区 ZPD"
+    },
+    {
+      "op": "add",
+      "id": "kp-kp-7e7c13ed-642f-4cf8-915f-659149e62743",
+      "type": "rectangle",
+      "x": 260,
+      "y": 0,
+      "width": 210,
+      "height": 90,
+      "text": "支架教学"
+    },
+    {
+      "op": "add",
+      "id": "kp-kp-94fec9d8-0994-4517-83b8-15d695c3fc56",
+      "type": "rectangle",
+      "x": 520,
+      "y": 0,
+      "width": 210,
+      "height": 90,
+      "text": "形成性评价"
+    },
+    {
+      "op": "add",
+      "id": "kp-kp-2aba73e0-61c9-4a70-8ebe-a1ecbbe082b0",
+      "type": "rectangle",
+      "x": 780,
+      "y": 0,
+      "width": 210,
+      "height": 90,
+      "text": "教学策略选择"
+    },
+    {
+      "op": "add",
+      "id": "kp-kp-3b94ab0a-dbdb-4eda-83f7-667536384403",
+      "type": "rectangle",
+      "x": 0,
+      "y": 160,
+      "width": 210,
+      "height": 90,
+      "text": "学习证据与知识追踪"
+    },
+    {
+      "op": "add",
+      "id": "relation-rel-7a3ce7dc-738a-496a-a9ed-2bc7a9778c8e",
+      "type": "arrow",
+      "startId": "kp-kp-b0736478-1404-482e-afbe-081dc60de41a",
+      "endId": "kp-kp-7e7c13ed-642f-4cf8-915f-659149e62743"
+    },
+    {
+      "op": "add",
+      "id": "relation-rel-780400b4-4a05-48e2-bc32-3b70b36a320b",
+      "type": "arrow",
+      "startId": "kp-kp-94fec9d8-0994-4517-83b8-15d695c3fc56",
+      "endId": "kp-kp-7e7c13ed-642f-4cf8-915f-659149e62743"
+    }
+  ],
+  "truncated": false,
+  "warning": "Seed ONLY: use whiteboard_read to check current elements and revision before whiteboard_patch. Do not infer semantic graph edits from visual geometry."
+}

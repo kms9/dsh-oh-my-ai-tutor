@@ -1,0 +1,63 @@
+{
+  "revision": 6,
+  "nodes": [
+    {
+      "id": "kp-b0736478-1404-482e-afbe-081dc60de41a",
+      "label": "最近发展区 ZPD",
+      "kind": "knowledgePoint",
+      "mastery": "unverified",
+      "topicId": "topic-abf0d5a9-d9cf-44a4-afec-3b78513bf39a",
+      "sourceRefs": []
+    },
+    {
+      "id": "kp-7e7c13ed-642f-4cf8-915f-659149e62743",
+      "label": "支架教学",
+      "kind": "knowledgePoint",
+      "mastery": "unverified",
+      "topicId": "topic-abf0d5a9-d9cf-44a4-afec-3b78513bf39a",
+      "sourceRefs": []
+    },
+    {
+      "id": "kp-94fec9d8-0994-4517-83b8-15d695c3fc56",
+      "label": "形成性评价",
+      "kind": "knowledgePoint",
+      "mastery": "unverified",
+      "topicId": "topic-abf0d5a9-d9cf-44a4-afec-3b78513bf39a",
+      "sourceRefs": []
+    },
+    {
+      "id": "kp-2aba73e0-61c9-4a70-8ebe-a1ecbbe082b0",
+      "label": "教学策略选择",
+      "kind": "knowledgePoint",
+      "mastery": "unverified",
+      "topicId": "topic-03fd4f0d-e43c-426e-ab38-121ce9b8aa95",
+      "sourceRefs": []
+    },
+    {
+      "id": "kp-3b94ab0a-dbdb-4eda-83f7-667536384403",
+      "label": "学习证据与知识追踪",
+      "kind": "knowledgePoint",
+      "mastery": "unverified",
+      "topicId": "topic-03fd4f0d-e43c-426e-ab38-121ce9b8aa95",
+      "sourceRefs": []
+    }
+  ],
+  "edges": [
+    {
+      "id": "rel-7a3ce7dc-738a-496a-a9ed-2bc7a9778c8e",
+      "from": "kp-b0736478-1404-482e-afbe-081dc60de41a",
+      "to": "kp-7e7c13ed-642f-4cf8-915f-659149e62743",
+      "type": "explains",
+      "status": "candidate",
+      "evidenceRefs": []
+    },
+    {
+      "id": "rel-780400b4-4a05-48e2-bc32-3b70b36a320b",
+      "from": "kp-94fec9d8-0994-4517-83b8-15d695c3fc56",
+      "to": "kp-7e7c13ed-642f-4cf8-915f-659149e62743",
+      "type": "applies",
+      "status": "candidate",
+      "evidenceRefs": []
+    }
+  ]
+}

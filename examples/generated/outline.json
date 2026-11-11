@@ -1,0 +1,49 @@
+{
+  "revision": 6,
+  "topics": [
+    {
+      "id": "topic-abf0d5a9-d9cf-44a4-afec-3b78513bf39a",
+      "title": "教学决策的心理学基础",
+      "description": "",
+      "subtopics": [
+        {
+          "id": "sub-5ebe8018-f4f9-49ac-aadc-441c233d7607",
+          "title": "最近发展区 ZPD",
+          "description": "",
+          "conceptId": "kp-b0736478-1404-482e-afbe-081dc60de41a"
+        },
+        {
+          "id": "sub-9c08eb20-ee40-448d-9d2e-6e75cf8435ca",
+          "title": "支架教学",
+          "description": "",
+          "conceptId": "kp-7e7c13ed-642f-4cf8-915f-659149e62743"
+        },
+        {
+          "id": "sub-f11386a2-936b-4db0-b946-0661710d890a",
+          "title": "形成性评价",
+          "description": "",
+          "conceptId": "kp-94fec9d8-0994-4517-83b8-15d695c3fc56"
+        }
+      ]
+    },
+    {
+      "id": "topic-03fd4f0d-e43c-426e-ab38-121ce9b8aa95",
+      "title": "从理论到 AI Tutor",
+      "description": "",
+      "subtopics": [
+        {
+          "id": "sub-80bb8b3f-03ff-46fd-8744-674338498ad0",
+          "title": "教学策略选择",
+          "description": "",
+          "conceptId": "kp-2aba73e0-61c9-4a70-8ebe-a1ecbbe082b0"
+        },
+        {
+          "id": "sub-a418d85a-4678-4939-a0f2-8b4a954870c2",
+          "title": "学习证据与知识追踪",
+          "description": "",
+          "conceptId": "kp-3b94ab0a-dbdb-4eda-83f7-667536384403"
+        }
+      ]
+    }
+  ]
+}
