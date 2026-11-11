@@ -96,6 +96,27 @@ function applySyllabus(s, course, topics, now) {
   course.status = 'draft'; course.updatedAt = now;
 }
 
+const MAX_EVENTS = 2000;
+function requireSyllabusRevision(course, value) {
+  if (!Number.isInteger(value)) throw new Error(`syllabusRevision is required (current outline revision from tutor_visualize(outline) / tutor_read; now ${course.syllabus.revision})`);
+  if (value !== course.syllabus.revision)
+    throw Object.assign(new Error(`Outline changed (syllabus revision ${course.syllabus.revision}); read it again`), { code: 'conflict', syllabusRevision: course.syllabus.revision });
+}
+/** course.plan never silently drops what the caller did not mention: unmentioned topics/subtopics are kept (remove them with tutor_outline_edit). */
+function mergePlan(planned, oldTopics) {
+  const kept = [];
+  const mentioned = new Set(planned.map((t) => t.id));
+  const topics = planned.map((t) => {
+    const old = oldTopics.find((o) => o.id === t.id);
+    if (!old) return t;
+    const subIds = new Set(t.subtopics.map((x) => x.id));
+    const extra = old.subtopics.filter((x) => !subIds.has(x.id));
+    for (const x of extra) kept.push(x.id);
+    return extra.length ? { ...t, subtopics: [...t.subtopics, ...extra.map((x) => ({ ...x }))] } : t;
+  });
+  for (const o of oldTopics) if (!mentioned.has(o.id)) { kept.push(o.id); topics.push({ ...o, subtopics: o.subtopics.map((x) => ({ ...x })) }); }
+  return { topics, kept };
+}
 function clampIndex(value, length, field) {
   if (value === undefined || value === null) return length;
   if (!Number.isInteger(value) || value < 0) throw new Error(`${field} must be a non-negative integer`);
@@ -150,8 +171,12 @@ function editOutline(oldTopics, operations) {
       }
       case 'moveTopic': {
         const from = findTopic(op.topicId);
+        if (op.beforeId === op.topicId) break;
         const [t] = topics.splice(from, 1);
-        topics.splice(clampIndex(op.toIndex, topics.length, 'moveTopic.toIndex'), 0, t); break;
+        let at;
+        if (op.beforeId !== undefined) at = op.beforeId === null ? topics.length : findTopic(op.beforeId);
+        else at = clampIndex(op.toIndex, topics.length, 'moveTopic.toIndex');
+        topics.splice(at, 0, t); break;
       }
       case 'removeTopic': {
         topics.splice(findTopic(op.topicId), 1); break;
@@ -170,9 +195,19 @@ function editOutline(oldTopics, operations) {
       }
       case 'moveSubtopic': {
         const [ti, si] = findSub(op.subtopicId);
-        const target = op.toTopicId === undefined ? ti : findTopic(op.toTopicId);
+        if (op.beforeId === op.subtopicId) break;
+        let target = op.toTopicId === undefined ? ti : findTopic(op.toTopicId);
+        if (op.beforeId != null) {
+          const [bt] = findSub(op.beforeId);
+          if (op.toTopicId !== undefined && bt !== target) throw new Error('beforeId must be a knowledge point inside toTopicId');
+          target = bt;
+        }
         const [x] = topics[ti].subtopics.splice(si, 1);
-        topics[target].subtopics.splice(clampIndex(op.toIndex, topics[target].subtopics.length, 'moveSubtopic.toIndex'), 0, x);
+        const list = topics[target].subtopics;
+        // beforeId is resolved AFTER removing the moved item, so dragging down inside one list never lands one slot late.
+        const at = op.beforeId != null ? list.findIndex((y) => y.id === op.beforeId)
+          : op.beforeId === null ? list.length : clampIndex(op.toIndex, list.length, 'moveSubtopic.toIndex');
+        list.splice(at, 0, x);
         break;
       }
       case 'removeSubtopic': {
@@ -195,6 +230,20 @@ function finiteNumber(value, field, min = -100_000, max = 100_000) {
   if (!Number.isFinite(n) || n < min || n > max) throw new Error(`${field} must be a number in [${min}, ${max}]`);
   return Math.round(n * 10) / 10;
 }
+/** Board coordinates: any finite number is accepted but clamped into the visible canvas quadrant [0, 20000]. */
+function boardCoord(value, field) {
+  const n = finiteNumber(value, field);
+  return Math.min(20_000, Math.max(0, n));
+}
+const COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+/** Only plain hex colours reach CSS (no url(), no expressions). Empty string = default colour. */
+function boardColor(value) {
+  if (value === undefined) return undefined;
+  if (value === '' ) return '';
+  if (typeof value !== 'string' || !COLOR_RE.test(value)) throw new Error('color must be "#rgb", "#rrggbb" or ""');
+  return value;
+}
+const REF_RE = /^[A-Za-z0-9_-]{1,40}$/;
 function boardOf(s, courseId) {
   return s.boards[courseId] ?? { courseId, revision: 0, elements: [] };
 }
@@ -205,24 +254,35 @@ export function boardLayoutFor(course, conceptId) {
   const i = Math.max(0, order.indexOf(conceptId));
   return { x: 22 + (i % 2) * 216, y: 30 + Math.floor(i / 2) * 112 };
 }
-function boardPatch(s, course, board, operations, now, actor, maxOps = 100) {
+/**
+ * Apply one atomic board batch. Element ids are always assigned by the store (callers never invent ids);
+ * an `add` may carry a batch-local `ref` so later operations in the same batch can point at it (`from: "$ref"`).
+ * Only the internal seed path may pass explicit ids (`internalIds`).
+ */
+function boardPatch(s, course, board, operations, now, actor, maxOps = 100, internalIds = false) {
   if (!Array.isArray(operations) || !operations.length || operations.length > maxOps) throw new Error(`operations must contain 1..${maxOps} items`);
   const elements = board.elements.map((e) => ({ ...e }));
   const byId = new Map(elements.map((e) => [e.id, e]));
-  const live = (eid) => { const e = byId.get(eid); return e && !e.deleted ? e : null; };
+  const refs = new Map();
+  const resolve = (eid) => (typeof eid === 'string' && eid.startsWith('$') ? refs.get(eid.slice(1)) ?? eid : eid);
+  const live = (eid) => { const e = byId.get(resolve(eid)); return e && !e.deleted ? e : null; };
+  const deletedNow = new Set();
   const touched = [];
   operations.forEach((op, n) => {
     if (!op || typeof op !== 'object' || !['add', 'update', 'delete'].includes(op.op)) throw new Error(`operations[${n}].op must be add | update | delete`);
     if (op.op === 'add') {
       if (!BOARD_ELEMENT_TYPES.includes(op.type)) throw new Error(`operations[${n}].type must be one of ${BOARD_ELEMENT_TYPES.join(', ')}`);
+      if (op.id !== undefined && !internalIds) throw new Error(`operations[${n}]: add must not carry an id; the store assigns one (use ref:"name" and "$name" to point at it in the same batch)`);
+      if (op.ref !== undefined && (typeof op.ref !== 'string' || !REF_RE.test(op.ref) || refs.has(op.ref))) throw new Error(`operations[${n}].ref must be a new batch-local name matching ${REF_RE}`);
       const eid = op.id === undefined ? id(op.type === 'arrow' ? 'arrow' : op.type === 'note' ? 'note' : 'card') : op.id;
       if (typeof eid !== 'string' || !BOARD_ID_RE.test(eid)) throw new Error(`operations[${n}].id must match ${BOARD_ID_RE}`);
       if (byId.has(eid)) throw new Error(`Element id already used (ids are never reused): ${eid}`);
+      if (op.ref !== undefined) refs.set(op.ref, eid);
       const base = { id: eid, type: op.type, createdBy: actor, updatedBy: actor, createdAt: now, updatedAt: now };
       let el;
       if (op.type === 'arrow') {
         const from = live(op.from), to = live(op.to);
-        if (!from || !to || from.type === 'arrow' || to.type === 'arrow') throw new Error('Arrow needs from/to ids of live cards on this board (add cards first)');
+        if (!from || !to || from.type === 'arrow' || to.type === 'arrow') throw new Error('Arrow needs from/to ids of live cards on this board (ids only come from tutor_board_read, or "$ref" of a card added earlier in this batch)');
         if (from.id === to.id) throw new Error('Arrow cannot connect a card to itself');
         el = { ...base, from: from.id, to: to.id, label: optionalText(op.label, 'arrow.label', 80) ?? '' };
         if (op.relationId !== undefined) {
@@ -241,19 +301,21 @@ function boardPatch(s, course, board, operations, now, actor, maxOps = 100) {
         } else text = requireText(op.text, 'note.text', 500);
         const pos = conceptId ? boardLayoutFor(course, conceptId) : { x: 40, y: 40 };
         el = { ...base, ...(conceptId ? { conceptId } : { text }),
-          x: op.x === undefined ? pos.x : finiteNumber(op.x, 'x'), y: op.y === undefined ? pos.y : finiteNumber(op.y, 'y'),
+          x: op.x === undefined ? pos.x : boardCoord(op.x, 'x'), y: op.y === undefined ? pos.y : boardCoord(op.y, 'y'),
           width: op.width === undefined ? CARD.width : finiteNumber(op.width, 'width', 60, 800),
           height: op.height === undefined ? CARD.height : finiteNumber(op.height, 'height', 40, 600),
-          color: optionalText(op.color, 'color', 24) ?? '' };
+          color: boardColor(op.color) ?? '' };
       }
       elements.push(el); byId.set(eid, el); touched.push(eid);
     } else {
       const el = live(op.id);
-      if (!el) throw new Error(`Unknown or deleted element id: ${op.id}. Read the board first.`);
+      // Deleting something this same batch already removed (e.g. an arrow cascaded away with its card) is a no-op success.
+      if (!el && op.op === 'delete' && deletedNow.has(resolve(op.id))) return;
+      if (!el) throw new Error(`Unknown or deleted element id: ${op.id}. Element ids only come from tutor_board_read (never from tutor_visualize or invented); read the board again.`);
       if (op.op === 'delete') {
-        el.deleted = true; el.updatedAt = now; el.updatedBy = actor; touched.push(el.id);
+        el.deleted = true; el.deletedBy = 'direct'; el.updatedAt = now; el.updatedBy = actor; touched.push(el.id); deletedNow.add(el.id);
         if (el.type !== 'arrow') for (const a of elements) if (!a.deleted && a.type === 'arrow' && (a.from === el.id || a.to === el.id)) {
-          a.deleted = true; a.updatedAt = now; a.updatedBy = actor; touched.push(a.id);
+          a.deleted = true; a.deletedBy = 'cascade'; a.updatedAt = now; a.updatedBy = actor; touched.push(a.id); deletedNow.add(a.id);
         }
       } else {
         const fields = ['x', 'y', 'width', 'height', 'text', 'color', 'label'].filter((k) => op[k] !== undefined);
@@ -265,18 +327,18 @@ function boardPatch(s, course, board, operations, now, actor, maxOps = 100) {
           if (el.type !== 'note') throw new Error('Concept card text follows the syllabus; rename the subtopic instead');
           el.text = requireText(op.text, 'note.text', 500);
         }
-        if (op.x !== undefined) el.x = finiteNumber(op.x, 'x');
-        if (op.y !== undefined) el.y = finiteNumber(op.y, 'y');
+        if (op.x !== undefined) el.x = boardCoord(op.x, 'x');
+        if (op.y !== undefined) el.y = boardCoord(op.y, 'y');
         if (op.width !== undefined) el.width = finiteNumber(op.width, 'width', 60, 800);
         if (op.height !== undefined) el.height = finiteNumber(op.height, 'height', 40, 600);
-        if (op.color !== undefined) el.color = optionalText(op.color, 'color', 24);
+        if (op.color !== undefined) el.color = boardColor(op.color);
         if (op.label !== undefined) el.label = optionalText(op.label, 'arrow.label', 80);
         el.updatedAt = now; el.updatedBy = actor; touched.push(el.id);
       }
     }
   });
   if (elements.length > MAX_BOARD_ELEMENTS) throw new Error(`Board limit is ${MAX_BOARD_ELEMENTS} elements including tombstones`);
-  return { courseId: course.id, revision: board.revision + 1, elements, updatedAt: now, touched };
+  return { courseId: course.id, revision: board.revision + 1, elements, updatedAt: now, touched, refs: Object.fromEntries(refs) };
 }
 
 export function newState() {
@@ -333,20 +395,24 @@ export function transition(original, action, input = {}, opts = {}) {
     }
     case 'course.plan': {
       const course = requireId(s, 'courses', payload.courseId);
-      const topics = normalizeTopics(payload.topics, course.syllabus.topics);
+      requireSyllabusRevision(course, payload.syllabusRevision);
+      const { topics, kept } = mergePlan(normalizeTopics(payload.topics, course.syllabus.topics), course.syllabus.topics);
+      if (topics.length > 40) throw new Error('An outline must keep 1..40 topics');
       applySyllabus(s, course, topics, now);
-      result = { courseId: course.id, syllabus: course.syllabus }; break;
+      result = { courseId: course.id, syllabus: course.syllabus, ...(kept.length ? { keptUnmentioned: kept } : {}) }; break;
     }
     case 'course.editOutline': {
       const course = requireId(s, 'courses', payload.courseId);
-      if (payload.syllabusRevision !== undefined && payload.syllabusRevision !== course.syllabus.revision)
-        throw Object.assign(new Error(`Outline changed (syllabus revision ${course.syllabus.revision}); read it again`), { code: 'conflict' });
+      requireSyllabusRevision(course, payload.syllabusRevision);
       const topics = editOutline(course.syllabus.topics, payload.operations);
       applySyllabus(s, course, topics, now);
       result = { courseId: course.id, syllabus: course.syllabus, applied: payload.operations.length }; break;
     }
     case 'course.approve': {
+      // Hard gate: only the learner (workbench RPC) can approve, and only the exact outline revision on their screen.
+      if (actor !== 'learner') throw Object.assign(new Error('Only the learner can approve the outline (the 批准大纲 button in the AI 学习工作台); ask them to review and click it'), { code: 'forbidden' });
       const course = requireId(s, 'courses', payload.courseId);
+      requireSyllabusRevision(course, payload.syllabusRevision);
       if (!course.syllabus.topics.length) throw new Error('Cannot approve an empty syllabus');
       course.status = 'active'; course.syllabus.approvedAt = now; course.syllabus.approvedBy = actor; course.updatedAt = now;
       result = { courseId: course.id, status: course.status, syllabusRevision: course.syllabus.revision }; break;
@@ -363,6 +429,7 @@ export function transition(original, action, input = {}, opts = {}) {
       s.lessons[item.id] = item; result = item; break;
     }
     case 'lesson.approve': {
+      if (actor !== 'learner') throw Object.assign(new Error('Only the learner can approve a lesson plan (the 批准课时计划 button in the AI 学习工作台)'), { code: 'forbidden' });
       const lesson = requireId(s, 'lessons', payload.lessonId);
       if (lesson.phase !== 'plan_pending') throw new Error('Lesson plan is not awaiting approval');
       lesson.phase = 'teaching'; lesson.status = 'in_progress'; lesson.parts[0].status = 'in_progress'; lesson.updatedAt = now;
@@ -420,7 +487,7 @@ export function transition(original, action, input = {}, opts = {}) {
       const lesson = requireId(s, 'lessons', payload.lessonId);
       const note = { id: id('note'), courseId: lesson.courseId, lessonId: lesson.id,
         title: requireText(payload.title, 'note.title', 160), content: requireText(payload.content, 'note.content', 50_000),
-        author: actor === 'learner' || payload.author === 'learner' ? 'learner' : 'ai',
+        author: actor,
         sourceRefs: Array.isArray(payload.sourceRefs) ? payload.sourceRefs.filter(x => typeof x === 'string').slice(0, 100) : [],
         createdAt: now };
       s.notes[note.id] = note; result = note; break;
@@ -449,7 +516,8 @@ export function transition(original, action, input = {}, opts = {}) {
     case 'board.seed': {
       const course = requireId(s, 'courses', payload.courseId);
       const board = boardOf(s, course.id);
-      if (payload.baseRevision !== undefined && payload.baseRevision !== board.revision)
+      if (!Number.isInteger(payload.baseRevision)) throw new Error('baseRevision (board revision from tutor_board_read) is required');
+      if (payload.baseRevision !== board.revision)
         throw Object.assign(new Error(`Board changed (latest revision ${board.revision}); read it again`), { code: 'conflict', boardRevision: board.revision });
       const used = new Set(board.elements.map((e) => e.id));
       const cards = new Map(board.elements.filter((e) => !e.deleted && e.type === 'concept').map((e) => [e.conceptId, e.id]));
@@ -461,14 +529,16 @@ export function transition(original, action, input = {}, opts = {}) {
         used.add(cid); cards.set(sub.conceptId, cid);
         ops.push({ op: 'add', type: 'concept', conceptId: sub.conceptId, id: cid });
       }
-      // Candidate semantic relations are drawn once; a visual arrow never becomes a semantic edge by itself.
-      const drawn = new Set(board.elements.filter((e) => e.type === 'arrow' && e.relationId).map((e) => e.relationId));
+      // Candidate relation arrows: re-drawn when missing, EXCEPT ones somebody deleted on purpose (deletedBy "direct").
+      // Arrows that only vanished because their card was deleted (deletedBy "cascade") come back with the re-seeded card.
+      // A visual arrow never becomes a semantic edge by itself.
+      const drawn = new Set(board.elements.filter((e) => e.type === 'arrow' && e.relationId && (!e.deleted || e.deletedBy !== 'cascade')).map((e) => e.relationId));
       for (const r of Object.values(s.relations))
         if (r.courseId === course.id && !drawn.has(r.id) && cards.has(r.from) && cards.has(r.to))
           ops.push({ op: 'add', type: 'arrow', from: cards.get(r.from), to: cards.get(r.to), label: r.type, relationId: r.id });
       if (!ops.length) { result = { courseId: course.id, revision: board.revision, added: 0 }; break; }
-      const next = boardPatch(s, course, board, ops, now, actor, MAX_BOARD_ELEMENTS);
-      delete next.touched;
+      const next = boardPatch(s, course, board, ops, now, actor, MAX_BOARD_ELEMENTS, true);
+      delete next.touched; delete next.refs;
       s.boards[course.id] = next;
       result = { courseId: course.id, revision: next.revision, added: ops.length }; break;
     }
@@ -479,9 +549,9 @@ export function transition(original, action, input = {}, opts = {}) {
       if (payload.baseRevision !== board.revision)
         throw Object.assign(new Error(`Board changed (latest revision ${board.revision}); read it again and re-evaluate against human edits`), { code: 'conflict', boardRevision: board.revision });
       const next = boardPatch(s, course, board, payload.operations, now, actor);
-      const touched = next.touched; delete next.touched;
+      const { touched, refs } = next; delete next.touched; delete next.refs;
       s.boards[course.id] = next;
-      result = { courseId: course.id, revision: next.revision, touched }; break;
+      result = { courseId: course.id, revision: next.revision, touched, ...(Object.keys(refs).length ? { refs } : {}) }; break;
     }
     default: throw new Error(`Unknown tutor action: ${action}`);
   }
@@ -489,6 +559,8 @@ export function transition(original, action, input = {}, opts = {}) {
   s.events.push({ revision: s.revision, at: now, action, actor,
     entityId: result?.id ?? result?.lessonId ?? result?.courseId ?? null,
     ...(opts.summary ? { summary: String(opts.summary).slice(0, 200) } : {}) });
+  // Bounded ledger: the workbench shows the last 40; keep the file from growing without limit.
+  if (s.events.length > MAX_EVENTS) s.events.splice(0, s.events.length - MAX_EVENTS);
   return { state: s, result };
 }
 

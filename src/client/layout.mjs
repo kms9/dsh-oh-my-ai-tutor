@@ -109,8 +109,11 @@ export function boardBounds(elements) {
   if (!cards.length) return { x: 0, y: 0, width: 400, height: 300 };
   const minX = Math.min(...cards.map((e) => e.x)), minY = Math.min(...cards.map((e) => e.y));
   const maxX = Math.max(...cards.map((e) => e.x + e.width)), maxY = Math.max(...cards.map((e) => e.y + e.height));
-  return { x: Math.min(0, minX), y: Math.min(0, minY), width: maxX + 24, height: maxY + 24 };
+  return { x: Math.min(0, minX), y: Math.min(0, minY), width: Math.max(400, maxX + 24), height: Math.max(300, maxY + 24) };
 }
+
+/** Only plain hex colours reach inline CSS (defence in depth; the core rejects anything else). */
+export const safeColor = (c) => (typeof c === 'string' && /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(c) ? c : undefined);
 
 const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 export const escapeHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ESC[c]);
@@ -146,6 +149,7 @@ export function markdownToHtml(md) {
       while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) rows.push(lines[i++]);
       const cells = (r) => r.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
       const body = rows.filter((r) => !/^\s*\|[\s:|-]+\|\s*$/.test(r));
+      if (!body.length) continue; // separator-only table: render nothing instead of crashing the lesson pane
       const [head, ...rest] = body;
       out.push(`<table><thead><tr>${cells(head).map((c) => `<th>${inline(c)}</th>`).join('')}</tr></thead><tbody>${rest.map((r) => `<tr>${cells(r).map((c) => `<td>${inline(c)}</td>`).join('')}</tr>`).join('')}</tbody></table>`);
       continue;

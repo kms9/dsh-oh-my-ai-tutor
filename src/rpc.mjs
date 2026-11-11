@@ -47,7 +47,10 @@ export function createRpcHandler(store) {
       if (message?.type !== 'client-request' || message.method !== ENDPOINT || typeof message.rpcId !== 'string') throw new Error('Invalid request envelope');
       return reply({ ok: true, value: await dispatch(store, message.payload ?? {}) });
     } catch (error) {
-      return reply({ ok: false, error: { code: error.code === 'conflict' ? 'tutor/conflict' : 'tutor/request-failed', message: error.message } });
+      const code = error.code === 'conflict' ? 'tutor/conflict' : error.code === 'forbidden' ? 'tutor/forbidden' : 'tutor/request-failed';
+      return reply({ ok: false, error: { code, message: error.message,
+        ...(Number.isInteger(error.syllabusRevision) ? { syllabusRevision: error.syllabusRevision } : {}),
+        ...(Number.isInteger(error.boardRevision) ? { boardRevision: error.boardRevision } : {}) } });
     }
   };
 }

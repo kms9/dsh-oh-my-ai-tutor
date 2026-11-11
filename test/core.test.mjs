@@ -5,19 +5,19 @@ import { projectCourse } from '../src/projections.mjs';
 
 function seed() {
   let state = newState();
-  const run = (action, payload) => {
-    const res = transition(state, action, payload, {now:'2026-11-11T00:00:00.000Z'});
+  const run = (action, payload, actor) => {
+    const res = transition(state, action, payload, {now:'2026-11-11T00:00:00.000Z', actor});
     state = res.state; return res.result;
   };
   const goal = run('goal.create', {title:'Understand personalized learning', expectedOutcome:'Design and evaluate an AI Tutor'});
   const course = run('course.create', {goalId:goal.id, title:'Education learning sciences'});
-  const plan = run('course.plan', {courseId:course.id, topics:[{title:'How learning support works', subtopics:[
+  const plan = run('course.plan', {courseId:course.id, syllabusRevision:0, topics:[{title:'How learning support works', subtopics:[
     {title:'Zone of proximal development', description:'Independent vs assisted performance'},
     {title:'Scaffolding', description:'Temporary tailored help'},
     {title:'Formative assessment', description:'Evidence changes teaching'},
   ]}]});
   const ids = plan.syllabus.topics[0].subtopics.map(x=>x.conceptId);
-  run('course.approve',{courseId:course.id});
+  run('course.approve',{courseId:course.id, syllabusRevision:plan.syllabus.revision}, 'learner');
   return { get state() { return state; }, run,goal,course,ids,plan };
 }
 
@@ -26,7 +26,7 @@ test('course goal -> approved syllabus -> lesson -> review -> note -> finish',()
  const lesson=ctx.run('lesson.create',{courseId:ctx.course.id,title:'ZPD and scaffolding',parts:[{title:'Core distinction',objective:'Explain ZPD'},{title:'Transfer case',objective:'Design a scaffold'}]});
  assert.equal(lesson.phase,'plan_pending');
  assert.throws(()=>ctx.run('lesson.cover',{lessonId:lesson.id,partIndex:0}),/Wrong teaching/);
- ctx.run('lesson.approve',{lessonId:lesson.id});
+ ctx.run('lesson.approve',{lessonId:lesson.id},'learner');
  ctx.run('lesson.partWrite',{lessonId:lesson.id,partIndex:0,body:'ZPD is independent versus supported ability.'});
  ctx.run('lesson.cover',{lessonId:lesson.id,partIndex:0});
  assert.equal(ctx.state.concepts[ctx.ids[0]].mastery,'unverified');
@@ -45,7 +45,7 @@ test('course goal -> approved syllabus -> lesson -> review -> note -> finish',()
 test('skipping review does not imply mastery',()=>{
  const ctx=seed();
  const l=ctx.run('lesson.create',{courseId:ctx.course.id,title:'Introduction',parts:[{title:'ZPD',objective:'Explain ZPD'}]});
- ctx.run('lesson.approve',{lessonId:l.id});
+ ctx.run('lesson.approve',{lessonId:l.id},'learner');
  ctx.run('lesson.partWrite',{lessonId:l.id,partIndex:0,body:'ZPD lesson content.'});
  ctx.run('lesson.cover',{lessonId:l.id,partIndex:0});
  ctx.run('lesson.reviewEnd',{lessonId:l.id,skipped:true});
@@ -68,12 +68,14 @@ test('graph keeps course IDs, and prerequisite cycles are refused',()=>{
 test('syllabus update can preserve stable concept IDs by supplying existing IDs',()=>{
  const ctx=seed();
  const old=ctx.plan.syllabus.topics[0];
- const next=ctx.run('course.plan',{courseId:ctx.course.id,topics:[{id:old.id,title:'Learning theories (revised)',subtopics:[
+ const next=ctx.run('course.plan',{courseId:ctx.course.id,syllabusRevision:1,topics:[{id:old.id,title:'Learning theories (revised)',subtopics:[
    {id:old.subtopics[0].id,title:'ZPD (revised)'},
    {id:old.subtopics[1].id,title:'Scaffolding (revised)'},
  ]}]});
  assert.equal(next.syllabus.topics[0].subtopics[0].conceptId,ctx.ids[0]);
- assert.equal(ctx.state.concepts[ctx.ids[2]].status,'retired');
+ // course.plan never drops what it did not mention: the third knowledge point is kept, not retired
+ assert.equal(ctx.state.concepts[ctx.ids[2]].status,'active');
+ assert.deepEqual(next.keptUnmentioned,[old.subtopics[2].id]);
  assert.equal(ctx.state.courses[ctx.course.id].status,'draft');
 });
 
