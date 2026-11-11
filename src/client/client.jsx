@@ -1,5 +1,7 @@
 import React from 'react';
-import css from './workbench.css';
+import workbenchCss from './workbench.css';
+import mindElixirCss from 'mind-elixir/style.css';
+const css = `${mindElixirCss}\n${workbenchCss}`;
 import { Workbench } from './Workbench.jsx';
 import { TutorToolCard } from './ToolCard.jsx';
 

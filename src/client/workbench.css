@@ -89,6 +89,15 @@
 .omt .mm svg{display:block}
 .omt .mm g.mnode{cursor:pointer}
 .omt .mm g.mnode.dragging{opacity:.55}
+.omt .mm:has(.mm-elixir){overflow:hidden;background:#fbfcff}
+.omt .mm-elixir{width:100%;position:relative}
+.omt .mm-elixir .map-container{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif;font-size:13px;background:radial-gradient(#e9edf6 1px,transparent 1px);background-size:20px 20px}
+.omt .mm-elixir .map-container .me-root>.me-tpc{font-size:15px;font-weight:720;padding:9px 18px;box-shadow:0 6px 18px rgba(84,103,199,.22)}
+.omt .mm-elixir .map-container .me-main>.me-wrapper>.me-parent>.me-tpc{font-size:13px;font-weight:680;border:1.5px solid currentColor}
+.omt .mm-elixir .map-container .me-tpc{max-width:200px;line-height:1.45}
+.omt .mm-elixir .map-container .me-main>.me-wrapper>.me-parent>.me-tpc{max-width:220px}
+.omt .mm-elixir .map-container .selected{outline:2px solid #4256c4;outline-offset:2px}
+.omt .mm-elixir #input-box{font-family:inherit}
 .omt .board{height:420px;position:relative;border:1px solid #e1e5ee;border-radius:9px;overflow:auto;background:#fff;background-image:linear-gradient(#f5f6f9 1px,transparent 1px),linear-gradient(90deg,#f5f6f9 1px,transparent 1px);background-size:24px 24px}
 .omt .board.linking{cursor:crosshair}
 .omt .boardlayer{position:relative;transform-origin:0 0}

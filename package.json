@@ -63,6 +63,7 @@
   "devDependencies": {
     "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
     "esbuild": "0.25.12",
+    "mind-elixir": "6.0.0",
     "playwright": "1.65.0",
     "react": "18.3.1",
     "react-dom": "18.3.1"
