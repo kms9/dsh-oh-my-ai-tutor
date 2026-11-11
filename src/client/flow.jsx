@@ -218,9 +218,12 @@ const BoardFlowInner = forwardRef(function BoardFlowInner(props, ref) {
       pending.current.set(n.id, { x: n.position.x, y: n.position.y });
       if (x !== e.x || y !== e.y) ops.push({ op: 'update', id: n.id, x, y });
     }
-    if (ops.length) await onPatch(ops, ops.length === 1 ? `白板：移动「${label(ops[0].id)}」` : `白板：移动 ${ops.length} 张卡片`, undefined, d.rev);
+    const saved = ops.length ? await onPatch(ops, ops.length === 1 ? `白板：移动「${label(ops[0].id)}」` : `白板：移动 ${ops.length} 张卡片`, undefined, d.rev) : true;
     for (const n of dragged) pending.current.delete(n.id);
     setNodes((prev) => build(elementsRef.current, prev));
+    // A refused drop puts the cards back where the latest board has them. If the drag auto-panned the canvas away
+    // (holding a card at the edge pans), the learner would be left looking at empty space: bring the board back.
+    if (!saved) setTimeout(() => { if (!anyCardInView()) fitRef.current?.(); }, 60);
   }, [onPatch, build, dropOffset]);
 
   const link = useCallback(async (from, to, rev) => {
@@ -296,6 +299,13 @@ const BoardFlowInner = forwardRef(function BoardFlowInner(props, ref) {
     ro.observe(el); return () => ro.disconnect();
   }, []);
   const framesRef = useRef(frames); framesRef.current = frames;
+  const fitRef = useRef(null);
+  const anyCardInView = useCallback(() => {
+    const host = wrapRef.current?.getBoundingClientRect(); if (!host) return true;
+    return [...wrapRef.current.querySelectorAll('.rf-card')].some((c) => {
+      const r = c.getBoundingClientRect(); return r.right > host.left && r.left < host.right && r.bottom > host.top && r.top < host.bottom;
+    });
+  }, []);
   const liveRef = useRef(live); liveRef.current = live;
   const [fitState, setFitState] = useState({ overflow: false, zoom: 1 });
   const fit = useCallback(() => {
@@ -305,6 +315,7 @@ const BoardFlowInner = forwardRef(function BoardFlowInner(props, ref) {
     setFitState({ overflow: v.overflow, zoom: v.zoom });
     onFit?.({ overflow: v.overflow, zoom: v.zoom });
   }, [rf, size.w, size.h, onFit]);
+  fitRef.current = fit;
   const hasCards = live.length > 0;
   useEffect(() => { if (size.w && size.h && hasCards) fit(); }, [size.w, size.h, hasCards]); // eslint-disable-line react-hooks/exhaustive-deps
 

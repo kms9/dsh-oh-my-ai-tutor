@@ -561,6 +561,10 @@ async function assertSectionsClean(p = page, label = '') {
     const inside = (a, b) => a.left >= b.left - 1 && a.right <= b.right + 1 && a.top >= b.top - 1 && a.bottom <= b.bottom + 1;
     const frames = [...document.querySelectorAll('[data-testid=board] .rf-section')].map((f) => ({ id: f.dataset.section, r: f.getBoundingClientRect(), t: f.querySelector('.rf-section-title').getBoundingClientRect() }));
     const out = [];
+    const host = document.querySelector('[data-testid=board]').getBoundingClientRect();
+    const cards = [...document.querySelectorAll('[data-testid=board] .rf-card')];
+    if (!cards.length) out.push('no cards rendered');
+    else if (!cards.some((c) => { const r = c.getBoundingClientRect(); return r.right > host.left && r.left < host.right && r.bottom > host.top && r.top < host.bottom; })) out.push('no card in view');
     for (let i = 0; i < frames.length; i++) for (let j = i + 1; j < frames.length; j++) if (ov(frames[i].r, frames[j].r)) out.push(`sections ${i}/${j} overlap`);
     for (const c of document.querySelectorAll('[data-testid=board] .rf-card')) {
       const r = c.getBoundingClientRect(); const name = c.dataset.element;
