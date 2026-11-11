@@ -4,6 +4,11 @@
  * Sections are a VIEW-LAYER grouping in this phase: nothing here is stored. A card belongs to the section of its
  * syllabus topic (concept cards via concept.topicId / the subtopic that owns the concept; notes by where they sit or
  * what they are connected to). The board schema and the CAS contract are unchanged.
+ *
+ * `packSections` lays the sections out for display so they never overlap: every section keeps the relative layout
+ * of its cards (as stored), and the whole section is translated into a 2-column grid in syllabus order. A card is
+ * drawn at stored + its section offset; a drop is stored as drawn − that offset. For a board laid out by
+ * board.seed / 按主题整理 every offset is 0, so screen and stored coordinates agree.
  */
 export const BOARD_CARD = Object.freeze({ width: 196, height: 72 });
 export const SECTION = Object.freeze({ pad: 16, title: 38, gap: 14, cols: 2, columns: 2, sectionGap: 34, origin: 24 });
@@ -52,10 +57,15 @@ function bbox(cards) {
   return { x: x0 - SECTION.pad, y: y0 - SECTION.title, width: x1 - x0 + SECTION.pad * 2, height: y1 - y0 + SECTION.title + SECTION.pad };
 }
 
+/** A note this close (px) to a topic's concept cards joins that section when nothing else decides. */
+export const NOTE_NEAR = 120;
+const gap = (p, r) => Math.hypot(Math.max(r.x - p.x, 0, p.x - (r.x + r.width)), Math.max(r.y - p.y, 0, p.y - (r.y + r.height)));
+
 /**
  * topicId (or null) for every card on the board.
  * - concept card → the syllabus topic that owns the concept (fallback concept.topicId)
- * - note → the section it sits in (by its centre), else the topic of a card it is connected to, else null (free note)
+ * - note → the topic of a card it is connected to by an arrow (a note annotates that card), else the section it
+ *   sits in (by its centre), else the section within NOTE_NEAR px, else null (free note)
  */
 export function assignTopics(elements, topics, concepts = []) {
   const byConcept = new Map();
@@ -73,14 +83,65 @@ export function assignTopics(elements, topics, concepts = []) {
   for (const n of cards.filter((c) => c.type !== 'concept')) {
     const p = centre(n);
     let topic = null;
-    for (const t of topics) { const r = conceptFrames.get(t.id); if (r && inside(p, r)) { topic = t.id; break; } }
-    if (!topic) for (const a of arrows) {
+    for (const a of arrows) {
       const other = a.from === n.id ? a.to : a.to === n.id ? a.from : null;
       if (other && out.get(other)) { topic = out.get(other); break; }
+    }
+    if (!topic) for (const t of topics) { const r = conceptFrames.get(t.id); if (r && inside(p, r)) { topic = t.id; break; } }
+    if (!topic) {
+      let best = NOTE_NEAR;
+      for (const t of topics) { const r = conceptFrames.get(t.id); if (r) { const d = gap(p, r); if (d <= best) { best = d; topic = t.id; } } }
     }
     out.set(n.id, topic);
   }
   return out;
+}
+
+const overlaps = (p, q) => !(p.x + p.width <= q.x || q.x + q.width <= p.x || p.y + p.height <= q.y || q.y + q.height <= p.y);
+
+/**
+ * Display layout of the sections (view only, nothing is stored).
+ * Returns { assignment, frames, offsetOf(cardId) → { dx, dy }, groupOffset(topicId | null) → { dx, dy } }.
+ * Frames are pairwise disjoint and every card, drawn at stored + offset, lies inside its own frame. Free notes keep
+ * their stored position unless that would put them over a section; then they go below the last row.
+ */
+export function packSections(elements, topics, concepts = [], assignment = assignTopics(elements, topics, concepts)) {
+  const cards = elements.filter((e) => e.type !== 'arrow');
+  const groups = topics.map((t, index) => ({ id: t.id, title: t.title, index, members: cards.filter((c) => assignment.get(c.id) === t.id) }))
+    .filter((g) => g.members.length);
+  for (const g of groups) { const b = bbox(g.members); g.stored = { ...b, height: b.height + SECTION.pad }; }
+  const colW = Array.from({ length: SECTION.columns }, (_, j) => Math.max(SECTION_W, ...groups.filter((_, i) => i % SECTION.columns === j).map((g) => g.stored.width)));
+  const colX = colW.map((_, j) => SECTION.origin + colW.slice(0, j).reduce((a, w) => a + w + SECTION.sectionGap, 0));
+  let y = SECTION.origin;
+  for (let i = 0; i < groups.length; i += SECTION.columns) {
+    const row = groups.slice(i, i + SECTION.columns);
+    row.forEach((g, j) => { g.frame = { x: colX[j], y, width: g.stored.width, height: g.stored.height }; });
+    y += Math.max(...row.map((g) => g.stored.height)) + SECTION.sectionGap;
+  }
+  const offsets = new Map(groups.map((g) => [g.id, { dx: g.frame.x - g.stored.x, dy: g.frame.y - g.stored.y }]));
+  const free = cards.filter((c) => !assignment.get(c.id));
+  let freeOffset = { dx: 0, dy: 0 };
+  if (free.length) {
+    const fb = bbox(free);
+    if (groups.some((g) => overlaps(fb, g.frame))) freeOffset = { dx: SECTION.origin - fb.x, dy: y - fb.y };
+  }
+  const groupOffset = (topicId) => (topicId && offsets.get(topicId)) || (topicId ? { dx: 0, dy: 0 } : freeOffset);
+  return {
+    assignment,
+    frames: groups.map((g) => ({ id: g.id, title: g.title, index: g.index, count: g.members.length, ...g.frame })),
+    groupOffset,
+    offsetOf: (cardId) => groupOffset(assignment.get(cardId) ?? null),
+  };
+}
+
+/** Frames around cards at the positions given (used while a drag is in flight: offsets stay frozen until the drop). */
+export function framesAround(cards, topics, assignment) {
+  const frames = [];
+  topics.forEach((t, index) => {
+    const members = cards.filter((c) => assignment.get(c.id) === t.id);
+    if (members.length) { const b = bbox(members); frames.push({ id: t.id, title: t.title, index, count: members.length, ...b, height: b.height + SECTION.pad }); }
+  });
+  return frames;
 }
 
 /** Section frames for the current card positions (view only): one per topic that has cards on the board. */

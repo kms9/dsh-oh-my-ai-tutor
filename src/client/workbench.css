@@ -72,6 +72,7 @@
 .omt .tbtn{border:1px solid #e0e6ef;background:#fff;border-radius:6px;padding:3px 8px;font-size:11px;color:#5d6c82;line-height:1.5}
 .omt .tbtn:hover{background:#f2f5fd;color:#3344a0}
 .omt .tbtn.on{background:#e6ecfc;border-color:#a7b3ef;color:#354da5}
+.omt .tbtn.suggest:not([disabled]){background:#fff7e6;border-color:#f0b34a;color:#8a5300;box-shadow:0 0 0 2px #f0b34a33}
 .omt .tbtn.danger:hover{background:#fdf0ec;color:#a4513a;border-color:#efc7bb}
 .omt .tbtn:disabled{opacity:.45;cursor:default}
 .omt .rowtools{display:none;gap:3px}

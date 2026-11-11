@@ -589,14 +589,16 @@ function BoardView({ view, course, topics, concepts, busy, mutate, outlineEdit, 
       </div>
       <div className="tools rfbar" data-testid="board-toolbar">
         <button className="tbtn" disabled={busy || !missing} onClick={() => mutate('board.seed', { courseId: course.id, baseRevision: view.boardRevision }, '白板：从大纲生成知识点卡片', '已生成白板卡片')} data-testid="board-seed">{missing ? `从大纲生成（${missing}）` : '已同步大纲'}</button>
-        <button className="tbtn" disabled={busy || !arrange.length} data-testid="board-arrange" title="把卡片按课程主题放进各自的分区（一次保存，可被冲突检测拦下）"
+        <button className={`tbtn${arrange.length >= 3 ? ' suggest' : ''}`} disabled={busy || !arrange.length} data-testid="board-arrange" title="把卡片按课程主题放进各自的分区（一次保存，可被冲突检测拦下）"
           onClick={async () => { if (await patch(arrange, '白板：按主题整理', '已按主题整理')) setTimeout(() => flowRef.current?.fit(), 60); }}>按主题整理</button>
         <button className="tbtn" disabled={busy || !cards.length} data-testid="board-add-note" onClick={() => flowRef.current?.addNote()}>＋ 便签</button>
         <button className={`tbtn ${linkMode ? 'on' : ''}`} disabled={busy || cards.length < 2} data-testid="board-link" onClick={() => setLinkMode((v) => !v)}>{linkMode ? '连线中：依次点两张卡片' : '连线'}</button>
         <button className="tbtn danger" disabled={busy || !selection.length} data-testid="board-delete" onClick={() => flowRef.current?.deleteSelected()}>删除{selection.length > 1 ? `（${selection.length}）` : ''}</button>
         <span className="rflegend"><i className="lg-ai" />AI<i className="lg-me" />你<i className="lg-rel" />候选关系</span>
       </div>
-      <div className="small rf-hint" title={BOARD_HINT}>{fitInfo.overflow ? '白板比画布大：拖动空白处或滚轮平移，或点右上角「放大」。' : BOARD_HINT}</div>
+      <div className="small rf-hint" title={BOARD_HINT} data-testid="board-hint">{arrange.length >= 3
+        ? '分区已自动排开、互不重叠；卡片在分区里还没对齐，点「按主题整理」可一次排整齐（这一步会保存）。'
+        : fitInfo.overflow ? '白板比画布大：拖动空白处或滚轮平移，或点右上角「放大」。' : BOARD_HINT}</div>
       <div className="rfhost" ref={wrapRef}>
         {els.length ? (
           <BoardFlow ref={flowRef} elements={els} revision={view.boardRevision} topics={topics} concepts={concepts} height={height} editable

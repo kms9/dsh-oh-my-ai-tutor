@@ -554,6 +554,25 @@ const arrowMidpoint = (p, id) => p.evaluate((id) => {
   }
   return null;
 }, id);
+/** Sections never overlap: frames pairwise disjoint; each card fully inside one frame (or a free note over none), never over a section title. */
+async function assertSectionsClean(p = page, label = '') {
+  const bad = await p.evaluate(() => {
+    const ov = (a, b, m = 1) => a.left < b.right - m && b.left < a.right - m && a.top < b.bottom - m && b.top < a.bottom - m;
+    const inside = (a, b) => a.left >= b.left - 1 && a.right <= b.right + 1 && a.top >= b.top - 1 && a.bottom <= b.bottom + 1;
+    const frames = [...document.querySelectorAll('[data-testid=board] .rf-section')].map((f) => ({ id: f.dataset.section, r: f.getBoundingClientRect(), t: f.querySelector('.rf-section-title').getBoundingClientRect() }));
+    const out = [];
+    for (let i = 0; i < frames.length; i++) for (let j = i + 1; j < frames.length; j++) if (ov(frames[i].r, frames[j].r)) out.push(`sections ${i}/${j} overlap`);
+    for (const c of document.querySelectorAll('[data-testid=board] .rf-card')) {
+      const r = c.getBoundingClientRect(); const name = c.dataset.element;
+      const hit = frames.filter((f) => ov(r, f.r));
+      if (hit.length > 1) out.push(`${name} over ${hit.length} sections`);
+      if (hit.length === 1 && !inside(r, hit[0].r)) out.push(`${name} sticks out of its section`);
+      if (frames.some((f) => ov(r, f.t))) out.push(`${name} covers a section title`);
+    }
+    return out;
+  });
+  assert.deepEqual(bad, [], `sections clean ${label}`);
+}
 const centreOf = async (loc) => { const b = await loc.boundingBox(); return { x: b.x + b.width / 2, y: b.y + b.height / 2, b }; };
 
 await step('board (React Flow): seed from syllabus → cards in topic sections + candidate relation arrow; enlarge / whole workbench / restore', async () => {
@@ -573,6 +592,7 @@ await step('board (React Flow): seed from syllabus → cards in topic sections +
     }).length;
   });
   assert.equal(misplaced, 0);
+  await assertSectionsClean(page, 'after seed');
   assert.equal(await page.locator('[data-testid=board] .rf-card[data-actor=learner] .rf-by.me').count(), active, 'learner-seeded cards are tagged 你');
   await page.screenshot({ path: join(shots, '06-board-seeded.png') });
   await page.click('[data-testid=board-zoom]');
@@ -580,6 +600,7 @@ await step('board (React Flow): seed from syllabus → cards in topic sections +
   await page.click('[data-testid=board-zoom-full]');
   await page.waitForSelector('[data-testid=tutor-workbench][data-mm-zoom=full]');
   await eventually(async () => assert.ok((await page.locator('[data-testid=board]').boundingBox()).width > 1100));
+  await assertSectionsClean(page, 'whole workbench');
   await page.screenshot({ path: join(shots, '06b-board-whole-workbench.png') });
   // the interactive board steps below run on the enlarged board (as a learner editing a big board would)
 });
@@ -597,6 +618,7 @@ await step('board: drag a card → one board.patch update x/y (actor learner, ba
   });
   const ev = (await readState()).events.at(-1);
   assert.equal(ev.action, 'board.patch'); assert.equal(ev.actor, 'learner'); assert.match(ev.summary, /移动/);
+  await eventually(() => assertSectionsClean(page, 'after a learner drag'));
 });
 
 await step('board: connect two cards by dragging from a side handle (onConnect → add arrow)', async () => {
@@ -656,6 +678,26 @@ await step('board: double-click a knowledge-point card renames it through the ou
   await page.waitForSelector(`[data-testid=board] .rf-card[data-concept="${conceptId}"] >> text=适用场景（白板改名）`);
 });
 
+await step('board: an interleaved pre-v5 layout (topics mixed per row) is drawn with no overlapping sections, whole workbench and right column', async () => {
+  const b = await tools.tutor_board_read.execute({ courseId: cid });
+  const order = (await topics()).flatMap((t) => t.subtopics.map((s) => s.conceptId));
+  const cards = b.elements.filter((e) => e.type === 'concept').sort((x, y) => order.indexOf(x.conceptId) - order.indexOf(y.conceptId));
+  const operations = cards.map((e, i) => ({ op: 'update', id: e.id, x: 22 + (i % 2) * 216, y: 30 + Math.floor(i / 2) * 112, width: 164, height: 66 }));
+  const r = await tools.tutor_board_patch.execute({ courseId: cid, baseRevision: b.revision, operations });
+  await eventually(async () => assert.equal(await page.getAttribute('[data-testid=board]', 'data-revision'), String(r.revision)));
+  await page.waitForTimeout(300);
+  await assertSectionsClean(page, 'pre-v5 layout, whole workbench');
+  assert.match(await page.textContent('[data-testid=board-hint]'), /按主题整理/, 'the learner is pointed at 按主题整理');
+  assert.equal(await page.locator('[data-testid=board-arrange].suggest').count(), 1);
+  await page.screenshot({ path: join(shots, '06c-board-pre-v5-layout-packed.png') });
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('[data-testid=tutor-workbench][data-mm-zoom=off]');
+  await page.click('[data-testid=board-fit]'); await page.waitForTimeout(300);
+  await assertSectionsClean(page, 'pre-v5 layout, right column');
+  await page.click('[data-testid=board-zoom]'); await page.click('[data-testid=board-zoom-full]');
+  await page.waitForSelector('[data-testid=tutor-workbench][data-mm-zoom=full]');
+});
+
 await step('board: 按主题整理 moves every card into its topic section in one CAS batch', async () => {
   await page.waitForSelector('[data-testid=board-arrange]:not([disabled])');
   const rev0 = (await readState()).boards[cid].revision;
@@ -664,6 +706,7 @@ await step('board: 按主题整理 moves every card into its topic section in on
   await page.waitForSelector('[data-testid=board-arrange][disabled]');
   const ev = (await readState()).events.at(-1);
   assert.equal(ev.summary, '白板：按主题整理'); assert.equal(ev.actor, 'learner');
+  await assertSectionsClean(page, 'after 按主题整理');
 });
 
 await step('board: AI edits via tutor_board_read/patch refresh the board live, highlighted and tagged AI', async () => {
@@ -686,6 +729,9 @@ await step('board: AI edits via tutor_board_read/patch refresh the board live, h
   assert.match(await page.textContent(`[data-testid=board] .rf-card[data-element="${r.refs.n1}"] .rf-by`), /AI/);
   assert.equal(await page.getAttribute('[data-testid=board]', 'data-revision'), String(r.revision));
   console.log(`     AI note on screen ${ms} ms after the write`);
+  await eventually(() => assertSectionsClean(page, 'after an AI note beside a card'));
+  const tgt = await cardById(target.id).boundingBox(), nb = await cardById(r.refs.n1).boundingBox();
+  assert.ok(nb.x > tgt.x + tgt.width - 2 && Math.abs(nb.y - tgt.y) < 4, 'the AI note is drawn to the right of its card');
   await page.screenshot({ path: join(shots, '08-board-after-ai.png') });
 });
 
@@ -719,6 +765,7 @@ await step('CAS: a stale learner drag is rejected, the board reloads and says so
   const after = await liveEl(id);
   assert.deepEqual([after.x, after.y], [before.x, before.y], 'stale drag not written');
   await eventually(async () => assert.ok(await slow.locator('[data-testid=board] .rf-card >> text=AI 并发写入').count() === 1, 'reloaded to the latest board'));
+  await assertSectionsClean(slow, 'conflict page');
   await slow.screenshot({ path: join(shots, '08b-board-conflict.png') });
   await slow.close();
 });

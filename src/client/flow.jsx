@@ -1,6 +1,6 @@
 import React, { createContext, forwardRef, useCallback, useContext, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { ReactFlow, ReactFlowProvider, Background, BackgroundVariant, MiniMap, Handle, Position, MarkerType, ConnectionMode, applyNodeChanges, useReactFlow } from '@xyflow/react';
-import { sectionFrames, assignTopics } from '../board-layout.mjs';
+import { packSections, framesAround, NOTE_NEAR } from '../board-layout.mjs';
 import { edgeSides, fitViewport, unionBounds, RELATION_LABEL } from './flow-layout.mjs';
 import { MASTERY_LABEL, safeColor } from './layout.mjs';
 
@@ -109,7 +109,10 @@ const BoardFlowInner = forwardRef(function BoardFlowInner(props, ref) {
   const revRef = useRef(revision); revRef.current = revision;
   const seen = useRef(null);
 
-  const assignment = useMemo(() => assignTopics(elements, topics, concepts), [elements, topics, concepts]);
+  // Sections are packed for display (never overlapping); a card is drawn at stored + its section offset.
+  const layout = useMemo(() => packSections(elements, topics, concepts), [elements, topics, concepts]);
+  const layoutRef = useRef(layout); layoutRef.current = layout;
+  const assignment = layout.assignment;
   const topicIndex = useMemo(() => new Map(topics.map((t, i) => [t.id, i])), [topics]);
   const colorOf = useCallback((id) => { const t = assignment.get(id); return t ? colorAt(topicIndex.get(t)) : FREE; }, [assignment, topicIndex]);
 
@@ -117,11 +120,12 @@ const BoardFlowInner = forwardRef(function BoardFlowInner(props, ref) {
     const prevById = new Map(prev.map((n) => [n.id, n]));
     return els.filter((e) => e.type !== 'arrow').map((e) => {
       const p = prevById.get(e.id), keep = pending.current.get(e.id);
-      return { id: e.id, type: 'card', position: keep ?? { x: e.x, y: e.y }, width: e.width, height: e.height,
+      const o = layout.offsetOf(e.id);
+      return { id: e.id, type: 'card', position: keep ?? { x: e.x + o.dx, y: e.y + o.dy }, width: e.width, height: e.height,
         data: { el: e, color: colorOf(e.id) }, selected: p?.selected ?? false, zIndex: 2, ...(p?.measured ? { measured: p.measured } : {}),
         draggable: editable && editing?.id !== e.id, connectable: editable };
     });
-  }, [colorOf, editable, editing]);
+  }, [colorOf, editable, editing, layout]);
   useEffect(() => { setNodes((prev) => build(elements, prev)); }, [elements, build]);
 
   // AI changes that arrive by polling get a short highlight, so the learner sees what moved.
@@ -139,9 +143,11 @@ const BoardFlowInner = forwardRef(function BoardFlowInner(props, ref) {
   }, [elements]);
   useEffect(() => () => clearTimeout(freshTimer.current), []);
 
-  // Section frames follow the cards (also while one is being dragged).
+  // Section frames: the packed layout at rest; while a drag (or its save) is in flight they follow the cards on screen
+  // with offsets frozen, and are packed again once the board has the new positions.
   const live = useMemo(() => nodes.map((n) => ({ ...n.data.el, x: n.position.x, y: n.position.y })), [nodes]);
-  const frames = useMemo(() => sectionFrames([...live, ...elements.filter((e) => e.type === 'arrow')], topics, concepts), [live, elements, topics, concepts]);
+  const moving = nodes.some((n) => pending.current.has(n.id));
+  const frames = useMemo(() => (moving ? framesAround(live, topics, assignment) : layout.frames), [moving, live, topics, assignment, layout]);
   const allNodes = useMemo(() => [
     ...frames.map((f) => ({ id: `section:${f.id}`, type: 'section', position: { x: f.x, y: f.y }, width: f.width, height: f.height,
       data: { id: f.id, title: f.title, count: f.count, color: colorAt(f.index) }, draggable: false, selectable: false, connectable: false,
@@ -181,6 +187,19 @@ const BoardFlowInner = forwardRef(function BoardFlowInner(props, ref) {
   }, []);
 
   const label = (id) => elementsRef.current.find((e) => e.id === id)?.text ?? id;
+  /** Offset of the section a point (drawn coordinates) belongs to: a connected note keeps its card's section. */
+  const dropOffset = useCallback((p, el) => {
+    const L = layoutRef.current;
+    if (el && L.assignment.get(el.id) && elementsRef.current.some((a) => a.type === 'arrow' && (a.from === el.id || a.to === el.id))) return L.offsetOf(el.id);
+    const hit = L.frames.find((f) => p.x >= f.x && p.x <= f.x + f.width && p.y >= f.y && p.y <= f.y + f.height);
+    if (hit) return L.groupOffset(hit.id);
+    let best = null, bd = NOTE_NEAR;
+    for (const f of L.frames) {
+      const d = Math.hypot(Math.max(f.x - p.x, 0, p.x - f.x - f.width), Math.max(f.y - p.y, 0, p.y - f.y - f.height));
+      if (d <= bd) { bd = d; best = f; }
+    }
+    return L.groupOffset(best ? best.id : null);
+  }, []);
   const onNodeDragStart = useCallback((_e, _n, dragged) => {
     dragRef.current = { rev: revRef.current, ids: dragged.map((n) => n.id) };
     for (const n of dragged) pending.current.set(n.id, n.position);
@@ -192,14 +211,17 @@ const BoardFlowInner = forwardRef(function BoardFlowInner(props, ref) {
     const ops = [];
     for (const n of dragged) {
       const e = byId.get(n.id); if (!e) continue;
-      const x = clampCoord(n.position.x), y = clampCoord(n.position.y);
-      pending.current.set(n.id, { x, y });
+      // stored = drawn − section offset. Concept cards stay in their syllabus topic; an unconnected note joins the
+      // section it is dropped on (or the nearest one within NOTE_NEAR), otherwise it becomes a free note.
+      const o = e.type === 'concept' ? layoutRef.current.offsetOf(e.id) : dropOffset({ x: n.position.x + e.width / 2, y: n.position.y + e.height / 2 }, e);
+      const x = clampCoord(n.position.x - o.dx), y = clampCoord(n.position.y - o.dy);
+      pending.current.set(n.id, { x: n.position.x, y: n.position.y });
       if (x !== e.x || y !== e.y) ops.push({ op: 'update', id: n.id, x, y });
     }
     if (ops.length) await onPatch(ops, ops.length === 1 ? `白板：移动「${label(ops[0].id)}」` : `白板：移动 ${ops.length} 张卡片`, undefined, d.rev);
     for (const n of dragged) pending.current.delete(n.id);
     setNodes((prev) => build(elementsRef.current, prev));
-  }, [onPatch, build]);
+  }, [onPatch, build, dropOffset]);
 
   const link = useCallback(async (from, to, rev) => {
     if (!from || !to || from === to) return;
@@ -257,7 +279,10 @@ const BoardFlowInner = forwardRef(function BoardFlowInner(props, ref) {
     e.preventDefault(); deleteSelected();
   };
 
-  const addNoteAt = useCallback((p, text = '新便签') => onPatch([{ op: 'add', type: 'note', text, x: clampCoord(p.x), y: clampCoord(p.y) }], '白板：添加便签', '已添加便签（双击可编辑）', revRef.current), [onPatch]);
+  const addNoteAt = useCallback((p, text = '新便签') => {
+    const o = dropOffset({ x: p.x + 98, y: p.y + 36 });
+    return onPatch([{ op: 'add', type: 'note', text, x: clampCoord(p.x - o.dx), y: clampCoord(p.y - o.dy) }], '白板：添加便签', '已添加便签（双击可编辑）', revRef.current);
+  }, [onPatch, dropOffset]);
   const onDoubleClick = (e) => {
     if (!editable || !e.target.classList?.contains('react-flow__pane')) return;
     const p = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });

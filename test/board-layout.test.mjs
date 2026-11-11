@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { boardSeedPosition, assignTopics, sectionFrames, arrangeOps, BOARD_CARD, sectionGrid } from '../src/board-layout.mjs';
+import { boardSeedPosition, assignTopics, sectionFrames, arrangeOps, BOARD_CARD, sectionGrid, packSections } from '../src/board-layout.mjs';
 import { edgeSides, graphClusters, bestGraphLayout, fitViewport } from '../src/client/flow-layout.mjs';
 import { transition, validateState } from '../src/core.mjs';
 
@@ -38,7 +38,7 @@ test('board.seed through the store uses the section layout (schema unchanged: pl
   for (let i = 0; i < frames.length; i++) for (let j = i + 1; j < frames.length; j++) assert.ok(!overlap(frames[i], frames[j]));
 });
 
-test('sections: notes join the section they sit in, else the topic of a connected card, else stay free', () => {
+test('sections: notes join the topic of a connected card, else the section they sit in, else stay free', () => {
   const t0 = topics[0], t1 = topics[1];
   const c0 = { id: 'c0', type: 'concept', conceptId: t0.subtopics[0].conceptId, x: 100, y: 100, ...BOARD_CARD };
   const c1 = { id: 'c1', type: 'concept', conceptId: t1.subtopics[0].conceptId, x: 900, y: 100, ...BOARD_CARD };
@@ -81,4 +81,64 @@ test('flow helpers: edge sides, graph clusters, readable fit', () => {
   assert.equal(v.zoom, 0.8); assert.equal(v.overflow, true);
   const f = fitViewport({ x: 0, y: 0, width: 300, height: 200 }, 800, 600, { minZoom: 0.8, maxZoom: 1.15 });
   assert.equal(f.zoom, 1.15); assert.equal(f.overflow, false);
+});
+
+/** Pairwise-disjoint frames, every card drawn inside its own frame and over no other frame. */
+function assertPacked(els, label) {
+  const L = packSections(els, topics, concepts);
+  const f = L.frames;
+  for (let i = 0; i < f.length; i++) for (let j = i + 1; j < f.length; j++) assert.ok(!overlap(f[i], f[j]), `${label}: sections ${f[i].title} / ${f[j].title} overlap`);
+  for (const c of els.filter((e) => e.type !== 'arrow')) {
+    const o = L.offsetOf(c.id); const r = { x: c.x + o.dx, y: c.y + o.dy, width: c.width, height: c.height };
+    const own = L.assignment.get(c.id);
+    for (const fr of f) {
+      if (fr.id === own) assert.ok(r.x >= fr.x && r.y >= fr.y + 30 && r.x + r.width <= fr.x + fr.width && r.y + r.height <= fr.y + fr.height, `${label}: ${c.id} inside its section (below the title)`);
+      else assert.ok(!overlap(r, fr), `${label}: ${c.id} drawn over section ${fr.title}`);
+    }
+  }
+  return L;
+}
+const oldGrid = () => {
+  // the layout of the real-DSH board before v5 (a two-column grid in concept order, topics interleaved per row)
+  const els = topics.flatMap((t) => t.subtopics).map((s, i) => ({ id: `card-${i}`, type: 'concept', conceptId: s.conceptId, x: 22 + (i % 2) * 216, y: 30 + Math.floor(i / 2) * 112, width: 164, height: 66 }));
+  els.push({ id: 'note-plan', type: 'note', text: '计划', x: 360, y: 544, width: 164, height: 66 }, { id: 'note-far', type: 'note', text: '先试两周', x: 22, y: 904, width: 164, height: 66 },
+    { id: 'a1', type: 'arrow', from: 'note-far', to: 'card-9' });
+  return els;
+};
+
+test('packed sections: the interleaved pre-v5 board is drawn with no overlapping sections and no card over another section', () => {
+  const els = oldGrid();
+  // the stored frames really do overlap (this is what the v5 screenshots showed)
+  const stored = sectionFrames(els, topics, concepts);
+  assert.ok(stored.some((a, i) => stored.some((b, j) => j > i && overlap(a, b))), 'stored layout overlaps');
+  assertPacked(els, 'pre-v5');
+});
+
+test('packed sections: seeded and 按主题整理 boards are drawn exactly where they are stored (all offsets 0)', () => {
+  const { state } = transition(fixture, 'board.seed', { courseId: course.id, baseRevision: 0 }, { actor: 'learner' });
+  const seeded = state.boards[course.id].elements;
+  const L = assertPacked(seeded, 'seeded');
+  for (const e of seeded) if (e.type !== 'arrow') assert.deepEqual(L.offsetOf(e.id), { dx: 0, dy: 0 }, e.id);
+  const els = oldGrid();
+  const ops = arrangeOps(els, topics, concepts);
+  const arranged = els.map((e) => { const o = ops.find((x) => x.id === e.id); return o ? { ...e, ...o, op: undefined } : e; });
+  const A = assertPacked(arranged, 'arranged');
+  for (const e of arranged) if (e.type !== 'arrow') assert.deepEqual(A.offsetOf(e.id), { dx: 0, dy: 0 }, e.id);
+});
+
+test('packed sections: a card dragged far away, AI notes beside cards and random boards never overlap', () => {
+  const { state } = transition(fixture, 'board.seed', { courseId: course.id, baseRevision: 0 }, { actor: 'learner' });
+  const seeded = state.boards[course.id].elements;
+  // learner dragged a card deep into the neighbouring section; AI put a note 230 px to the right of a card + arrow
+  const dragged = seeded.map((e, i) => (i === 2 ? { ...e, x: e.x + 500, y: e.y + 260 } : e));
+  const target = seeded[0];
+  dragged.push({ id: 'n-ai', type: 'note', text: 'AI', x: target.x + 230, y: target.y, ...BOARD_CARD }, { id: 'a-ai', type: 'arrow', from: 'n-ai', to: target.id });
+  const L = assertPacked(dragged, 'dragged');
+  assert.equal(L.assignment.get('n-ai'), L.assignment.get(target.id), 'a connected AI note stays with its card');
+  let seed = 7; const rnd = () => ((seed = (seed * 48271) % 2147483647) / 2147483647);
+  for (let k = 0; k < 150; k++) {
+    const els = seeded.map((e) => ({ ...e, x: Math.round(rnd() * 1400), y: Math.round(rnd() * 1400) }));
+    for (let n = 0; n < 4; n++) els.push({ id: `rn-${n}`, type: 'note', text: 'n', x: Math.round(rnd() * 1600), y: Math.round(rnd() * 1600), ...BOARD_CARD });
+    assertPacked(els, `random ${k}`);
+  }
 });
