@@ -48,9 +48,14 @@ export function createRpcHandler(store) {
       return reply({ ok: true, value: await dispatch(store, message.payload ?? {}) });
     } catch (error) {
       const code = error.code === 'conflict' ? 'tutor/conflict' : error.code === 'forbidden' ? 'tutor/forbidden' : 'tutor/request-failed';
-      return reply({ ok: false, error: { code, message: error.message,
+      // DSH's connection client (dsh-client-connection parseConnectionResponse) only accepts a failure with
+      // string code, string message AND a `details` object; without `details` every error, conflicts included,
+      // surfaces as "connection: invalid server-response failure".
+      const details = {
         ...(Number.isInteger(error.syllabusRevision) ? { syllabusRevision: error.syllabusRevision } : {}),
-        ...(Number.isInteger(error.boardRevision) ? { boardRevision: error.boardRevision } : {}) } });
+        ...(Number.isInteger(error.boardRevision) ? { boardRevision: error.boardRevision } : {}),
+      };
+      return reply({ ok: false, error: { code, message: String(error.message ?? 'request failed'), details, ...details } });
     }
   };
 }
