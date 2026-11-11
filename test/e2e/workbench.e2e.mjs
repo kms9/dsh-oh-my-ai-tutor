@@ -248,7 +248,15 @@ await step('outline: manual reorder (↓ button) and cross-topic drag', async ()
   await eventually(async () => assert.equal((await topics())[2].subtopics[1].id, sub.id));
   const mover = (await topics())[3].subtopics[0];
   const target = (await topics())[4].subtopics[1];
-  await page.dragAndDrop(`[data-subtopic-id="${mover.id}"]`, `[data-subtopic-id="${target.id}"]`, { targetPosition: { x: 30, y: 3 } });
+  // HTML5 drag and drop: bring both rows into view first (the outline column scrolls) and retry once if the
+  // browser dropped the gesture (seen ~1 in 4 runs: no drop event, state unchanged — not a wrong landing spot)
+  const rev0 = await outlineRev();
+  for (let attempt = 0; attempt < 2 && (await outlineRev()) === rev0; attempt++) {
+    await page.locator(`[data-subtopic-id="${target.id}"]`).scrollIntoViewIfNeeded();
+    await page.locator(`[data-subtopic-id="${mover.id}"]`).scrollIntoViewIfNeeded();
+    await page.dragAndDrop(`[data-subtopic-id="${mover.id}"]`, `[data-subtopic-id="${target.id}"]`, { targetPosition: { x: 30, y: 3 } });
+    await eventually(async () => assert.notEqual(await outlineRev(), rev0), 1500).catch(() => {});
+  }
   await eventually(async () => {
     const t4 = (await topics())[4];
     assert.equal(t4.subtopics[1].id, mover.id, 'dragged knowledge point lands before the drop target');

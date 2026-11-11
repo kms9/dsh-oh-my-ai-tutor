@@ -250,11 +250,19 @@ const GraphFlowInner = forwardRef(function GraphFlowInner({ view, topics, select
     setFitState({ overflow: v.overflow, zoom: v.zoom });
     onFit?.({ overflow: v.overflow, zoom: v.zoom });
   }, [rf, size.w, size.h, onFit]);
+  const fitRef = useRef(fit); fitRef.current = fit;
+  const userMovedRef = useRef(false);
   const fittedKey = useRef('');
   useEffect(() => {
     const key = `${structure}|${aspect}`;
     fit({ live: fittedKey.current === key }); // new layout → its final positions; same layout, new size → what is on screen
     fittedKey.current = key;
+    // The live simulation settles near, not exactly on, the packed homes (links and collision push a little), so a
+    // node at the rim could end up just outside the view. Fit once more to what is on screen when it has settled,
+    // unless the learner has panned or zoomed in the meantime.
+    userMovedRef.current = false;
+    const t = setTimeout(() => { if (!userMovedRef.current) fitRef.current?.({ live: true }); }, 1800);
+    return () => clearTimeout(t);
   }, [size.w, size.h, structure, aspect]); // eslint-disable-line react-hooks/exhaustive-deps
   const centreOn = useCallback((id) => {
     const n = liveRef.current.find((x) => x.id === id && !x.hidden); if (!n) return;
@@ -286,6 +294,7 @@ const GraphFlowInner = forwardRef(function GraphFlowInner({ view, topics, select
       <div className={`rf-wrap rf-graph kg${mode ? ` kg-${mode}` : ''}${pathMode ? ' kg-picking' : ''}`} ref={wrapRef} style={{ height }} data-testid="graph-flow"
         data-scale={fitState.zoom.toFixed(2)} data-overflow={String(fitState.overflow)} data-layout={layout} data-mode={mode}>
         <ReactFlow nodes={displayNodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} onNodesChange={onNodesChange}
+          onMoveStart={(e) => { if (e) userMovedRef.current = true; }}
           onNodeClick={onNodeClick} onNodeDoubleClick={onNodeDoubleClick}
           onNodeDragStart={(_e, node) => simulation.onDragStart(node.id, node.position)}
           onNodeDrag={(_e, node) => simulation.onDrag(node.id, node.position)}
