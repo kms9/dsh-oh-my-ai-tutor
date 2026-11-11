@@ -20,13 +20,18 @@ export class JsonTutorStore {
       throw e;
     }
   }
-  async mutate(action, payload, expectedRevision) {
+  /** Current revision only (cheap change detection for UI polling). */
+  async head() {
+    try { const st = await stat(this.path); const state = await this.read(); return { revision: state.revision, mtimeMs: st.mtimeMs }; }
+    catch (e) { if (e.code === 'ENOENT') return { revision: 0, mtimeMs: 0 }; throw e; }
+  }
+  async mutate(action, payload, expectedRevision, opts = {}) {
     const previous = queues.get(this.path) ?? Promise.resolve();
     const task = previous.then(async () => {
       const state = await this.read();
       if (expectedRevision !== undefined && expectedRevision !== state.revision)
         throw Object.assign(new Error(`Tutor revision conflict: current=${state.revision}`), { code: 'conflict' });
-      const next = transition(state, action, payload);
+      const next = transition(state, action, payload, { actor: opts.actor, summary: opts.summary });
       await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
       const temp = `${this.path}.${randomUUID()}.tmp`;
       const handle = await open(temp, 'wx', 0o600);

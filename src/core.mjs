@@ -69,9 +69,222 @@ function wouldCycle(relations, source, target, type) {
   }
   return false;
 }
+export const SOURCE_KINDS = Object.freeze(['file', 'web', 'video', 'note', 'other']);
+export const OUTLINE_OPS = Object.freeze([
+  'addTopic', 'renameTopic', 'moveTopic', 'removeTopic',
+  'addSubtopic', 'renameSubtopic', 'moveSubtopic', 'removeSubtopic',
+]);
+export const BOARD_ELEMENT_TYPES = Object.freeze(['concept', 'note', 'arrow']);
+export const ACTORS = Object.freeze(['ai', 'learner']);
+const MAX_BOARD_ELEMENTS = 2000;
+const BOARD_ID_RE = /^[A-Za-z0-9_-]{1,120}$/;
+
+/** Write a normalized topic tree into the course, keeping concept ids (and their evidence) stable. */
+function applySyllabus(s, course, topics, now) {
+  const activeIds = new Set();
+  for (const t of topics) for (const sub of t.subtopics) {
+    activeIds.add(sub.conceptId);
+    const old = s.concepts[sub.conceptId];
+    s.concepts[sub.conceptId] = { id: sub.conceptId, courseId: course.id, topicId: t.id, subtopicId: sub.id,
+      title: sub.title, description: sub.description, status: 'active',
+      evidenceRefs: old?.evidenceRefs ?? [], mastery: old?.mastery ?? 'unverified', updatedAt: now };
+  }
+  for (const concept of Object.values(s.concepts))
+    if (concept.courseId === course.id && !activeIds.has(concept.id)) concept.status = 'retired';
+  // Any syllabus change re-opens the learner approval gate (same rule as course.plan).
+  course.syllabus = { topics, revision: course.syllabus.revision + 1, approvedAt: null, approvedBy: null };
+  course.status = 'draft'; course.updatedAt = now;
+}
+
+function clampIndex(value, length, field) {
+  if (value === undefined || value === null) return length;
+  if (!Number.isInteger(value) || value < 0) throw new Error(`${field} must be a non-negative integer`);
+  return Math.min(value, length);
+}
+function optionalText(value, field, max) {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || value.length > max) throw new Error(`${field} must be a string (max ${max})`);
+  return value;
+}
+
+/** Fine-grained outline edits (shared by learner UI drag/rename/delete and AI tool calls). */
+function editOutline(oldTopics, operations) {
+  if (!Array.isArray(operations) || !operations.length || operations.length > 100) throw new Error('operations must contain 1..100 items');
+  const topics = oldTopics.map((t) => ({ ...t, subtopics: t.subtopics.map((x) => ({ ...x })) }));
+  const findTopic = (topicId) => {
+    const index = topics.findIndex((t) => t.id === topicId);
+    if (index < 0) throw new Error(`Unknown topicId: ${topicId}. Read the outline first and use the ids it returns.`);
+    return index;
+  };
+  const findSub = (subtopicId) => {
+    for (let ti = 0; ti < topics.length; ti++) {
+      const si = topics[ti].subtopics.findIndex((x) => x.id === subtopicId);
+      if (si >= 0) return [ti, si];
+    }
+    throw new Error(`Unknown subtopicId: ${subtopicId}. Read the outline first and use the ids it returns.`);
+  };
+  const newSub = (x, field) => {
+    if (!x || typeof x !== 'object') throw new Error(`${field} must be an object`);
+    if (x.id !== undefined) throw new Error('New subtopics must not carry an id; the store assigns one');
+    return { id: id('sub'), title: requireText(x.title, `${field}.title`, 160),
+      description: optionalText(x.description, `${field}.description`, 1500) ?? '', conceptId: id('kp') };
+  };
+  operations.forEach((op, n) => {
+    if (!op || typeof op !== 'object' || !OUTLINE_OPS.includes(op.op)) throw new Error(`operations[${n}].op must be one of ${OUTLINE_OPS.join(', ')}`);
+    switch (op.op) {
+      case 'addTopic': {
+        if (op.id !== undefined || op.topicId !== undefined) throw new Error('addTopic must not carry an id; the store assigns one');
+        const subs = Array.isArray(op.subtopics) && op.subtopics.length ? op.subtopics : null;
+        if (!subs) throw new Error('addTopic needs subtopics: [{title}] (a topic must contain at least one knowledge point)');
+        const topic = { id: id('topic'), title: requireText(op.title, 'addTopic.title', 160),
+          description: optionalText(op.description, 'addTopic.description', 1500) ?? '',
+          subtopics: subs.map((x, i) => newSub(x, `addTopic.subtopics[${i}]`)) };
+        topics.splice(clampIndex(op.index, topics.length, 'addTopic.index'), 0, topic); break;
+      }
+      case 'renameTopic': {
+        const t = topics[findTopic(op.topicId)];
+        if (op.title === undefined && op.description === undefined) throw new Error('renameTopic needs title or description');
+        if (op.title !== undefined) t.title = requireText(op.title, 'renameTopic.title', 160);
+        if (op.description !== undefined) t.description = optionalText(op.description, 'renameTopic.description', 1500);
+        break;
+      }
+      case 'moveTopic': {
+        const from = findTopic(op.topicId);
+        const [t] = topics.splice(from, 1);
+        topics.splice(clampIndex(op.toIndex, topics.length, 'moveTopic.toIndex'), 0, t); break;
+      }
+      case 'removeTopic': {
+        topics.splice(findTopic(op.topicId), 1); break;
+      }
+      case 'addSubtopic': {
+        const t = topics[findTopic(op.topicId)];
+        t.subtopics.splice(clampIndex(op.index, t.subtopics.length, 'addSubtopic.index'), 0, newSub(op, 'addSubtopic')); break;
+      }
+      case 'renameSubtopic': {
+        const [ti, si] = findSub(op.subtopicId);
+        const x = topics[ti].subtopics[si];
+        if (op.title === undefined && op.description === undefined) throw new Error('renameSubtopic needs title or description');
+        if (op.title !== undefined) x.title = requireText(op.title, 'renameSubtopic.title', 160);
+        if (op.description !== undefined) x.description = optionalText(op.description, 'renameSubtopic.description', 1500);
+        break;
+      }
+      case 'moveSubtopic': {
+        const [ti, si] = findSub(op.subtopicId);
+        const target = op.toTopicId === undefined ? ti : findTopic(op.toTopicId);
+        const [x] = topics[ti].subtopics.splice(si, 1);
+        topics[target].subtopics.splice(clampIndex(op.toIndex, topics[target].subtopics.length, 'moveSubtopic.toIndex'), 0, x);
+        break;
+      }
+      case 'removeSubtopic': {
+        const [ti, si] = findSub(op.subtopicId);
+        topics[ti].subtopics.splice(si, 1); break;
+      }
+    }
+  });
+  if (!topics.length || topics.length > 40) throw new Error('An outline must keep 1..40 topics');
+  for (const t of topics) {
+    if (!t.subtopics.length) throw new Error(`Topic "${t.title}" would have no knowledge points; remove the topic instead`);
+    if (t.subtopics.length > 60) throw new Error('Each topic needs 1..60 subtopics');
+  }
+  unique(topics, 'id'); unique(topics.flatMap((t) => t.subtopics), 'id');
+  return topics;
+}
+
+function finiteNumber(value, field, min = -100_000, max = 100_000) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < min || n > max) throw new Error(`${field} must be a number in [${min}, ${max}]`);
+  return Math.round(n * 10) / 10;
+}
+function boardOf(s, courseId) {
+  return s.boards[courseId] ?? { courseId, revision: 0, elements: [] };
+}
+const CARD = { width: 196, height: 72 };
+/** Deterministic grouped layout: one column per syllabus topic, cards stacked by subtopic order. */
+export function boardLayoutFor(course, conceptId) {
+  const topics = course.syllabus.topics;
+  for (let ti = 0; ti < topics.length; ti++) {
+    const si = topics[ti].subtopics.findIndex((x) => x.conceptId === conceptId);
+    if (si >= 0) return { x: 40 + ti * 236, y: 40 + si * 104 };
+  }
+  return { x: 40, y: 40 };
+}
+function boardPatch(s, course, board, operations, now, actor, maxOps = 100) {
+  if (!Array.isArray(operations) || !operations.length || operations.length > maxOps) throw new Error(`operations must contain 1..${maxOps} items`);
+  const elements = board.elements.map((e) => ({ ...e }));
+  const byId = new Map(elements.map((e) => [e.id, e]));
+  const live = (eid) => { const e = byId.get(eid); return e && !e.deleted ? e : null; };
+  const touched = [];
+  operations.forEach((op, n) => {
+    if (!op || typeof op !== 'object' || !['add', 'update', 'delete'].includes(op.op)) throw new Error(`operations[${n}].op must be add | update | delete`);
+    if (op.op === 'add') {
+      if (!BOARD_ELEMENT_TYPES.includes(op.type)) throw new Error(`operations[${n}].type must be one of ${BOARD_ELEMENT_TYPES.join(', ')}`);
+      const eid = op.id === undefined ? id(op.type === 'arrow' ? 'arrow' : op.type === 'note' ? 'note' : 'card') : op.id;
+      if (typeof eid !== 'string' || !BOARD_ID_RE.test(eid)) throw new Error(`operations[${n}].id must match ${BOARD_ID_RE}`);
+      if (byId.has(eid)) throw new Error(`Element id already used (ids are never reused): ${eid}`);
+      const base = { id: eid, type: op.type, createdBy: actor, updatedBy: actor, createdAt: now, updatedAt: now };
+      let el;
+      if (op.type === 'arrow') {
+        const from = live(op.from), to = live(op.to);
+        if (!from || !to || from.type === 'arrow' || to.type === 'arrow') throw new Error('Arrow needs from/to ids of live cards on this board (add cards first)');
+        if (from.id === to.id) throw new Error('Arrow cannot connect a card to itself');
+        el = { ...base, from: from.id, to: to.id, label: optionalText(op.label, 'arrow.label', 80) ?? '' };
+        if (op.relationId !== undefined) {
+          const r = s.relations[op.relationId];
+          if (!r || r.courseId !== course.id) throw new Error(`Unknown relationId: ${op.relationId}`);
+          el.relationId = r.id;
+        }
+      } else {
+        let text = '';
+        let conceptId;
+        if (op.type === 'concept') {
+          const concept = s.concepts[op.conceptId];
+          if (!concept || concept.courseId !== course.id || concept.status !== 'active') throw new Error(`Unknown or retired conceptId for this course: ${op.conceptId}`);
+          if (elements.some((e) => !e.deleted && e.type === 'concept' && e.conceptId === concept.id)) throw new Error(`Concept already on board: ${concept.title}`);
+          conceptId = concept.id;
+        } else text = requireText(op.text, 'note.text', 500);
+        const pos = conceptId ? boardLayoutFor(course, conceptId) : { x: 40, y: 40 };
+        el = { ...base, ...(conceptId ? { conceptId } : { text }),
+          x: op.x === undefined ? pos.x : finiteNumber(op.x, 'x'), y: op.y === undefined ? pos.y : finiteNumber(op.y, 'y'),
+          width: op.width === undefined ? CARD.width : finiteNumber(op.width, 'width', 60, 800),
+          height: op.height === undefined ? CARD.height : finiteNumber(op.height, 'height', 40, 600),
+          color: optionalText(op.color, 'color', 24) ?? '' };
+      }
+      elements.push(el); byId.set(eid, el); touched.push(eid);
+    } else {
+      const el = live(op.id);
+      if (!el) throw new Error(`Unknown or deleted element id: ${op.id}. Read the board first.`);
+      if (op.op === 'delete') {
+        el.deleted = true; el.updatedAt = now; el.updatedBy = actor; touched.push(el.id);
+        if (el.type !== 'arrow') for (const a of elements) if (!a.deleted && a.type === 'arrow' && (a.from === el.id || a.to === el.id)) {
+          a.deleted = true; a.updatedAt = now; a.updatedBy = actor; touched.push(a.id);
+        }
+      } else {
+        const fields = ['x', 'y', 'width', 'height', 'text', 'color', 'label'].filter((k) => op[k] !== undefined);
+        if (!fields.length) throw new Error('update needs at least one of x, y, width, height, text, color, label');
+        if (el.type === 'arrow') {
+          if (fields.some((k) => k !== 'label' && k !== 'color')) throw new Error('Arrows only accept label/color updates; delete and re-add to reconnect');
+        } else if (op.label !== undefined) throw new Error('label is only for arrows');
+        if (op.text !== undefined) {
+          if (el.type !== 'note') throw new Error('Concept card text follows the syllabus; rename the subtopic instead');
+          el.text = requireText(op.text, 'note.text', 500);
+        }
+        if (op.x !== undefined) el.x = finiteNumber(op.x, 'x');
+        if (op.y !== undefined) el.y = finiteNumber(op.y, 'y');
+        if (op.width !== undefined) el.width = finiteNumber(op.width, 'width', 60, 800);
+        if (op.height !== undefined) el.height = finiteNumber(op.height, 'height', 40, 600);
+        if (op.color !== undefined) el.color = optionalText(op.color, 'color', 24);
+        if (op.label !== undefined) el.label = optionalText(op.label, 'arrow.label', 80);
+        el.updatedAt = now; el.updatedBy = actor; touched.push(el.id);
+      }
+    }
+  });
+  if (elements.length > MAX_BOARD_ELEMENTS) throw new Error(`Board limit is ${MAX_BOARD_ELEMENTS} elements including tombstones`);
+  return { courseId: course.id, revision: board.revision + 1, elements, updatedAt: now, touched };
+}
+
 export function newState() {
   return { schemaVersion: SCHEMA_VERSION, revision: 0, goals: {}, courses: {}, concepts: {},
-    lessons: {}, relations: {}, notes: {}, assessments: {}, sources: {}, events: [] };
+    lessons: {}, relations: {}, notes: {}, assessments: {}, sources: {}, boards: {}, events: [] };
 }
 export function validateState(state) {
   if (!state || state.schemaVersion !== SCHEMA_VERSION || !Number.isSafeInteger(state.revision) || state.revision < 0)
@@ -79,6 +292,9 @@ export function validateState(state) {
   for (const key of ['goals', 'courses', 'concepts', 'lessons', 'relations', 'notes', 'assessments', 'sources'])
     if (!state[key] || typeof state[key] !== 'object' || Array.isArray(state[key])) throw new Error(`Missing ${key}`);
   if (!Array.isArray(state.events)) throw new Error('Missing event ledger');
+  // `boards` was added after schema v1 shipped; older files simply have no boards yet.
+  if (state.boards !== undefined && (!state.boards || typeof state.boards !== 'object' || Array.isArray(state.boards)))
+    throw new Error('Corrupt boards');
   return state;
 }
 
@@ -86,7 +302,9 @@ export function validateState(state) {
 export function transition(original, action, input = {}, opts = {}) {
   validateState(original);
   const s = clone(original);
+  if (!s.boards) s.boards = {};
   const now = opts.now ?? iso();
+  const actor = ACTORS.includes(opts.actor) ? opts.actor : 'ai';
   const payload = input ?? {};
   let result;
   switch (action) {
@@ -104,7 +322,8 @@ export function transition(original, action, input = {}, opts = {}) {
     case 'source.register': {
       const source = { id: id('source'), title: requireText(payload.title, 'source.title', 300),
         uri: requireText(payload.uri, 'source.uri', 4096),
-        kind: ['file', 'web', 'video', 'note', 'other'].includes(payload.kind) ? payload.kind : 'other',
+        kind: SOURCE_KINDS.includes(payload.kind) ? payload.kind : 'other',
+        ...(payload.kind !== undefined && !SOURCE_KINDS.includes(payload.kind) ? { requestedKind: String(payload.kind).slice(0, 40) } : {}),
         access: 'unverified', createdAt: now };
       s.sources[source.id] = source; result = source; break;
     }
@@ -118,24 +337,21 @@ export function transition(original, action, input = {}, opts = {}) {
     case 'course.plan': {
       const course = requireId(s, 'courses', payload.courseId);
       const topics = normalizeTopics(payload.topics, course.syllabus.topics);
-      const activeIds = new Set();
-      for (const t of topics) for (const sub of t.subtopics) {
-        activeIds.add(sub.conceptId);
-        const old = s.concepts[sub.conceptId];
-        s.concepts[sub.conceptId] = { id: sub.conceptId, courseId: course.id, topicId: t.id, subtopicId: sub.id,
-          title: sub.title, description: sub.description, status: 'active',
-          evidenceRefs: old?.evidenceRefs ?? [], mastery: old?.mastery ?? 'unverified', updatedAt: now };
-      }
-      for (const concept of Object.values(s.concepts))
-        if (concept.courseId === course.id && !activeIds.has(concept.id)) concept.status = 'retired';
-      course.syllabus = { topics, revision: course.syllabus.revision + 1, approvedAt: null };
-      course.status = 'draft'; course.updatedAt = now;
+      applySyllabus(s, course, topics, now);
       result = { courseId: course.id, syllabus: course.syllabus }; break;
+    }
+    case 'course.editOutline': {
+      const course = requireId(s, 'courses', payload.courseId);
+      if (payload.syllabusRevision !== undefined && payload.syllabusRevision !== course.syllabus.revision)
+        throw Object.assign(new Error(`Outline changed (syllabus revision ${course.syllabus.revision}); read it again`), { code: 'conflict' });
+      const topics = editOutline(course.syllabus.topics, payload.operations);
+      applySyllabus(s, course, topics, now);
+      result = { courseId: course.id, syllabus: course.syllabus, applied: payload.operations.length }; break;
     }
     case 'course.approve': {
       const course = requireId(s, 'courses', payload.courseId);
       if (!course.syllabus.topics.length) throw new Error('Cannot approve an empty syllabus');
-      course.status = 'active'; course.syllabus.approvedAt = now; course.updatedAt = now;
+      course.status = 'active'; course.syllabus.approvedAt = now; course.syllabus.approvedBy = actor; course.updatedAt = now;
       result = { courseId: course.id, status: course.status, syllabusRevision: course.syllabus.revision }; break;
     }
     case 'lesson.create': {
@@ -207,7 +423,7 @@ export function transition(original, action, input = {}, opts = {}) {
       const lesson = requireId(s, 'lessons', payload.lessonId);
       const note = { id: id('note'), courseId: lesson.courseId, lessonId: lesson.id,
         title: requireText(payload.title, 'note.title', 160), content: requireText(payload.content, 'note.content', 50_000),
-        author: payload.author === 'learner' ? 'learner' : 'ai',
+        author: actor === 'learner' || payload.author === 'learner' ? 'learner' : 'ai',
         sourceRefs: Array.isArray(payload.sourceRefs) ? payload.sourceRefs.filter(x => typeof x === 'string').slice(0, 100) : [],
         createdAt: now };
       s.notes[note.id] = note; result = note; break;
@@ -233,11 +449,49 @@ export function transition(original, action, input = {}, opts = {}) {
         createdAt: now };
       s.relations[item.id] = item; result = item; break;
     }
+    case 'board.seed': {
+      const course = requireId(s, 'courses', payload.courseId);
+      const board = boardOf(s, course.id);
+      if (payload.baseRevision !== undefined && payload.baseRevision !== board.revision)
+        throw Object.assign(new Error(`Board changed (latest revision ${board.revision}); read it again`), { code: 'conflict', boardRevision: board.revision });
+      const used = new Set(board.elements.map((e) => e.id));
+      const cards = new Map(board.elements.filter((e) => !e.deleted && e.type === 'concept').map((e) => [e.conceptId, e.id]));
+      const ops = [];
+      for (const t of course.syllabus.topics) for (const sub of t.subtopics) {
+        if (cards.has(sub.conceptId) || s.concepts[sub.conceptId]?.status !== 'active') continue;
+        let cid = `card-${sub.conceptId}`.slice(0, 120);
+        if (used.has(cid)) cid = id('card');
+        used.add(cid); cards.set(sub.conceptId, cid);
+        ops.push({ op: 'add', type: 'concept', conceptId: sub.conceptId, id: cid });
+      }
+      // Candidate semantic relations are drawn once; a visual arrow never becomes a semantic edge by itself.
+      const drawn = new Set(board.elements.filter((e) => e.type === 'arrow' && e.relationId).map((e) => e.relationId));
+      for (const r of Object.values(s.relations))
+        if (r.courseId === course.id && !drawn.has(r.id) && cards.has(r.from) && cards.has(r.to))
+          ops.push({ op: 'add', type: 'arrow', from: cards.get(r.from), to: cards.get(r.to), label: r.type, relationId: r.id });
+      if (!ops.length) { result = { courseId: course.id, revision: board.revision, added: 0 }; break; }
+      const next = boardPatch(s, course, board, ops, now, actor, MAX_BOARD_ELEMENTS);
+      delete next.touched;
+      s.boards[course.id] = next;
+      result = { courseId: course.id, revision: next.revision, added: ops.length }; break;
+    }
+    case 'board.patch': {
+      const course = requireId(s, 'courses', payload.courseId);
+      const board = boardOf(s, course.id);
+      if (!Number.isInteger(payload.baseRevision)) throw new Error('baseRevision (board revision from tutor_board_read) is required');
+      if (payload.baseRevision !== board.revision)
+        throw Object.assign(new Error(`Board changed (latest revision ${board.revision}); read it again and re-evaluate against human edits`), { code: 'conflict', boardRevision: board.revision });
+      const next = boardPatch(s, course, board, payload.operations, now, actor);
+      const touched = next.touched; delete next.touched;
+      s.boards[course.id] = next;
+      result = { courseId: course.id, revision: next.revision, touched }; break;
+    }
     default: throw new Error(`Unknown tutor action: ${action}`);
   }
   s.revision = original.revision + 1;
-  s.events.push({ revision: s.revision, at: now, action,
-    entityId: result?.id ?? result?.lessonId ?? result?.courseId ?? null });
+  s.events.push({ revision: s.revision, at: now, action, actor,
+    entityId: result?.id ?? result?.lessonId ?? result?.courseId ?? null,
+    ...(opts.summary ? { summary: String(opts.summary).slice(0, 200) } : {}) });
   return { state: s, result };
 }
 
@@ -252,5 +506,19 @@ export function snapshot(state, courseId) {
     lessons: Object.values(state.lessons).filter(x => x.courseId === courseId),
     notes: Object.values(state.notes).filter(x => x.courseId === courseId),
     sources: (course.sourceIds ?? []).map(id => state.sources[id]).filter(Boolean),
-    assessments: Object.values(state.assessments).filter(x => state.lessons[x.lessonId]?.courseId === courseId) };
+    assessments: Object.values(state.assessments).filter(x => state.lessons[x.lessonId]?.courseId === courseId),
+    board: liveBoard(state, course) };
+}
+
+/** Board read model: live elements only, concept cards resolved to their current syllabus title. */
+export function liveBoard(state, course) {
+  const board = state.boards?.[course.id] ?? { courseId: course.id, revision: 0, elements: [] };
+  const live = board.elements.filter((e) => !e.deleted);
+  const ids = new Set(live.map((e) => e.id));
+  return { courseId: course.id, revision: board.revision,
+    elements: live.filter((e) => e.type !== 'arrow' || (ids.has(e.from) && ids.has(e.to))).map((e) => {
+      if (e.type !== 'concept') return e;
+      const c = state.concepts[e.conceptId];
+      return { ...e, text: c?.title ?? '(已删除的知识点)', mastery: c?.mastery ?? 'unverified', stale: !c || c.status !== 'active' };
+    }) };
 }
