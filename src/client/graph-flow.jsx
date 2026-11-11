@@ -147,7 +147,10 @@ const GraphFlowInner = forwardRef(function GraphFlowInner({ view, topics, select
     const n = shown.get(g0.id) ?? g0, hidden = !shown.has(g0.id);
     const p = homes.get(n.id) ?? homes.get(`topic:${n.topicId}`) ?? { x: 0, y: 0 };
     const size = sizeOfKind(n.kind);
-    return { id: n.id, type: n.kind, hidden, position: p, width: size, height: size, zIndex: 2, data: { n, color: colorAt(tIndex.get(n.topicId)) } };
+    // Declared handles (centre anchors): React Flow then has handle bounds without measuring the DOM, so edges never
+    // drop out while nodes are re-measured after a container change (seen in DSH after 放大 → 整个工作台).
+    return { id: n.id, type: n.kind, hidden, position: p, width: size, height: size, zIndex: 2, data: { n, color: colorAt(tIndex.get(n.topicId)) },
+      handles: [{ type: 'source', position: Position.Bottom, x: size / 2, y: size / 2, width: 1, height: 1 }, { type: 'target', position: Position.Top, x: size / 2, y: size / 2, width: 1, height: 1 }] };
   }), [homes]); // eslint-disable-line react-hooks/exhaustive-deps
   const simNodes = useMemo(() => initialNodes.filter((n) => !n.hidden), [initialNodes]);
 
