@@ -6,6 +6,7 @@ import { TutorToolCard } from './ToolCard.jsx';
 export const name = 'dsh-oh-my-ai-tutor';
 export const inject = ['slots', 'sidebarRightTabs', 'sidebarRight', 'connection'];
 const KIND = 'tutor-workbench';
+const TAB_ID = 'dsh-oh-my-ai-tutor'; // pane/title slots are keyed by the tab type id (SidebarRight entryKey = definition.id)
 const CARD_TOOLS = ['tutor_visualize', 'tutor_outline_edit', 'tutor_board_patch', 'tutor_board_read'];
 
 /** Browser half: right-sidebar "AI 学习工作台" tab + graphic tool cards in the conversation (dsh-whiteboard's mounting pattern). */
@@ -35,11 +36,11 @@ export function apply(ctx) {
   }
   function Title() { return 'AI 学习工作台'; }
   ctx.effect(() => ctx.sidebarRightTabs.register({
-    id: 'dsh-oh-my-ai-tutor', kind: KIND, priority: 'extension', keepMounted: true, title: () => 'AI 学习工作台',
+    id: TAB_ID, kind: KIND, priority: 'extension', keepMounted: true, title: () => 'AI 学习工作台',
     guide: [{ id: 'tutor-workbench', order: 40, title: () => 'AI 学习工作台', description: () => '课程大纲、思维导图、知识图谱与白板，你和 AI 一起编辑' }],
   }));
-  ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({ name: 'sidebar.right.pane.tab', key: KIND }, Body)));
-  ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({ name: 'sidebar.right.pane.tab.title', key: KIND }, Title)));
+  ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({ name: 'sidebar.right.pane.tab', key: TAB_ID }, Body)));
+  ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({ name: 'sidebar.right.pane.tab.title', key: TAB_ID }, Title)));
   function Card(props) { return <TutorToolCard {...props} openWorkbench={openWorkbench} />; }
   for (const tool of CARD_TOOLS) {
     ctx.effect(() => ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({ name: 'tool.call.toolview', key: tool }, Card)));

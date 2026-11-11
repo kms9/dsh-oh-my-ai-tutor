@@ -52,8 +52,9 @@ const browser = await chromium.launch({ channel: process.env.PW_CHANNEL ?? 'chro
 const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: 'zh-CN', timezoneId: 'America/Phoenix' });
 let page = await context.newPage();
 const pageErrors = [];
+let serverDown = false; // the 1 s head poll may hit the port while the harness is deliberately restarted
 page.on('pageerror', (e) => pageErrors.push(e.message));
-page.on('console', (m) => m.type() === 'error' && pageErrors.push(m.text()));
+page.on('console', (m) => m.type() === 'error' && !(serverDown && /ERR_CONNECTION_REFUSED/.test(m.text())) && pageErrors.push(m.text()));
 const url = `http://127.0.0.1:${port}/`;
 await page.goto(url);
 await page.waitForSelector('[data-testid=tutor-workbench]');
@@ -152,7 +153,8 @@ await step('mind map: manual select → 上移 / 删除 via toolbar', async () =
   await page.click(`[data-testid=mindmap-svg] [data-node-id="${del.id}"]`);
   await page.click('[data-testid=mindmap-toolbar] >> text=删除');
   await eventually(async () => assert.ok(!(await topics())[2].subtopics.some((x) => x.id === del.id)));
-  assert.equal(await page.locator(`[data-testid=mindmap-svg] [data-node-id="${del.id}"]`).count(), 0);
+  // the UI re-renders from the mutation response / 1 s head poll; wait for it before the next manual gesture
+  await eventually(async () => assert.equal(await page.locator(`[data-testid=mindmap-svg] [data-node-id="${del.id}"]`).count(), 0));
 });
 
 await step('mind map: manual drag a node onto another topic (re-parent)', async () => {
@@ -286,10 +288,12 @@ await step('chat tool cards render tool results as graphics (outline/mindmap/gra
 
 await step('restart recovery: kill harness, restart, reload — all edits persist', async () => {
   const before = await readState();
+  serverDown = true;
   server.kill('SIGTERM');
   await new Promise((r) => server.once('exit', r));
   server = await startServer();
   await page.reload();
+  serverDown = false;
   await page.waitForSelector('[data-testid=tutor-workbench]');
   const after = await readState();
   assert.equal(after.revision, before.revision);

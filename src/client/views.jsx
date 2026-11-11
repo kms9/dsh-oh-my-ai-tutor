@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { mindmapLayout, graphLayout, wrapLabel, rectExit, boardBounds, MASTERY_LABEL } from './layout.mjs';
+import { mindmapLayout, graphLayout, wrapLabel, rectExit, edgeRoute, boardBounds, MASTERY_LABEL } from './layout.mjs';
 
 export const TOPIC_COLORS = ['#6273dd', '#3f9d8f', '#d0883a', '#b0569a', '#5b8ed6', '#7d8a3c', '#c0564b', '#4e6a8a'];
 const MASTERY_STROKE = { unverified: '#bbc6df', developing: '#e3a63b', demonstrated: '#47a36a' };
@@ -84,20 +84,27 @@ export function MindmapSvg({ hierarchy, editable = false, selectedId, onSelect, 
 export function GraphSvg({ nodes, edges, topicOrder = [], selectedId, onSelect, width }) {
   const layout = useMemo(() => graphLayout(nodes), [nodes]);
   const tIndex = new Map(topicOrder.map((t, i) => [t, i]));
+  const routes = useMemo(() => new Map(edges.map((e) => {
+    const a = layout.pos.get(e.from), b = layout.pos.get(e.to);
+    return [e.id, a && b ? edgeRoute(a, b, [...layout.pos.values()]) : null];
+  })), [edges, layout]);
+  // Grow the viewBox so curved edges routed around nodes are never clipped.
+  let minY = 0, maxY = layout.height;
+  for (const r of routes.values()) if (r?.curved) { minY = Math.min(minY, r.ly - 14); maxY = Math.max(maxY, r.ly + 14); }
+  const vbH = maxY - minY;
   const scale = width ? Math.min(1.25, width / layout.width) : 1;
   return (
-    <svg viewBox={`0 0 ${layout.width} ${layout.height}`} width={layout.width * scale} height={layout.height * scale} data-testid="graph-svg" role="img" aria-label="知识语义图谱">
+    <svg viewBox={`0 ${minY} ${layout.width} ${vbH}`} width={layout.width * scale} height={vbH * scale} data-testid="graph-svg" role="img" aria-label="知识语义图谱">
       <defs>
         <marker id="omt-arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0 0 L7 3 L0 6Z" fill="#8f9ed6" /></marker>
       </defs>
       {edges.map((e) => {
-        const a = layout.pos.get(e.from), b = layout.pos.get(e.to);
-        if (!a || !b) return null;
-        const p1 = rectExit(a, b), p2 = rectExit(b, a);
+        const r = routes.get(e.id);
+        if (!r) return null;
         return (
           <g key={e.id} data-edge-id={e.id}>
-            <line x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y} stroke="#8f9ed6" strokeWidth="1.7" strokeDasharray={e.status === 'candidate' ? '5 4' : undefined} markerEnd="url(#omt-arrow)" />
-            <text x={(p1.x + p2.x) / 2} y={(p1.y + p2.y) / 2 - 5} textAnchor="middle" fontSize="10" fill="#66759d" style={{ paintOrder: 'stroke', stroke: '#fff', strokeWidth: 3 }}>{e.type}</text>
+            <path d={r.d} fill="none" stroke="#8f9ed6" strokeWidth="1.7" strokeDasharray={e.status === 'candidate' ? '5 4' : undefined} markerEnd="url(#omt-arrow)" />
+            <text x={r.lx} y={r.ly - 5} textAnchor="middle" fontSize="10" fill="#66759d" style={{ paintOrder: 'stroke', stroke: '#fff', strokeWidth: 3 }}>{e.type}</text>
           </g>
         );
       })}
@@ -128,6 +135,7 @@ export function BoardCanvas({ elements, editable = false, selectedId, onSelect, 
   const cards = elements.filter((e) => e.type !== 'arrow').map((e) => (local[e.id] ? { ...e, ...local[e.id] } : e));
   const byId = new Map(cards.map((c) => [c.id, c]));
   const arrows = elements.filter((e) => e.type === 'arrow' && byId.has(e.from) && byId.has(e.to));
+  const rects = cards.map((c) => ({ x: c.x, y: c.y, w: c.width, h: c.height }));
   const b = boardBounds(cards);
   function down(e, c) {
     if (!editable || e.button !== 0 || editing === c.id) return;
@@ -165,12 +173,12 @@ export function BoardCanvas({ elements, editable = false, selectedId, onSelect, 
             {arrows.map((a) => {
               const s = byId.get(a.from), t = byId.get(a.to);
               const A = { x: s.x, y: s.y, w: s.width, h: s.height }, B = { x: t.x, y: t.y, w: t.width, h: t.height };
-              const p1 = rectExit(A, B), p2 = rectExit(B, A), sel = selectedId === a.id;
+              const r = edgeRoute(A, B, rects), sel = selectedId === a.id;
               return (
                 <g key={a.id} data-arrow-id={a.id}>
-                  <line x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y} stroke={sel ? '#4256c4' : '#9daedf'} strokeWidth={sel ? 2.6 : 2} strokeDasharray={a.relationId ? '6 4' : undefined} markerEnd={`url(#omt-barrow-${testId})`} />
-                  {a.label ? <text x={(p1.x + p2.x) / 2} y={(p1.y + p2.y) / 2 - 6} textAnchor="middle" fontSize="10" fill="#66759d" style={{ paintOrder: 'stroke', stroke: '#fff', strokeWidth: 3 }}>{a.label}</text> : null}
-                  {editable && <line className="hit" x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y} onPointerDown={(e) => { e.stopPropagation(); onSelect?.(a.id); }} />}
+                  <path d={r.d} fill="none" stroke={sel ? '#4256c4' : '#9daedf'} strokeWidth={sel ? 2.6 : 2} strokeDasharray={a.relationId ? '6 4' : undefined} markerEnd={`url(#omt-barrow-${testId})`} />
+                  {a.label ? <text x={r.lx} y={r.ly - 6} textAnchor="middle" fontSize="10" fill="#66759d" style={{ paintOrder: 'stroke', stroke: '#fff', strokeWidth: 3 }}>{a.label}</text> : null}
+                  {editable && <path className="hit" d={r.d} fill="none" onPointerDown={(e) => { e.stopPropagation(); onSelect?.(a.id); }} />}
                 </g>
               );
             })}

@@ -179,3 +179,30 @@ export function relTime(iso, now = Date.now()) {
   if (d < 86_400_000) return `${Math.floor(d / 3_600_000)} 小时前`;
   return `${Math.floor(d / 86_400_000)} 天前`;
 }
+
+/**
+ * Route an edge between two rects. Straight when nothing is in the way; otherwise a quadratic curve
+ * bent to whichever side clears the other nodes (so arrows never run through an unrelated card).
+ */
+export function edgeRoute(a, b, obstacles = [], pad = 4) {
+  const others = obstacles.filter((o) => o !== a && o !== b && !(o.x === a.x && o.y === a.y) && !(o.x === b.x && o.y === b.y));
+  const blocked = (pt) => others.some((o) => pt.x > o.x - pad && pt.x < o.x + o.w + pad && pt.y > o.y - pad && pt.y < o.y + o.h + pad);
+  const quad = (p1, c, p2, t) => ({ x: (1 - t) ** 2 * p1.x + 2 * (1 - t) * t * c.x + t * t * p2.x, y: (1 - t) ** 2 * p1.y + 2 * (1 - t) * t * c.y + t * t * p2.y });
+  const s1 = rectExit(a, b), s2 = rectExit(b, a);
+  const clear = (p1, c, p2) => { for (let i = 1; i < 24; i++) if (blocked(quad(p1, c, p2, i / 24))) return false; return true; };
+  const mid = { x: (s1.x + s2.x) / 2, y: (s1.y + s2.y) / 2 };
+  if (clear(s1, mid, s2)) return { d: `M${s1.x},${s1.y} L${s2.x},${s2.y}`, lx: mid.x, ly: mid.y, curved: false };
+  const len = Math.hypot(s2.x - s1.x, s2.y - s1.y) || 1;
+  const nx = -(s2.y - s1.y) / len, ny = (s2.x - s1.x) / len;
+  let best = null;
+  for (const k of [0.25, 0.4, 0.6, 0.85]) for (const side of [1, -1]) {
+    const off = Math.max(36, len * k) * side;
+    const c = { x: mid.x + nx * off * 2, y: mid.y + ny * off * 2 }; // control point (curve apex sits at half the offset)
+    const cr = { x: c.x, y: c.y, w: 0, h: 0 };
+    const p1 = rectExit(a, cr), p2 = rectExit(b, cr);
+    best = { p1, c, p2 };
+    if (clear(p1, c, p2)) { const m = quad(p1, c, p2, 0.5); return { d: `M${p1.x},${p1.y} Q${c.x},${c.y} ${p2.x},${p2.y}`, lx: m.x, ly: m.y, curved: true }; }
+  }
+  const m = quad(best.p1, best.c, best.p2, 0.5);
+  return { d: `M${best.p1.x},${best.p1.y} Q${best.c.x},${best.c.y} ${best.p2.x},${best.p2.y}`, lx: m.x, ly: m.y, curved: true };
+}

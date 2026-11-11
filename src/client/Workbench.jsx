@@ -229,7 +229,8 @@ export function Workbench({ api, visible = true, initialView, navRevision, pollM
           <nav className="tabs" role="tablist">
             {TABS.map(([k, label]) => <button key={k} id={`omt-tab-${k}`} role="tab" aria-selected={tab === k} className={tab === k ? 'active' : ''} onClick={() => setTab(k)}>{label}</button>)}
           </nav>
-          {notice && <div className={`notice ${notice.err ? 'err' : ''}`} data-testid="notice">{notice.text}</div>}
+          {/* zero-height sticky toast: saving/conflict notices never shift the layout under the pointer */}
+          <div className="noticebar">{notice && <div className={`notice ${notice.err ? 'err' : ''}`} data-testid="notice" role="status">{notice.text}</div>}</div>
           {(tab === 'outline' || tab === 'mindmap') && <ApprovalBanner course={course} busy={busy} onApprove={() => mutate('course.approve', { courseId: course.id }, '学习者批准大纲', '大纲已批准')} />}
           {tab === 'outline' && <OutlineView topics={topics} busy={busy} edit={outlineEdit} selected={selectedConcept?.id} onSelect={setSelected} />}
           {tab === 'mindmap' && <MindmapView view={views.mindmap} topics={topics} busy={busy} edit={outlineEdit} selected={selectedConcept?.id} onSelectConcept={setSelected} width={rightWidth} />}
