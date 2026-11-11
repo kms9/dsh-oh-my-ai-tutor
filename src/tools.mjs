@@ -125,7 +125,7 @@ export function toolSpecs(store) {
       name: 'tutor_board_patch',
       description: 'Incrementally edit the course board shared with the learner. First tutor_board_read and pass its revision as baseRevision. Atomic batch of at most 100 operations (see the operations schema). '
         + 'Element ids ONLY come from tutor_board_read; new elements never carry an id (the store assigns one) — give a new card ref:"n1" and point at it later in the same batch as "$n1"; the result maps refs to real ids. '
-        + 'Deleting a card also deletes its arrows. Coordinates are canvas pixels (>= 0); cards are about 164x66, keep ~40px gaps. Arrows are visual only: use tutor_write relation.propose for a semantic candidate relation. '
+        + 'Deleting a card also deletes its arrows. Coordinates are canvas pixels (>= 0); cards are about 196x72, keep ~14-40px gaps. The workbench groups cards into one section per syllabus topic (a view of where the cards sit: put a note inside a topic area, or connect it to a card of that topic, to group it there). Arrows are visual only: use tutor_write relation.propose for a semantic candidate relation. '
         + 'Set seed=true (with no operations) to add every missing knowledge point card plus candidate-relation arrows (relation arrows someone deleted on purpose are not re-added). When a knowledge point is removed from the outline its card stays as a dashed "stale" card until someone deletes it. On conflict READ AGAIN; the learner may have moved or deleted cards.',
       parameters: {
         courseId: { type: 'string', required: true },

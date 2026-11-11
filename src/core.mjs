@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { BOARD_CARD, boardSeedPosition } from './board-layout.mjs';
 
 export const SCHEMA_VERSION = 1;
 export const EDGE_TYPES = Object.freeze([
@@ -247,12 +248,10 @@ const REF_RE = /^[A-Za-z0-9_-]{1,40}$/;
 function boardOf(s, courseId) {
   return s.boards[courseId] ?? { courseId, revision: 0, elements: [] };
 }
-const CARD = { width: 164, height: 66 };
-/** Deterministic seed layout (same grid as the workbench design): two columns in syllabus order. */
+const CARD = BOARD_CARD;
+/** Deterministic seed layout: every concept card in its syllabus topic's section (2-column section grid). */
 export function boardLayoutFor(course, conceptId) {
-  const order = course.syllabus.topics.flatMap((t) => t.subtopics.map((x) => x.conceptId));
-  const i = Math.max(0, order.indexOf(conceptId));
-  return { x: 22 + (i % 2) * 216, y: 30 + Math.floor(i / 2) * 112 };
+  return boardSeedPosition(course.syllabus.topics, conceptId);
 }
 /**
  * Apply one atomic board batch. Element ids are always assigned by the store (callers never invent ids);
