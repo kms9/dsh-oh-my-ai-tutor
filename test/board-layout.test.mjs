@@ -1,0 +1,84 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { boardSeedPosition, assignTopics, sectionFrames, arrangeOps, BOARD_CARD, sectionGrid } from '../src/board-layout.mjs';
+import { edgeSides, graphClusters, bestGraphLayout, fitViewport } from '../src/client/flow-layout.mjs';
+import { transition, validateState } from '../src/core.mjs';
+
+const fixture = validateState(JSON.parse(await readFile(new URL('./fixtures/spaced-repetition.state.json', import.meta.url), 'utf8')));
+const course = Object.values(fixture.courses)[0];
+const topics = course.syllabus.topics;
+const concepts = Object.values(fixture.concepts).filter((c) => c.courseId === course.id);
+const overlap = (p, q) => !(p.x + p.width <= q.x || q.x + q.width <= p.x || p.y + p.height <= q.y || q.y + q.height <= p.y);
+
+test('seed positions: every concept card sits inside its own topic section, no two cards overlap', () => {
+  const grid = sectionGrid(topics.map((t) => ({ id: t.id, count: t.subtopics.length })));
+  const cards = [];
+  for (const t of topics) for (const s of t.subtopics) {
+    const p = boardSeedPosition(topics, s.conceptId), r = grid.get(t.id);
+    const card = { ...p, ...BOARD_CARD };
+    assert.ok(card.x >= r.x && card.y >= r.y && card.x + card.width <= r.x + r.width && card.y + card.height <= r.y + r.height, `${s.title} inside its section`);
+    for (const c of cards) assert.ok(!overlap(c, card), `${s.title} overlaps another card`);
+    cards.push(card);
+  }
+  const rects = [...grid.values()];
+  for (let i = 0; i < rects.length; i++) for (let j = i + 1; j < rects.length; j++) assert.ok(!overlap(rects[i], rects[j]), 'sections do not overlap');
+});
+
+test('board.seed through the store uses the section layout (schema unchanged: plain x/y/width/height)', () => {
+  const { state } = transition(fixture, 'board.seed', { courseId: course.id, baseRevision: 0 }, { actor: 'learner' });
+  const els = state.boards[course.id].elements.filter((e) => e.type === 'concept');
+  assert.equal(els.length, concepts.filter((c) => c.status === 'active').length);
+  for (const e of els) {
+    assert.deepEqual(Object.keys(e).filter((k) => !['id', 'type', 'createdBy', 'updatedBy', 'createdAt', 'updatedAt', 'conceptId', 'x', 'y', 'width', 'height', 'color'].includes(k)), []);
+    assert.deepEqual({ x: e.x, y: e.y }, boardSeedPosition(topics, e.conceptId));
+  }
+  const frames = sectionFrames(state.boards[course.id].elements, topics, concepts);
+  assert.equal(frames.length, topics.length, 'one section per topic');
+  for (let i = 0; i < frames.length; i++) for (let j = i + 1; j < frames.length; j++) assert.ok(!overlap(frames[i], frames[j]));
+});
+
+test('sections: notes join the section they sit in, else the topic of a connected card, else stay free', () => {
+  const t0 = topics[0], t1 = topics[1];
+  const c0 = { id: 'c0', type: 'concept', conceptId: t0.subtopics[0].conceptId, x: 100, y: 100, ...BOARD_CARD };
+  const c1 = { id: 'c1', type: 'concept', conceptId: t1.subtopics[0].conceptId, x: 900, y: 100, ...BOARD_CARD };
+  const inside = { id: 'n1', type: 'note', text: 'a', x: 110, y: 110, ...BOARD_CARD };
+  const linked = { id: 'n2', type: 'note', text: 'b', x: 2000, y: 2000, ...BOARD_CARD };
+  const free = { id: 'n3', type: 'note', text: 'c', x: 4000, y: 4000, ...BOARD_CARD };
+  const arrow = { id: 'a1', type: 'arrow', from: 'n2', to: 'c1' };
+  const m = assignTopics([c0, c1, inside, linked, free, arrow], topics, concepts);
+  assert.equal(m.get('c0'), t0.id); assert.equal(m.get('c1'), t1.id);
+  assert.equal(m.get('n1'), t0.id); assert.equal(m.get('n2'), t1.id); assert.equal(m.get('n3'), null);
+});
+
+test('按主题整理: one batch of plain updates; after applying it every card is in its section and a second run is a no-op', () => {
+  // old two-column grid boards (before sections) get rearranged
+  const els = [];
+  topics.flatMap((t) => t.subtopics).forEach((s, i) => els.push({ id: `card-${i}`, type: 'concept', conceptId: s.conceptId, x: 22 + (i % 2) * 216, y: 30 + Math.floor(i / 2) * 112, width: 164, height: 66 }));
+  els.push({ id: 'note-1', type: 'note', text: '计划', x: 22, y: 2000, width: 164, height: 66 }, { id: 'arrow-1', type: 'arrow', from: 'note-1', to: 'card-0' });
+  const ops = arrangeOps(els, topics, concepts);
+  assert.ok(ops.length > 0 && ops.length <= 100);
+  for (const op of ops) assert.equal(op.op, 'update');
+  const moved = els.map((e) => { const o = ops.find((x) => x.id === e.id); return o ? { ...e, ...o, op: undefined } : e; });
+  assert.deepEqual(arrangeOps(moved, topics, concepts), [], 'idempotent');
+  const m = assignTopics(moved, topics, concepts);
+  assert.equal(m.get('note-1'), m.get('card-0'), 'the connected note sits in its card topic section');
+  const cards = moved.filter((e) => e.type !== 'arrow');
+  for (let i = 0; i < cards.length; i++) for (let j = i + 1; j < cards.length; j++) assert.ok(!overlap(cards[i], cards[j]), `${cards[i].id} / ${cards[j].id}`);
+});
+
+test('flow helpers: edge sides, graph clusters, readable fit', () => {
+  assert.deepEqual(edgeSides({ x: 0, y: 0, width: 100, height: 50 }, { x: 300, y: 10, width: 100, height: 50 }), ['r', 'l']);
+  assert.deepEqual(edgeSides({ x: 0, y: 300, width: 100, height: 50 }, { x: 10, y: 0, width: 100, height: 50 }), ['t', 'b']);
+  const nodes = concepts.map((c) => ({ id: c.id, label: c.title, topicId: c.topicId }));
+  const l = graphClusters(nodes, [], topics, 2, 2);
+  assert.equal(l.positions.size, nodes.length);
+  const rects = [...l.positions.values()];
+  for (let i = 0; i < rects.length; i++) for (let j = i + 1; j < rects.length; j++) assert.ok(!overlap(rects[i], rects[j]));
+  const wide = bestGraphLayout(nodes, [], topics, 1400, 700), tall = bestGraphLayout(nodes, [], topics, 400, 1400);
+  assert.ok(wide.columns > tall.columns, 'wide canvases get more clusters per row');
+  const v = fitViewport({ x: 0, y: 0, width: 2000, height: 1000 }, 500, 400, { minZoom: 0.8 });
+  assert.equal(v.zoom, 0.8); assert.equal(v.overflow, true);
+  const f = fitViewport({ x: 0, y: 0, width: 300, height: 200 }, 800, 600, { minZoom: 0.8, maxZoom: 1.15 });
+  assert.equal(f.zoom, 1.15); assert.equal(f.overflow, false);
+});

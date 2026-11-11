@@ -2,7 +2,8 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import workbenchCss from './workbench.css';
 import mindElixirCss from 'mind-elixir/style.css';
-const css = `${mindElixirCss}\n${workbenchCss}`;
+import reactFlowCss from '@xyflow/react/dist/style.css';
+const css = `${mindElixirCss}\n${reactFlowCss}\n${workbenchCss}`;
 import { Workbench } from './Workbench.jsx';
 import { TutorToolCard } from './ToolCard.jsx';
 

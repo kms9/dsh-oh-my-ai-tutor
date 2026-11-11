@@ -79,15 +79,39 @@ await step('initial render reads the real state (no hard-coded ZPD lesson)', asy
   await page.screenshot({ path: join(shots, '01-initial-graph.png') });
 });
 
-await step('graph renders all 15 nodes inside the canvas (adaptive layout)', async () => {
+await step('graph (React Flow): 15 knowledge points in topic clusters, candidate relation dashed, click selects, enlarge shows all', async () => {
   await tab('graph');
-  assert.equal(await page.locator('[data-testid=graph-svg] g.node').count(), 15);
-  const box = await page.locator('[data-testid=graph-svg]').evaluate((svg) => {
-    const vb = svg.viewBox.baseVal; const rects = [...svg.querySelectorAll('g.node rect:first-child')];
-    return { ok: rects.every((r) => +r.getAttribute('x') + +r.getAttribute('width') <= vb.width && +r.getAttribute('y') + +r.getAttribute('height') <= vb.height), vb: [vb.width, vb.height] };
+  await page.waitForSelector('[data-testid=graph-flow] .rf-kp');
+  assert.equal(await page.locator('[data-testid=graph-flow] .rf-kp').count(), 15);
+  assert.equal(await page.locator('[data-testid=graph-flow] .rf-cluster').count(), (await topics()).length);
+  const edge = page.locator('[data-testid=graph-flow] .react-flow__edge');
+  assert.equal(await edge.count(), 1);
+  assert.match(await edge.locator('path').first().getAttribute('style'), /stroke-dasharray/, 'candidate relation is dashed');
+  assert.match(await page.textContent('[data-testid=graph-flow] .react-flow__edge-text'), /前置 · 候选/);
+  assert.ok(Number(await page.getAttribute('[data-testid=graph-flow]', 'data-scale')) >= 0.8, 'readable zoom');
+  // click a knowledge point: the detail card follows
+  const n = page.locator('[data-testid=graph-flow] .rf-kp').nth(3);
+  const title = (await n.locator('.rf-title').textContent()).trim();
+  await n.click();
+  await eventually(async () => assert.match(await page.textContent('[data-testid=graph-detail] b'), new RegExp(title.replace(/[()（）+|?.*\[\]]/g, '.'))));
+  await page.screenshot({ path: join(shots, '01b-graph-right-column.png') });
+  // enlarge to the whole workbench: every node inside the canvas
+  await page.click('[data-testid=graph-zoom]');
+  await page.waitForSelector('[data-testid=tutor-workbench][data-mm-zoom=wide]');
+  await page.click('[data-testid=graph-zoom-full]');
+  await page.waitForSelector('[data-testid=tutor-workbench][data-mm-zoom=full]');
+  await eventually(async () => {
+    const r = await page.evaluate(() => {
+      const c = document.querySelector('[data-testid=graph-flow]').getBoundingClientRect();
+      const ns = [...document.querySelectorAll('[data-testid=graph-flow] .rf-kp')].map((x) => x.getBoundingClientRect());
+      return { clipped: ns.filter((x) => x.left < c.left - 1 || x.right > c.right + 1 || x.top < c.top - 1 || x.bottom > c.bottom + 1).length, w: c.width };
+    });
+    assert.ok(r.w > 1100, `whole workbench (${r.w}px)`);
+    assert.equal(r.clipped, 0, `${r.clipped} nodes clipped`);
   });
-  assert.ok(box.ok, `nodes outside viewBox ${box.vb}`);
-  assert.equal(await page.locator('[data-testid=graph-svg] [data-edge-id]').count(), 1);
+  await page.screenshot({ path: join(shots, '01c-graph-enlarged.png') });
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('[data-testid=tutor-workbench][data-mm-zoom=off]');
 });
 
 await step('outline: manual rename (double-click inline edit)', async () => {
@@ -383,133 +407,253 @@ await step('mind map: AI reorders and prunes via tutor_outline_edit; map, list a
   await page.screenshot({ path: join(shots, '05-mindmap-after-ai.png') });
 });
 
-await step('board: seed from syllabus (all cards + candidate relation arrow)', async () => {
+const card = (i) => page.locator('[data-testid=board] .rf-card').nth(i);
+const cardById = (id, p = page) => p.locator(`[data-testid=board] .rf-card[data-element="${id}"]`);
+const boardEls = async () => (await readState()).boards[cid].elements;
+const liveEl = async (id) => (await boardEls()).find((e) => e.id === id);
+const arrowsOnScreen = () => page.locator('[data-testid=board] .react-flow__edge');
+/** Drag with the mouse in small steps (React Flow / d3-drag need real pointer moves). */
+async function drag(p, from, to, steps = 8) {
+  await p.mouse.move(from.x, from.y); await p.mouse.down();
+  for (let i = 1; i <= steps; i++) await p.mouse.move(from.x + ((to.x - from.x) * i) / steps, from.y + ((to.y - from.y) * i) / steps);
+  await p.mouse.up();
+}
+/** A point on the empty canvas (the React Flow pane itself, not a card, section, minimap or attribution). */
+const emptyCanvasSpot = (p) => p.evaluate(() => {
+  const c = document.querySelector('[data-testid=board]').getBoundingClientRect();
+  for (let y = c.bottom - 30; y > c.top + 30; y -= 20) for (let x = c.right - 200; x > c.left + 30; x -= 20) {
+    const el = document.elementFromPoint(x, y);
+    if (el?.classList.contains('react-flow__pane')) return { x, y };
+  }
+  throw new Error('no empty canvas spot');
+});
+/** A screen point on an arrow that is really clickable (not under a card or label), or null. */
+const arrowMidpoint = (p, id) => p.evaluate((id) => {
+  const g = document.querySelector(`[data-testid=board] .react-flow__edge[data-id="${id}"]`);
+  const path = g?.querySelector('path.react-flow__edge-path');
+  if (!path) return null;
+  const len = path.getTotalLength(), m = path.getScreenCTM();
+  for (const f of [0.5, 0.4, 0.6, 0.3, 0.7, 0.2, 0.8]) {
+    const pt = path.getPointAtLength(len * f);
+    const x = pt.x * m.a + pt.y * m.c + m.e, y = pt.x * m.b + pt.y * m.d + m.f;
+    if (g.contains(document.elementFromPoint(x, y))) return { x, y };
+  }
+  return null;
+}, id);
+const centreOf = async (loc) => { const b = await loc.boundingBox(); return { x: b.x + b.width / 2, y: b.y + b.height / 2, b }; };
+
+await step('board (React Flow): seed from syllabus → cards in topic sections + candidate relation arrow; enlarge / whole workbench / restore', async () => {
   await tab('board');
   await page.click('[data-testid=board-seed]');
-  const n = (await readState()).concepts;
-  const active = Object.values(n).filter((c) => c.status === 'active').length;
-  await eventually(async () => assert.equal(await page.locator('[data-testid=board] .boardnode').count(), active));
-  assert.equal(await page.locator('[data-testid=board] [data-arrow-id]').count(), 1);
-  await page.screenshot({ path: join(shots, '06-board-seeded.png') });
-});
-
-await step('board: manual drag moves a card and persists x/y', async () => {
-  const el = page.locator('[data-testid=board] .boardnode').nth(1);
-  const id = await el.getAttribute('data-element');
-  const box = await el.boundingBox();
-  await page.mouse.move(box.x + 30, box.y + 30); await page.mouse.down();
-  await page.mouse.move(box.x + 90, box.y + 60, { steps: 6 }); await page.mouse.move(box.x + 150, box.y + 90, { steps: 6 });
-  await page.mouse.up();
-  await eventually(async () => {
-    const e = (await readState()).boards[cid].elements.find((x) => x.id === id);
-    assert.ok(e.x > 22 + 216 + 60 || e.y > 30 + 60, `moved: ${e.x},${e.y}`);
-    assert.equal(e.updatedBy, 'learner');
+  const active = Object.values((await readState()).concepts).filter((c) => c.status === 'active').length;
+  await eventually(async () => assert.equal(await page.locator('[data-testid=board] .rf-card').count(), active));
+  assert.equal(await arrowsOnScreen().count(), 1);
+  assert.match(await arrowsOnScreen().first().locator('path').first().getAttribute('style'), /stroke-dasharray/, 'relation arrow dashed');
+  assert.equal(await page.locator('[data-testid=board] .rf-section').count(), (await topics()).length, 'one section per topic');
+  assert.ok(Number(await page.getAttribute('[data-testid=board]', 'data-scale')) >= 0.8, 'readable zoom');
+  // every concept card sits inside its own section frame
+  const misplaced = await page.evaluate(() => {
+    const frames = [...document.querySelectorAll('[data-testid=board] .rf-section')].map((f) => f.getBoundingClientRect());
+    return [...document.querySelectorAll('[data-testid=board] .rf-card.concept')].filter((c) => {
+      const r = c.getBoundingClientRect(); return !frames.some((f) => r.left >= f.left - 1 && r.right <= f.right + 1 && r.top >= f.top - 1 && r.bottom <= f.bottom + 1);
+    }).length;
   });
+  assert.equal(misplaced, 0);
+  assert.equal(await page.locator('[data-testid=board] .rf-card[data-actor=learner] .rf-by.me').count(), active, 'learner-seeded cards are tagged 你');
+  await page.screenshot({ path: join(shots, '06-board-seeded.png') });
+  await page.click('[data-testid=board-zoom]');
+  await page.waitForSelector('[data-testid=tutor-workbench][data-mm-zoom=wide]');
+  await page.click('[data-testid=board-zoom-full]');
+  await page.waitForSelector('[data-testid=tutor-workbench][data-mm-zoom=full]');
+  await eventually(async () => assert.ok((await page.locator('[data-testid=board]').boundingBox()).width > 1100));
+  await page.screenshot({ path: join(shots, '06b-board-whole-workbench.png') });
+  // the interactive board steps below run on the enlarged board (as a learner editing a big board would)
 });
 
-await step('board: manual connect two cards, delete a card (cascade), add + edit a note', async () => {
-  const cards = page.locator('[data-testid=board] .boardnode');
-  const a = await cards.nth(2).getAttribute('data-element'), b = await cards.nth(5).getAttribute('data-element');
+await step('board: drag a card → one board.patch update x/y (actor learner, base revision of the gesture)', async () => {
+  const el = card(1); const id = await el.getAttribute('data-element');
+  const before = await liveEl(id); const rev0 = (await readState()).boards[cid].revision;
+  const c = await centreOf(el);
+  await drag(page, c, { x: c.x + 60, y: c.y + 160 });
+  await eventually(async () => {
+    const e = await liveEl(id);
+    assert.ok(e.y > before.y + 60, `moved: ${before.x},${before.y} → ${e.x},${e.y}`);
+    assert.equal(e.updatedBy, 'learner');
+    assert.equal((await readState()).boards[cid].revision, rev0 + 1);
+  });
+  const ev = (await readState()).events.at(-1);
+  assert.equal(ev.action, 'board.patch'); assert.equal(ev.actor, 'learner'); assert.match(ev.summary, /移动/);
+});
+
+await step('board: connect two cards by dragging from a side handle (onConnect → add arrow)', async () => {
+  const a = await card(2).getAttribute('data-element'), b = await card(4).getAttribute('data-element');
+  await cardById(a).hover();
+  const h = await centreOf(cardById(a).locator('.react-flow__handle[data-handleid=r]'));
+  await cardById(b).hover();
+  const t = await centreOf(cardById(b).locator('.react-flow__handle[data-handleid=l]'));
+  await cardById(a).hover();
+  await drag(page, h, t, 12);
+  await eventually(async () => {
+    const arrow = (await boardEls()).find((e) => e.type === 'arrow' && !e.deleted && ((e.from === a && e.to === b) || (e.from === b && e.to === a)));
+    assert.ok(arrow, 'arrow saved'); assert.equal(arrow.createdBy, 'learner');
+  });
+  await eventually(async () => assert.equal(await arrowsOnScreen().count(), 2));
+});
+
+await step('board: toolbar link mode, delete a card (cascade), add + edit a note, add a note by double-clicking empty canvas', async () => {
+  const a = await card(5).getAttribute('data-element'), b = await card(6).getAttribute('data-element');
   await page.click('[data-testid=board-link]');
-  await page.click(`[data-element="${a}"]`); await page.click(`[data-element="${b}"]`);
-  await eventually(async () => assert.ok((await readState()).boards[cid].elements.some((e) => e.type === 'arrow' && !e.deleted && e.from === a && e.to === b)));
-  await page.click(`[data-element="${a}"]`);
+  await cardById(a).click(); await cardById(b).click();
+  await eventually(async () => assert.ok((await boardEls()).some((e) => e.type === 'arrow' && !e.deleted && e.from === a && e.to === b)));
+  await page.waitForSelector('[data-testid=board-link]:not(.on)');
+  await cardById(a).click();
   await page.click('[data-testid=board-delete]');
   await eventually(async () => {
-    const els = (await readState()).boards[cid].elements;
+    const els = await boardEls();
     assert.ok(els.find((e) => e.id === a).deleted, 'card tombstoned');
     assert.ok(els.filter((e) => e.type === 'arrow' && (e.from === a || e.to === a)).every((e) => e.deleted), 'arrows cascade');
   });
   await page.click('[data-testid=board-add-note]');
-  await page.waitForSelector('[data-testid=board] .boardnode.note');
-  await page.dblclick('[data-testid=board] .boardnode.note');
-  await page.fill('[data-testid=board] .boardnode.note textarea', '我的复习节奏：1-2-4-8 天');
+  await page.waitForSelector('[data-testid=board] .rf-card.note');
+  await page.locator('[data-testid=board] .rf-card.note').first().dblclick();
+  await page.fill('[data-testid=board-card-editor]', '我的复习节奏：1-2-4-8 天');
   await page.keyboard.press('Enter');
-  await eventually(async () => assert.ok((await readState()).boards[cid].elements.some((e) => e.type === 'note' && e.text === '我的复习节奏：1-2-4-8 天')));
+  await eventually(async () => assert.ok((await boardEls()).some((e) => e.type === 'note' && !e.deleted && e.text === '我的复习节奏：1-2-4-8 天' && e.createdBy === 'learner')));
+  await page.waitForSelector('[data-testid=board] .rf-card.note-me >> text=我的复习节奏：1-2-4-8 天');
+  // double-click on empty canvas adds a note at that spot
+  const spot = await emptyCanvasSpot(page);
+  const notes0 = (await boardEls()).filter((e) => e.type === 'note' && !e.deleted).length;
+  await page.mouse.dblclick(spot.x, spot.y);
+  await eventually(async () => assert.equal((await boardEls()).filter((e) => e.type === 'note' && !e.deleted).length, notes0 + 1));
   await page.screenshot({ path: join(shots, '07-board-manual.png') });
 });
 
-await step('board: AI edits via tutor_board_read/patch are visible in the UI', async () => {
+await step('board: double-click a knowledge-point card renames it through the outline (course.editOutline, learner)', async () => {
+  const el = card(0); const conceptId = await el.getAttribute('data-concept');
+  await el.dblclick();
+  await page.fill('[data-testid=board-card-editor]', '适用场景（白板改名）');
+  await page.keyboard.press('Enter');
+  await eventually(async () => {
+    const sub = (await topics()).flatMap((t) => t.subtopics).find((s) => s.conceptId === conceptId);
+    assert.equal(sub.title, '适用场景（白板改名）');
+  });
+  const ev = (await readState()).events.at(-1);
+  assert.equal(ev.action, 'course.editOutline'); assert.equal(ev.actor, 'learner');
+  await page.waitForSelector(`[data-testid=board] .rf-card[data-concept="${conceptId}"] >> text=适用场景（白板改名）`);
+});
+
+await step('board: 按主题整理 moves every card into its topic section in one CAS batch', async () => {
+  await page.waitForSelector('[data-testid=board-arrange]:not([disabled])');
+  const rev0 = (await readState()).boards[cid].revision;
+  await page.click('[data-testid=board-arrange]');
+  await eventually(async () => assert.equal((await readState()).boards[cid].revision, rev0 + 1));
+  await page.waitForSelector('[data-testid=board-arrange][disabled]');
+  const ev = (await readState()).events.at(-1);
+  assert.equal(ev.summary, '白板：按主题整理'); assert.equal(ev.actor, 'learner');
+});
+
+await step('board: AI edits via tutor_board_read/patch refresh the board live, highlighted and tagged AI', async () => {
   const b = await tools.tutor_board_read.execute({ courseId: cid });
   const note = b.elements.find((e) => e.type === 'note');
-  const card = b.elements.find((e) => e.type === 'concept');
+  const target = b.elements.find((e) => e.type === 'concept');
+  const arrows0 = await arrowsOnScreen().count();
   const r = await tools.tutor_board_patch.execute({ courseId: cid, baseRevision: b.revision, operations: [
-    { op: 'add', type: 'note', ref: 'n1', text: 'AI：先复习「间隔效应」再看调度算法', x: 480, y: 40, color: '#eef6ff' },
-    { op: 'add', type: 'arrow', from: '$n1', to: card.id, label: '先看' },
-    { op: 'update', id: note.id, x: 480, y: 160 },
+    { op: 'add', type: 'note', ref: 'n1', text: 'AI：先复习「间隔效应」再看调度算法', x: target.x + 230, y: target.y },
+    { op: 'add', type: 'arrow', from: '$n1', to: target.id, label: '先看' },
+    { op: 'update', id: note.id, x: note.x + 20, y: note.y + 10 },
   ] });
   assert.equal(r.revision, b.revision + 1);
   assert.match(r.refs.n1, /^note-/, 'the store assigned the note id');
-  await page.waitForSelector('text=AI：先复习「间隔效应」再看调度算法', { timeout: 4000 });
-  await eventually(async () => assert.equal(await page.locator('[data-testid=board] [data-arrow-id]').count(), 2));
-  assert.match(await page.textContent('[data-testid=activity]'), /AI 编辑白板/);
+  const t0 = Date.now();
+  await page.waitForSelector(`[data-testid=board] .rf-card.note-ai[data-element="${r.refs.n1}"]`, { timeout: 4000 });
+  const ms = Date.now() - t0;
+  await eventually(async () => assert.equal(await arrowsOnScreen().count(), arrows0 + 1));
+  assert.ok(await page.locator(`[data-testid=board] .rf-card.fresh[data-element="${r.refs.n1}"]`).count() === 1, 'AI change highlighted');
+  assert.match(await page.textContent(`[data-testid=board] .rf-card[data-element="${r.refs.n1}"] .rf-by`), /AI/);
+  assert.equal(await page.getAttribute('[data-testid=board]', 'data-revision'), String(r.revision));
+  console.log(`     AI note on screen ${ms} ms after the write`);
   await page.screenshot({ path: join(shots, '08-board-after-ai.png') });
 });
 
-await step('CAS: a stale learner edit is rejected, UI reloads and says so', async () => {
+await step('CAS: a stale learner drag is rejected, the board reloads and says so (no overwrite)', async () => {
   const slow = await context.newPage();
   await slow.goto(`${url}?view=board&poll=600000`);
-  await slow.waitForSelector('[data-testid=board] .boardnode');
+  await slow.waitForSelector('[data-testid=board] .rf-card');
+  const id = await slow.locator('[data-testid=board] .rf-card').first().getAttribute('data-element');
+  const before = await liveEl(id);
   const b = await tools.tutor_board_read.execute({ courseId: cid });
-  await tools.tutor_board_patch.execute({ courseId: cid, baseRevision: b.revision, operations: [{ op: 'add', type: 'note', text: 'AI 并发写入', x: 480, y: 280 }] });
-  const box = await slow.locator('[data-testid=board] .boardnode').first().boundingBox();
-  await slow.mouse.move(box.x + 20, box.y + 20); await slow.mouse.down(); await slow.mouse.move(box.x + 80, box.y + 50, { steps: 5 }); await slow.mouse.up();
+  await tools.tutor_board_patch.execute({ courseId: cid, baseRevision: b.revision, operations: [{ op: 'add', type: 'note', text: 'AI 并发写入', x: 40, y: 1400 }] });
+  const c = await centreOf(slow.locator('[data-testid=board] .rf-card').first());
+  await drag(slow, c, { x: c.x + 70, y: c.y + 40 }, 6);
   await slow.waitForSelector('[data-testid=notice].err', { timeout: 4000 });
   assert.match(await slow.textContent('[data-testid=notice]'), /刚改过/);
-  await slow.waitForSelector('text=AI 并发写入');
+  const after = await liveEl(id);
+  assert.deepEqual([after.x, after.y], [before.x, before.y], 'stale drag not written');
+  await eventually(async () => assert.ok(await slow.locator('[data-testid=board] .rf-card >> text=AI 并发写入').count() === 1, 'reloaded to the latest board'));
+  await slow.screenshot({ path: join(shots, '08b-board-conflict.png') });
   await slow.close();
 });
 
 await step('board: a drag during the default 1 s poll is not yanked back and keeps its base revision (review #2)', async () => {
-  await tab('board');
-  const el = page.locator('[data-testid=board] .boardnode').nth(3);
-  const id = await el.getAttribute('data-element');
-  const before = (await readState()).boards[cid].elements.find((x) => x.id === id);
-  await el.scrollIntoViewIfNeeded();
-  const box = await el.boundingBox();
-  await page.mouse.move(box.x + 20, box.y + 20); await page.mouse.down();
-  await page.mouse.move(box.x + 60, box.y + 50, { steps: 5 });
+  const el = card(3); const id = await el.getAttribute('data-element');
+  const before = await liveEl(id);
+  const c = await centreOf(el);
+  await page.mouse.move(c.x, c.y); await page.mouse.down();
+  for (let i = 1; i <= 6; i++) await page.mouse.move(c.x + i * 8, c.y + i * 6);
   const b = await tools.tutor_board_read.execute({ courseId: cid });
-  await tools.tutor_board_patch.execute({ courseId: cid, baseRevision: b.revision, operations: [{ op: 'add', type: 'note', text: 'AI 在你拖动时加的', x: 700, y: 40 }] });
-  await page.waitForSelector('text=AI 在你拖动时加的', { timeout: 4000 }); // the poll landed mid-drag
-  const left = await el.evaluate((n) => parseFloat(n.style.left));
-  assert.ok(left > before.x + 20, `card stays under the pointer (left=${left}, server x=${before.x})`);
-  await page.mouse.move(box.x + 100, box.y + 80, { steps: 5 });
+  await tools.tutor_board_patch.execute({ courseId: cid, baseRevision: b.revision, operations: [{ op: 'add', type: 'note', text: 'AI 在你拖动时加的', x: 40, y: 1500 }] });
+  await eventually(async () => assert.equal(await page.getAttribute('[data-testid=board]', 'data-revision'), String(b.revision + 1)), 4000); // the poll landed mid-drag
+  const now = await centreOf(cardById(id));
+  assert.ok(now.x > c.x + 30, `card stays under the pointer (${now.x} vs start ${c.x})`);
+  for (let i = 7; i <= 12; i++) await page.mouse.move(c.x + i * 8, c.y + i * 6);
   await page.mouse.up();
   await page.waitForSelector('[data-testid=notice].err');
   assert.match(await page.textContent('[data-testid=notice]'), /没有保存/);
-  const after = (await readState()).boards[cid].elements.find((x) => x.id === id);
+  const after = await liveEl(id);
   assert.deepEqual([after.x, after.y], [before.x, before.y], 'stale drag not written with the new revision');
 });
 
-await step('board: Backspace never deletes; Delete only works with focus inside the board (review #5)', async () => {
-  const card = page.locator('[data-testid=board] .boardnode').nth(2);
-  const id = await card.getAttribute('data-element');
-  await card.click();
+await step('board: Backspace never deletes; Delete only with focus inside the board; a selected arrow deletes too (review #5)', async () => {
+  const el = card(2); const id = await el.getAttribute('data-element');
+  await el.click();
   await page.keyboard.press('Backspace');
   await page.evaluate(() => { document.activeElement?.blur(); document.body.focus(); });
   await page.keyboard.press('Delete');
   await page.waitForTimeout(300);
-  assert.ok(!(await readState()).boards[cid].elements.find((x) => x.id === id).deleted, 'card survives Backspace and Delete outside the board');
-  await card.click();
+  assert.ok(!(await liveEl(id)).deleted, 'card survives Backspace and Delete outside the board');
+  await el.click();
   await page.keyboard.press('Delete');
-  await eventually(async () => assert.ok((await readState()).boards[cid].elements.find((x) => x.id === id).deleted));
+  await eventually(async () => assert.ok((await liveEl(id)).deleted));
+  await page.click('[data-testid=board-fit]');
+  await page.waitForTimeout(200);
+  let target = null;
+  for (const a of (await boardEls()).filter((e) => e.type === 'arrow' && !e.deleted && !e.relationId)) {
+    const pt = await arrowMidpoint(page, a.id);
+    if (pt) { target = { a, pt }; break; }
+  }
+  assert.ok(target, 'an arrow is visible on the canvas');
+  await page.mouse.click(target.pt.x, target.pt.y);
+  await page.waitForSelector(`[data-testid=board] .react-flow__edge.selected[data-id="${target.a.id}"]`);
+  await page.keyboard.press('Delete');
+  await eventually(async () => assert.ok((await liveEl(target.a.id)).deleted, 'arrow deleted'));
 });
 
 await step('board: re-seed after deleting a card brings back the card and its relation arrow (review #6)', async () => {
   const st = await readState();
   const relArrow = st.boards[cid].elements.find((e) => e.type === 'arrow' && e.relationId && !e.deleted);
   const fromCard = st.boards[cid].elements.find((e) => e.id === relArrow.from);
-  await page.click(`[data-element="${fromCard.id}"]`);
+  await cardById(fromCard.id).click();
   await page.click('[data-testid=board-delete]');
-  await eventually(async () => assert.ok((await readState()).boards[cid].elements.find((e) => e.id === relArrow.id).deleted));
+  await eventually(async () => assert.ok((await liveEl(relArrow.id)).deleted));
   await page.waitForSelector('[data-testid=board-seed]:not([disabled])');
   await page.click('[data-testid=board-seed]');
   await eventually(async () => {
-    const els = (await readState()).boards[cid].elements.filter((e) => !e.deleted);
+    const els = (await boardEls()).filter((e) => !e.deleted);
     assert.ok(els.some((e) => e.type === 'concept' && e.conceptId === fromCard.conceptId));
     assert.ok(els.some((e) => e.type === 'arrow' && e.relationId === relArrow.relationId));
   });
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('[data-testid=tutor-workbench][data-mm-zoom=off]');
 });
 
 await step('chat tool cards render tool results as graphics (outline/mindmap/graph/board)', async () => {
@@ -549,7 +693,7 @@ await step('restart recovery: kill harness, restart, reload — all edits persis
   assert.equal(Number(await page.getAttribute('[data-testid=tutor-workbench]', 'data-revision')), after.revision);
   await tab('outline');
   await page.waitForSelector('text=什么是间隔重复（导图改名）');
-  await page.waitForSelector('text=适用场景：词汇、事实与概念（AI 改）');
+  await page.waitForSelector('text=适用场景（白板改名）');
   await tab('board');
   await page.waitForSelector('text=我的复习节奏：1-2-4-8 天');
   await page.waitForSelector('text=AI：先复习「间隔效应」再看调度算法');

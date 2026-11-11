@@ -152,7 +152,7 @@
 .omt.w-mid.mmz-wide .right,.omt.w-mid.mmz-full .right{grid-column:auto}
 .omt.w-mid.mmz-full .app{grid-template-columns:minmax(0,1fr)}
 /* enlarged map: drop the column header, legend and activity so the canvas gets the space */
-.omt.mmz-wide .righthead,.omt.mmz-full .righthead,.omt.mmz-wide [data-testid=mindmap-view] .legend,.omt.mmz-full [data-testid=mindmap-view] .legend,.omt.mmz-wide [data-testid=activity],.omt.mmz-full [data-testid=activity]{display:none}
+.omt.mmz-wide .righthead,.omt.mmz-full .righthead,.omt.mmz-wide .right .legend,.omt.mmz-full .right .legend,.omt.mmz-wide .right .status,.omt.mmz-full .right .status,.omt.mmz-wide [data-testid=activity],.omt.mmz-full [data-testid=activity]{display:none}
 .omt.mmz-wide .right .banner,.omt.mmz-full .right .banner{padding-top:6px;padding-bottom:6px;margin:6px 0}
 .omt.mmz-wide .right .title2,.omt.mmz-full .right .title2{margin-bottom:4px}
 /* chat card */
@@ -167,3 +167,61 @@
 .omt-card .ol b{display:block;margin-top:4px}
 .omt-card .ol span{display:block;padding-left:16px;color:#4a596d}
 .omt-card .err{color:#a4513a;font-size:12px}
+
+/* React Flow views (board + graph): host React, controlled; cards are custom HTML */
+.omt .rfhost{position:relative}
+.omt .rf-wrap{width:100%;border:1px solid #e1e5ee;border-radius:10px;background:#fbfcfe;outline:none;position:relative;overflow:hidden}
+.omt .rf-wrap:focus-visible{border-color:#a7b3ef}
+.omt .rf-wrap.linking .react-flow__pane,.omt .rf-wrap.linking .rf-card{cursor:crosshair}
+.omt .rf-wrap .react-flow{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Noto Sans CJK SC",sans-serif;--xy-edge-label-color-default:#4a5670}
+.omt .rf-wrap .react-flow__attribution{font-size:9px;opacity:.55;background:transparent}
+.omt .rf-wrap .react-flow__node{font-size:13px}
+.omt .rf-wrap .react-flow__node-section,.omt .rf-wrap .react-flow__node-cluster{cursor:default}
+.omt .rf-wrap .react-flow__node.selected,.omt .rf-wrap .react-flow__node:focus,.omt .rf-wrap .react-flow__node:focus-visible{outline:none;box-shadow:none}
+.omt .rf-hint{margin:2px 0 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.omt .rfbar{margin-bottom:4px;flex-wrap:wrap}
+.omt .rflegend{margin-left:auto;display:flex;align-items:center;gap:4px;font-size:11px;color:#6e7d92}
+.omt .rflegend i{display:inline-block;width:16px;height:0;border-top:2.5px solid;margin-left:6px}
+.omt .rflegend .lg-ai{border-color:#5a6bc9}.omt .rflegend .lg-me{border-color:#2f8a63}.omt .rflegend .lg-rel{border-color:#b8860b;border-top-style:dashed}
+.omt .omt-h{width:9px;height:9px;background:#fff;border:1.5px solid #8d9fe1;opacity:0;transition:opacity .12s}
+.omt .react-flow__node:hover .omt-h,.omt .rf-wrap.linking .omt-h,.omt .react-flow__node.selected .omt-h{opacity:1}
+.omt .react-flow__handle.connectingfrom,.omt .react-flow__handle.connectingto{opacity:1;background:#5a6bc9}
+.omt .rf-graph .omt-h{opacity:0 !important;pointer-events:none}
+/* topic section (view-only grouping) */
+.omt .rf-section{width:100%;height:100%;box-sizing:border-box;border-radius:16px;border:1.5px solid color-mix(in srgb,var(--accent) 32%,transparent);background:color-mix(in srgb,var(--accent) 7%,transparent)}
+.omt .rf-section-title{display:flex;align-items:center;gap:8px;padding:10px 14px 0;font-size:13.5px;font-weight:720;color:color-mix(in srgb,var(--accent) 78%,#1b2737);letter-spacing:.01em}
+.omt .rf-section-title span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.omt .rf-section-title em{font-style:normal;font-size:11px;font-weight:650;padding:0 7px;border-radius:9px;background:color-mix(in srgb,var(--accent) 14%,#fff)}
+.omt .rf-cluster .rf-section-title{font-size:13px;padding-top:9px}
+/* cards */
+.omt .rf-card,.omt .rf-kp{width:100%;height:100%;box-sizing:border-box;position:relative;display:flex;flex-direction:column;justify-content:space-between;background:#fff;border:1px solid #dfe5f2;border-left:5px solid var(--accent);border-radius:12px;box-shadow:0 2px 8px rgba(31,42,68,.08);padding:8px 10px 7px 11px;color:#1c2438;cursor:grab}
+.omt .rf-card:active{cursor:grabbing}
+.omt .rf-title{font-size:13.5px;font-weight:620;line-height:1.38;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;word-break:break-word}
+.omt .rf-foot{display:flex;align-items:center;justify-content:space-between;gap:6px;font-size:11px;color:#7a8499;line-height:1.2}
+.omt .rf-mastery{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#7a8499}
+.omt .rf-mastery i{width:7px;height:7px;border-radius:50%;background:#bbc6df;display:inline-block}
+.omt .rf-mastery.developing{color:#9a6b16}.omt .rf-mastery.developing i{background:#e3a63b}
+.omt .rf-mastery.demonstrated{color:#2f7a4c}.omt .rf-mastery.demonstrated i{background:#47a36a}
+.omt .rf-by{font-size:10.5px;font-weight:650;line-height:16px;padding:0 6px;border-radius:9px;white-space:nowrap}
+.omt .rf-by i{font-style:normal;font-weight:500;margin-left:2px;opacity:.8}
+.omt .rf-by.ai{background:#eef0fd;color:#3d4ea8;border:1px solid #cdd3f4}
+.omt .rf-by.me{background:#e8f5ec;color:#22693d;border:1px solid #b9dcc5}
+.omt .rf-card.note{border-left-width:1px;border-radius:9px}
+.omt .rf-card.note-me{background:#fff7cf;border-color:#e9d27d;box-shadow:0 3px 9px rgba(140,110,20,.13)}
+.omt .rf-card.note-ai{background:#f1f0ff;border-color:#c9c3f2;box-shadow:0 3px 9px rgba(70,60,160,.12)}
+.omt .rf-card.note .rf-title{font-weight:560;color:#4a3a10}
+.omt .rf-card.note-ai .rf-title{color:#2f2a6b}
+.omt .rf-kind{font-size:10.5px;color:#8a7a45}.omt .rf-card.note-ai .rf-kind{color:#6a64a8}
+.omt .rf-card.sel,.omt .rf-kp.sel{border-color:#4256c4;box-shadow:0 0 0 3px rgba(84,103,199,.25),0 2px 8px rgba(31,42,68,.08)}
+.omt .rf-card.linksrc{box-shadow:0 0 0 3px rgba(208,122,46,.35)}
+.omt .rf-card.stale{opacity:.6;border-style:dashed}
+.omt .rf-card.fresh{animation:omt-fresh 1.2s ease-in-out 3}
+.omt .rf-fresh{position:absolute;top:-10px;right:8px;font-size:10px;font-weight:700;color:#fff;background:#5a6bc9;border-radius:8px;padding:1px 6px;box-shadow:0 2px 6px rgba(60,80,170,.3)}
+@keyframes omt-fresh{0%,100%{box-shadow:0 2px 8px rgba(31,42,68,.08)}50%{box-shadow:0 0 0 5px rgba(90,107,201,.35)}}
+.omt .rf-edit{flex:1;width:100%;border:0;outline:none;background:rgba(255,255,255,.75);border-radius:6px;font:inherit;font-size:13px;resize:none;padding:2px 4px;cursor:text}
+.omt .rf-kp{cursor:pointer;padding:7px 9px 6px 10px}
+.omt .rf-kp .rf-title{font-size:13px}
+.omt .rf-arrow.fresh path.react-flow__edge-path{animation:omt-dash 1.2s linear 3}
+@keyframes omt-dash{50%{stroke-width:4}}
+.omt .react-flow__edge.selected .react-flow__edge-path{filter:drop-shadow(0 0 2px rgba(51,70,184,.4))}
+.omt .react-flow__minimap{border:1px solid #e1e5ee;border-radius:8px;overflow:hidden}
