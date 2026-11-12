@@ -54,7 +54,7 @@ const topics = async () => (await course()).syllabus.topics;
 let server = await startServer();
 const channel = process.env.PW_CHANNEL ?? 'chrome';
 const browser = await chromium.launch({ ...(channel === 'bundled' ? {} : { channel }), headless: true });
-const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: 'zh-CN', timezoneId: 'America/Phoenix' });
+const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: 'zh-CN', timezoneId: 'America/Phoenix', permissions: ['clipboard-read', 'clipboard-write'] });
 context.setDefaultTimeout(8000);
 let page = await context.newPage();
 const pageErrors = [];
@@ -854,7 +854,7 @@ await step('board: re-seed after deleting a card brings back the card and its re
 
 // ── 数据 tab (SQLite read models, Glide Data Grid chunk) + knowledge point links (real conceptId) + to-dos / calendar ──
 /** Click a Glide (canvas) cell by row key + column id, using the geometry the wrapper exposes. */
-async function gridClick(testId, key, colId) {
+async function gridClick(testId, key, colId, opts = {}) {
   const g = page.locator(`[data-testid=${testId}]`);
   await g.locator('canvas').first().waitFor();
   const geo = await g.evaluate((el) => ({ keys: JSON.parse(el.dataset.rowKeys), cols: JSON.parse(el.dataset.cols), hh: +el.dataset.headerH, rh: +el.dataset.rowH }));
@@ -863,7 +863,7 @@ async function gridClick(testId, key, colId) {
   const box = await g.boundingBox();
   const y = geo.hh + r * geo.rh + geo.rh / 2;
   assert.ok(y < box.height, `row ${r} visible in the grid`);
-  await page.mouse.click(box.x + x, box.y + y);
+  await page.mouse.click(box.x + x, box.y + y, opts);
 }
 const gridRows = (testId) => page.getAttribute(`[data-testid=${testId}]`, 'data-rows').then(Number);
 /** The grid's accessibility table mirrors the visible canvas cells (Glide renders it inside the canvas element). */
@@ -910,6 +910,56 @@ await step('data: 数据 tab loads the Glide grid chunk; 知识点总表 has the
   await page.click('[data-testid=data-subtabs] [data-sub=kp]');
   await page.waitForSelector('[data-testid=grid-kp] canvas');
   await page.screenshot({ path: join(shots, '11-data-kp.png') });
+});
+
+await step('data: cell text can be copied — right-click copies the whole cell, Ctrl+C copies the selection, double-click opens selectable text', async () => {
+  await tab('data');
+  await page.click('[data-testid=data-subtabs] [data-sub=kp]');
+  await page.waitForSelector('[data-testid=grid-kp] canvas');
+  const kps = await store.data('knowledgePoints', { courseId: cid });
+  const keys = JSON.parse(await page.getAttribute('[data-testid=grid-kp]', 'data-row-keys'));
+  const long = kps.filter((k) => keys.indexOf(k.concept_id) < 6).sort((a, b) => b.title.length - a.title.length)[0];
+  const clip = () => page.evaluate(() => navigator.clipboard.readText());
+  // Ctrl+C: headless Chromium on Linux may not turn the key into the browser's copy command, so if nothing arrived we
+  // issue that same command (document.execCommand('copy') fires the native copy event Glide / the textarea handle).
+  const pressCopy = async () => {
+    await page.keyboard.press('Control+c');
+    await page.waitForTimeout(250);
+    if (!(await clip())) { const via = await page.evaluate(() => document.execCommand('copy')); copyVia.push(via ? 'execCommand' : 'none'); } else copyVia.push('key');
+  };
+  const copyVia = [];
+  assert.match(await page.textContent('[data-testid=grid-kp-hint]'), /双击单元格.*Ctrl\/⌘\+C.*右键/);
+  // 1) right-click → whole cell on the clipboard + 已复制
+  await page.evaluate(() => navigator.clipboard.writeText(''));
+  await gridClick('grid-kp', long.concept_id, 'title', { button: 'right' });
+  await page.waitForSelector('[data-testid=grid-copied]');
+  assert.equal(await clip(), long.title, 'right-click copied the full title');
+  await page.screenshot({ path: join(shots, '16-grid-copy-rightclick.png') });
+  // 2) select a cell, Ctrl+C (Glide copy) → the same full text; a link cell copies its label without the arrow
+  await page.evaluate(() => navigator.clipboard.writeText(''));
+  await gridClick('grid-kp', long.concept_id, 'topic');
+  await pressCopy();
+  await eventually(async () => assert.equal(await clip(), `${long.topic_index + 1}. ${long.topic_title}`));
+  // 3) double-click → read-only overlay with real selectable text; select part of it and copy
+  await gridClick('grid-kp', long.concept_id, 'title');
+  await gridClick('grid-kp', long.concept_id, 'title', { clickCount: 2 });
+  const box = page.locator('#portal textarea, #portal input').first();
+  await box.waitFor();
+  assert.equal(await box.inputValue(), long.title);
+  assert.ok(await box.evaluate((e) => e.readOnly), 'overlay is read-only (copy, not edit)');
+  await page.evaluate(() => navigator.clipboard.writeText(''));
+  await box.evaluate((e) => { e.focus(); e.setSelectionRange(0, 4); });
+  await pressCopy();
+  await eventually(async () => assert.equal(await clip(), long.title.slice(0, 4), 'partial selection copied'));
+  await page.screenshot({ path: join(shots, '16b-grid-copy-overlay.png') });
+  await page.evaluate(() => navigator.clipboard.writeText(''));
+  await page.click('[data-testid=grid-copy-all]');
+  await eventually(async () => assert.equal(await clip(), long.title, '复制全部 copies the whole cell'));
+  console.log(`    copy command via: ${copyVia.join(', ')}`);
+  await page.keyboard.press('Escape');
+  await eventually(async () => assert.equal(await page.locator('#portal textarea, #portal input').count(), 0));
+  // nothing was written: the overlay is read-only
+  assert.deepEqual((await store.data('knowledgePoints', { courseId: cid })).map((k) => k.title), kps.map((k) => k.title));
 });
 
 await step('data → board: 「白板卡片」 link switches to 知识白板, centres the card and highlights it (conceptId, not title)', async () => {
