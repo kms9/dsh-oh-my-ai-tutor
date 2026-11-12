@@ -82,11 +82,11 @@ test('3a lessons carry topicId / conceptIds; the knowledge point detail lists th
   assert.equal(JSON.parse(q.rows[0].concept_ids).length, 2);
   await w('lesson.link', { lessonId: l1.id, conceptIds: [kp[0], kp[2]] });
   assert.equal((await store.data('concept', { courseId: cid, conceptId: kp[2] })).lessons[0].title, '看懂图像');
-  // retiring a taught knowledge point keeps the lesson's reference (evidence kept)
+  // removing a subtopic unlinks it from the outline but does not retire the knowledge point (evidence kept)
   const o = await store.read();
   await rpc('course.editOutline', { courseId: cid, syllabusRevision: o.courses[cid].syllabus.revision, operations: [{ op: 'removeSubtopic', subtopicId: topics[0].subtopics[1].id }] });
   assert.ok((await store.read()).lessons[l2.id].conceptIds.includes(kp[1]));
-  assert.equal((await store.read()).concepts[kp[1]].status, 'retired');
+  assert.equal((await store.read()).concepts[kp[1]].status, 'active');
   store.close();
 }));
 
@@ -249,7 +249,7 @@ test('3e the JSON fallback store runs the same flow (no FSRS / to-dos claimed th
   await assert.rejects(dispatch(store, { method: 'data', payload: { query: 'concept', params: { courseId: c.id, conceptId: kp } } }), /SQLite/);
 }));
 
-test('migration v2 → v3: backup (0600) first, dedicated marker, data untouched, new views; fresh databases get the marker too', () => tmp(async (dir) => {
+test('migration v2 → current: backup (0600) first, dedicated markers, lesson docs untouched, new views; fresh databases get the markers too', () => tmp(async (dir) => {
   const path = join(dir, 'tutor.db');
   const st = JSON.parse(await readFile(FIXTURE, 'utf8'));
   const db = new DatabaseSync(path);
@@ -269,7 +269,7 @@ test('migration v2 → v3: backup (0600) first, dedicated marker, data untouched
   const store = new SqliteTutorStore(path, { legacyJsonPath: null });
   store.open();
   assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, DB_VERSION);
-  assert.equal(DB_VERSION, 3);
+  assert.equal(DB_VERSION, 4);
   assert.ok(store.backup && store.backup.includes('.bak-v2-'));
   assert.equal((await stat(store.backup)).mode & 0o777, 0o600, 'backup is owner-only');
   const bak = new DatabaseSync(store.backup, { readOnly: true });
@@ -278,6 +278,7 @@ test('migration v2 → v3: backup (0600) first, dedicated marker, data untouched
   bak.close();
   const marker = JSON.parse(store.db.prepare("SELECT value FROM meta WHERE key = 'migration.v3.learningFlow'").get().value);
   assert.equal(marker.from, 2); assert.equal(marker.backup, store.backup);
+  assert.ok(store.db.prepare("SELECT value FROM meta WHERE key = 'migration.v4.fourResources'").get());
   const state = await store.read();
   assert.equal(state.revision, st.revision);
   assert.deepEqual(Object.values(state.lessons)[0].parts.map((p) => p.sourceRefs), Object.values(st.lessons)[0].parts.map((p) => p.sourceRefs), 'old docs untouched');
@@ -291,7 +292,7 @@ test('migration v2 → v3: backup (0600) first, dedicated marker, data untouched
   // reopening does not back up or migrate again
   const again = new SqliteTutorStore(path, { legacyJsonPath: null }); again.open();
   assert.equal(again.backup, null); again.close();
-  // a fresh database: created at v1, walked to v3, marker says fresh, no backup
+  // a fresh database: created at v1, walked to current, v3 marker says fresh, no backup
   const fresh = new SqliteTutorStore(join(dir, 'fresh.db'), { legacyJsonPath: null }); fresh.open();
   assert.equal(JSON.parse(fresh.db.prepare("SELECT value FROM meta WHERE key = 'migration.v3.learningFlow'").get().value).fresh, true);
   assert.equal(fresh.backup, null); fresh.close();

@@ -66,9 +66,17 @@ await page.goto(url);
 await page.waitForSelector('[data-testid=tutor-workbench]');
 const VIEW_ID = { outline: 'outline-view', mindmap: 'mindmap-view', graph: 'graph-view', board: 'board-view', data: 'data-view' };
 const tab = async (k, p = page) => { await p.click(`#omt-tab-${k}`); await p.waitForSelector(`[data-testid=${VIEW_ID[k]}]`); };
-const mmNode = (id) => `[data-testid=mindmap-elixir] [data-nodeid="me${id}"]`;
+const mmId = (syllabusId) => (String(syllabusId).startsWith('mm-') || String(syllabusId).startsWith('mmroot-') ? syllabusId : `mm-${syllabusId}`);
+const mmNode = (id) => `[data-testid=mindmap-elixir] [data-nodeid="me${mmId(id)}"]`;
 const outlineRev = async () => (await course()).syllabus.revision;
 const cid = (await course()).id;
+const relEnds = (st, r) => ({
+  from: r.from, to: r.to,
+  fromC: r.fromConceptId ?? st.graphNodes[r.from]?.refersTo ?? r.from,
+  toC: r.toConceptId ?? st.graphNodes[r.to]?.refersTo ?? r.to,
+});
+const gnOf = (conceptId) => `gn-${conceptId}`;
+const mindmapOfCourse = async () => (await readState()).mindmaps[cid];
 
 await step('initial render reads the real state (no hard-coded ZPD lesson)', async () => {
   const st = await readState();
@@ -129,7 +137,7 @@ await step('graph: hover and click highlight the one-hop neighbourhood; click se
   await eventually(async () => assert.equal(await page.getAttribute(G, 'data-mode'), ''));
   await kgNode(r0.from).click();
   await awayFromGraph();
-  await eventually(async () => assert.match(await page.textContent('[data-testid=graph-detail] b'), new RegExp(st.concepts[r0.from].title.replace(/[()（）+|?.*\[\]]/g, '.'))));
+  await eventually(async () => assert.match(await page.textContent('[data-testid=graph-detail] b'), new RegExp(st.concepts[relEnds(st, r0).fromC].title.replace(/[()（）+|?.*\[\]]/g, '.'))));
   await eventually(async () => assert.equal(await page.getAttribute(G, 'data-mode'), 'focus'));
   assert.equal(await page.locator(`${G} .kg-node.sel`).count(), 1);
   assert.equal(await page.locator(`${G} .kg-node[data-node-id="${r0.to}"].dim`).count(), 0);
@@ -147,7 +155,8 @@ await step('graph: search highlights matches; double-click a topic collapses it 
   await page.fill('[data-testid=graph-search]', '');
   await eventually(async () => assert.notEqual(await page.getAttribute(G, 'data-mode'), 'search'));
   const st = await readState(); const r0 = Object.values(st.relations)[0];
-  const tid = st.concepts[r0.from].topicId;
+  const fromC = relEnds(st, r0).fromC;
+  const tid = st.concepts[fromC].topicId;
   const inTopic = Object.values(st.concepts).filter((c) => c.topicId === tid).length;
   await kgNode(`topic:${tid}`).dblclick();
   await eventually(async () => assert.equal(await page.locator(`${G} .kg-concept`).count(), 15 - inTopic));
@@ -168,9 +177,10 @@ await step('graph: search highlights matches; double-click a topic collapses it 
 
 await step('graph: path between two nodes is highlighted; dagre (层级) ↔ force layout switch', async () => {
   const st = await readState(); const r0 = Object.values(st.relations)[0];
-  const sib = Object.values(st.concepts).find((c) => c.topicId === st.concepts[r0.from].topicId && c.id !== r0.from);
+  const fromC = relEnds(st, r0).fromC;
+  const sib = Object.values(st.concepts).find((c) => c.topicId === st.concepts[fromC].topicId && c.id !== fromC);
   await page.click('[data-testid=graph-path]');
-  await kgNode(sib.id).click();
+  await kgNode(gnOf(sib.id)).click();
   await kgNode(r0.to).click();
   await awayFromGraph();
   await eventually(async () => assert.match(await page.textContent('[data-testid=graph-status]'), /最短路径（\d+ 步）/));
@@ -196,7 +206,7 @@ await step('graph: path between two nodes is highlighted; dagre (层级) ↔ for
 await step('graph: dragging a node runs the live d3-force simulation (fx/fy pin, neighbours follow) and writes nothing', async () => {
   const st = await readState(); const rev = st.revision;
   const t = (await topics())[1]; const tid = `topic:${t.id}`;
-  const kid = Object.values(st.concepts).find((c) => c.topicId === t.id).id;
+  const kid = gnOf(Object.values(st.concepts).find((c) => c.topicId === t.id).id);
   const a = await kgBox(tid), k0 = await kgBox(kid);
   await page.mouse.move(a.x, a.y); await page.mouse.down();
   for (let i = 1; i <= 14; i++) { await page.mouse.move(a.x + (90 * i) / 14, a.y + (60 * i) / 14); await page.waitForTimeout(16); }
@@ -289,7 +299,7 @@ await step('outline: manual add + delete knowledge point, then learner approves'
   await page.hover(`[data-subtopic-id="${added.id}"]`);
   await page.click(`[data-subtopic-id="${added.id}"] button[title=删除知识点]`);
   await eventually(async () => assert.ok(!(await topics())[1].subtopics.some((x) => x.id === added.id)));
-  assert.equal((await readState()).concepts[added.conceptId].status, 'retired');
+  assert.equal((await readState()).concepts[added.conceptId].status, 'active');
   await eventually(async () => assert.match(await page.textContent('[data-testid=approval-banner]'), new RegExp(`第 ${(await course()).syllabus.revision} 版`)));
   await page.click('[data-testid=approve-outline]');
   await eventually(async () => { const c = await course(); assert.equal(c.status, 'active'); assert.equal(c.syllabus.approvedBy, 'learner'); });
@@ -356,14 +366,16 @@ await step('outline: AI edit via tutor_outline_edit is visible in the UI', async
   await page.waitForSelector('text=适用场景：词汇、事实与概念（AI 改）', { timeout: 4000 });
   await page.waitForSelector('text=测试效应与提取练习（AI 加）', { timeout: 4000 });
   await page.waitForSelector('[data-testid=approval-banner] >> text=待你确认');
-  assert.match(await page.textContent('[data-testid=activity]'), /AI 编辑大纲\/导图/);
+  assert.match(await page.textContent('[data-testid=activity]'), /AI 编辑大纲/);
   await page.screenshot({ path: join(shots, '03-outline-after-ai.png') });
 });
 
 await step('mind map: mind-elixir renders the outline as a balanced map, fitted with no clipped node; logic chart + list views', async () => {
   await tab('mindmap');
   await page.waitForSelector(`[data-testid=mindmap-elixir][data-direction=side] .me-tpc`);
-  const subs = (await topics()).flatMap((t) => t.subtopics).length, tops = (await topics()).length;
+  const mm0 = await mindmapOfCourse();
+  const tops = Object.values(mm0.nodes).filter((n) => n.parentId === mm0.rootId).length;
+  const subs = Object.keys(mm0.nodes).length - 1 - tops;
   const inside = async () => page.evaluate(() => {
     const r = document.querySelector('[data-testid=mindmap-elixir]'), c = r.getBoundingClientRect();
     const ts = [...r.querySelectorAll('.me-tpc')].map((t) => t.getBoundingClientRect());
@@ -415,121 +427,242 @@ await step('mind map: mind-elixir renders the outline as a balanced map, fitted 
   await page.waitForSelector('[data-testid=tutor-workbench][data-mm-zoom=full]');
 });
 
-await step('mind map: manual select → 上移 / 删除 via toolbar (course.editOutline, actor learner)', async () => {
+await step('mind map: manual select → 上移 / 删除 via toolbar (mindmap.edit, actor learner; outline unchanged)', async () => {
+  const outlineBefore = JSON.stringify(await topics());
   const t = (await topics())[2];
-  const sub = t.subtopics[2];
+  const topicNode = mmId(t.id);
+  const childrenOf = async (pid) => {
+    const mm = await mindmapOfCourse();
+    return Object.values(mm.nodes).filter((n) => n.parentId === pid).sort((a, b) => a.order - b.order);
+  };
+  const sub = (await childrenOf(topicNode))[2];
   await page.click(mmNode(sub.id));
   await page.waitForSelector('[data-testid=mindmap-toolbar] >> text=已选');
   await page.click('[data-testid=mindmap-toolbar] >> text=上移');
-  await eventually(async () => assert.equal((await topics())[2].subtopics[1].id, sub.id));
+  await eventually(async () => assert.equal((await childrenOf(topicNode))[1].id, sub.id));
   const ev = (await readState()).events.at(-1);
-  assert.equal(ev.action, 'course.editOutline'); assert.equal(ev.actor, 'learner');
-  const del = (await topics())[2].subtopics.at(-1);
+  assert.equal(ev.action, 'mindmap.edit'); assert.equal(ev.actor, 'learner');
+  const del = (await childrenOf(topicNode)).at(-1);
   await eventually(async () => assert.equal(await page.locator(mmNode(del.id)).count(), 1));
   await page.click(mmNode(del.id));
   await page.waitForSelector(`[data-testid=mindmap-toolbar] >> text=已选：${del.title}`);
   await page.click('[data-testid=mindmap-toolbar] >> text=删除');
-  await eventually(async () => assert.ok(!(await topics())[2].subtopics.some((x) => x.id === del.id)));
+  await eventually(async () => assert.ok(!(await childrenOf(topicNode)).some((x) => x.id === del.id)));
   await eventually(async () => assert.equal(await page.locator(mmNode(del.id)).count(), 0));
+  assert.equal(JSON.stringify(await topics()), outlineBefore, 'outline unchanged');
 });
 
+async function mmNodeBox(id) {
+  const sel = mmNode(id);
+  await page.locator(sel).waitFor();
+  const host = '[data-testid=mindmap-elixir]';
+  const inside = async () => page.evaluate(([sel, host]) => {
+    const n = document.querySelector(sel), c = document.querySelector(host);
+    if (!n || !c) return null;
+    const a = n.getBoundingClientRect(), b = c.getBoundingClientRect();
+    const margin = 8;
+    const ok = a.left >= b.left + margin && a.right <= b.right - margin && a.top >= b.top + margin && a.bottom <= b.bottom - margin;
+    return { x: a.x, y: a.y, width: a.width, height: a.height, ok,
+      dx: a.left < b.left + margin ? (b.left + margin - a.left + 40) : a.right > b.right - margin ? (b.right - margin - a.right - 40) : 0,
+      dy: a.top < b.top + margin ? (b.top + margin - a.top + 40) : a.bottom > b.bottom - margin ? (b.bottom - margin - a.bottom - 40) : 0 };
+  }, [sel, host]);
+  for (let i = 0; i < 8; i++) {
+    const box = await inside();
+    if (box?.ok) return box;
+    const canvas = await page.locator(host).boundingBox();
+    if (!canvas || !box) break;
+    // pan the background (not a node) so a clipped drop target comes into view
+    const sx = canvas.x + canvas.width / 2, sy = canvas.y + 16;
+    await page.mouse.move(sx, sy);
+    await page.mouse.down();
+    await page.mouse.move(sx + (box?.dx ?? 0), sy + (box?.dy ?? 0), { steps: 8 });
+    await page.mouse.up();
+    await page.waitForTimeout(80);
+  }
+  return page.locator(sel).boundingBox();
+}
 async function mmDrag(fromId, toId, where = 'in', { hold } = {}) {
+  if (await page.locator('[data-testid=mindmap-fit]').count()) {
+    await page.click('[data-testid=mindmap-fit]');
+    await page.waitForTimeout(200);
+  }
+  const a = await mmNodeBox(fromId);
+  const b = await mmNodeBox(toId);
   await page.click(mmNode(fromId));
-  const a = await page.locator(mmNode(fromId)).boundingBox();
-  const b = await page.locator(mmNode(toId)).boundingBox();
-  const ty = where === 'in' ? b.y + b.height * 0.7 : where === 'before' ? b.y - 3 : b.y + b.height + 3;
+  const tx = where === 'in' ? b.x + Math.min(16, b.width * 0.3) : b.x + b.width / 2;
+  const ty = where === 'in' ? b.y + b.height * 0.5 : where === 'before' ? b.y - 3 : b.y + b.height + 3;
   await page.mouse.move(a.x + a.width / 2, a.y + a.height / 2);
   await page.mouse.down();
-  await page.mouse.move(a.x + a.width / 2 + 12, a.y + a.height / 2 + 12, { steps: 4 });
-  await page.mouse.move(b.x + b.width / 2, ty, { steps: 14 });
+  await page.mouse.move(a.x + a.width / 2 + 12, a.y + a.height / 2 + 12, { steps: 6 });
+  await page.mouse.move(tx, ty, { steps: 20 });
+  await page.waitForTimeout(200); // give mind-elixir a frame to set meet / insertType
   if (hold) await hold();
   await page.mouse.up();
 }
 
-await step('mind map: drag a knowledge point into another topic (re-parent) and before a sibling', async () => {
-  const ts = await topics();
-  const src = ts[0].subtopics[0], target = ts[1];
-  await mmDrag(src.id, target.id, 'in');
-  await eventually(async () => assert.equal((await topics())[1].subtopics.at(-1).id, src.id));
-  await eventually(async () => assert.equal(await page.locator(`[data-testid=mindmap-elixir] [data-nodeid="me${target.id}"]`).count(), 1));
-  const t1 = (await topics())[1];
-  const last = t1.subtopics.at(-1), first = t1.subtopics[0];
+await step('mind map: drag a knowledge point into another topic (re-parent) and before a sibling, without changing the outline', async () => {
+  const outlineBefore = JSON.stringify(await topics());
+  if (await page.locator('[data-testid=mindmap-fit]').count()) {
+    await page.click('[data-testid=mindmap-fit]');
+    await page.waitForTimeout(250);
+  }
+  // pick a source and a different topic that are both on screen (a large map overflows at readable zoom)
+  const visibleIds = await page.evaluate(() => {
+    const c = document.querySelector('[data-testid=mindmap-elixir]').getBoundingClientRect();
+    return [...document.querySelectorAll('[data-testid=mindmap-elixir] [data-nodeid]')].flatMap((n) => {
+      const r = n.getBoundingClientRect();
+      const ok = r.left >= c.left + 8 && r.right <= c.right - 8 && r.top >= c.top + 8 && r.bottom <= c.bottom - 8;
+      return ok ? [n.getAttribute('data-nodeid').slice(2)] : [];
+    });
+  });
+  const mm = await mindmapOfCourse();
+  const src = visibleIds.find((id) => mm.nodes[id]?.parentId && mm.nodes[id].parentId !== mm.rootId);
+  const target = visibleIds.find((id) => mm.nodes[id]?.parentId === mm.rootId && id !== mm.nodes[src]?.parentId);
+  assert.ok(src && target, `need a visible child and another visible topic (visible=${visibleIds.length})`);
+  const kids = async (pid) => {
+    const m = await mindmapOfCourse();
+    return Object.values(m.nodes).filter((n) => n.parentId === pid).sort((a, b) => a.order - b.order);
+  };
+  await page.locator(mmNode(src)).dragTo(page.locator(mmNode(target)), { targetPosition: { x: 10, y: 12 }, force: true });
+  await eventually(async () => {
+    const last = (await kids(target)).at(-1)?.id;
+    const ev = (await readState()).events.at(-1);
+    const parent = (await mindmapOfCourse()).nodes[src]?.parentId;
+    assert.equal(last, src, `after drag: parent=${parent} last=${last} src=${src} target=${target} ev=${ev?.action}:${ev?.summary}`);
+  });
+  await eventually(async () => assert.equal(await page.locator(mmNode(target)).count(), 1));
+  const last = (await kids(target)).at(-1), first = (await kids(target))[0];
   await page.waitForTimeout(300);
   await mmDrag(last.id, first.id, 'before');
-  await eventually(async () => assert.equal((await topics())[1].subtopics[0].id, last.id));
+  await eventually(async () => assert.equal((await kids(target))[0].id, last.id));
+  assert.equal(JSON.stringify(await topics()), outlineBefore, 'outline unchanged');
   await page.screenshot({ path: join(shots, '04c-mindmap-manual.png') });
 });
 
-await step('mind map: only two levels — adding under a knowledge point / dropping a topic into a topic is refused', async () => {
+await step('mind map: adding under a knowledge point is allowed and does not change the outline', async () => {
   const before = await outlineRev();
+  const outlineBefore = JSON.stringify(await topics());
   const sub = (await topics())[0].subtopics[0];
-  await page.click(mmNode(sub.id));
+  const parent = mmId(sub.id);
+  const countKids = async () => Object.values((await mindmapOfCourse()).nodes).filter((n) => n.parentId === parent).length;
+  const n0 = await countKids();
+  await page.click(mmNode(parent));
   await page.keyboard.press('Tab');
-  await page.waitForSelector('[data-testid=notice].err >> text=只有两层');
-  const ts = await topics();
-  await page.waitForTimeout(300);
-  await mmDrag(ts[3].id, ts[2].id, 'in');
-  await page.waitForTimeout(400);
+  await eventually(async () => assert.equal(await countKids(), n0 + 1));
   assert.equal(await outlineRev(), before, 'no outline change');
-  assert.equal(await page.locator('[data-testid=mindmap-elixir] .me-tpc').count(), 1 + ts.length + ts.flatMap((t) => t.subtopics).length);
+  assert.equal(JSON.stringify(await topics()), outlineBefore);
 });
 
-await step('mind map: double-click rename and Tab on a topic add through the outline', async () => {
+await step('mind map: double-click rename and Tab add a child on the mind map, not the outline', async () => {
   const t = (await topics())[0];
+  const topicNode = mmId(t.id);
+  const outlineTitle = t.title;
   // no retry on purpose: the toolbar has a fixed height (selection never shifts the map) and the native dblclick opens the editor
-  await page.dblclick(mmNode(t.id));
+  await page.dblclick(mmNode(topicNode));
   await page.waitForSelector('[data-testid=mindmap-elixir] #input-box');
   await page.keyboard.press('ControlOrMeta+a');
   await page.keyboard.type('什么是间隔重复（导图改名）');
   await page.keyboard.press('Enter');
-  await eventually(async () => assert.equal((await topics())[0].title, '什么是间隔重复（导图改名）'));
-  const n = (await topics())[0].subtopics.length;
-  await page.click(mmNode(t.id));
+  await eventually(async () => {
+    const node = (await mindmapOfCourse()).nodes[topicNode];
+    assert.equal(node.title, '什么是间隔重复（导图改名）');
+  });
+  assert.equal((await topics())[0].title, outlineTitle, 'outline title unchanged');
+  const kids = async () => Object.values((await mindmapOfCourse()).nodes).filter((n) => n.parentId === topicNode).sort((a, b) => a.order - b.order);
+  const n = (await kids()).length;
+  await page.click(mmNode(topicNode));
   await page.keyboard.press('Tab');
-  await eventually(async () => assert.equal((await topics())[0].subtopics.length, n + 1));
+  await eventually(async () => assert.equal((await kids()).length, n + 1));
   assert.equal((await readState()).events.at(-1).actor, 'learner');
-  const added = (await topics())[0].subtopics.at(-1);
+  assert.equal((await topics())[0].subtopics.length, t.subtopics.length, 'outline subtopics unchanged');
+  const added = (await kids()).at(-1);
   await eventually(async () => assert.equal(await page.locator(mmNode(added.id)).count(), 1));
   await page.click(mmNode(added.id));
   await page.keyboard.press('Delete');
-  await eventually(async () => assert.equal((await topics())[0].subtopics.length, n));
+  await eventually(async () => assert.equal((await kids()).length, n));
 });
 
-await step('mind map: an AI edit during a drag waits for the gesture; the drop then conflicts instead of using the new revision', async () => {
+await step('mind map: an AI mind-map edit during a drag waits for the gesture; the drop then conflicts instead of using the new revision', async () => {
   const ts = await topics();
-  const src = ts[2].subtopics[0], target = ts[4];
-  const renamed = ts[3].title + '（AI 拖动中改）';
-  const revBefore = await outlineRev();
-  await mmDrag(src.id, target.id, 'in', { hold: async () => {
-    const o = await tools.tutor_visualize.execute({ courseId: cid, view: 'outline' });
-    await tools.tutor_outline_edit.execute({ reason: 'e2e：模拟 AI 按学习者要求改大纲', courseId: cid, syllabusRevision: o.syllabusRevision, operations: [{ op: 'renameTopic', topicId: ts[3].id, title: renamed }] });
+  const src = mmId(ts[2].subtopics[0].id), target = mmId(ts[4].id);
+  const topic3 = mmId(ts[3].id);
+  const renamed = (await mindmapOfCourse()).nodes[topic3].title + '（AI 拖动中改）';
+  const outlineBefore = JSON.stringify(await topics());
+  const parentBefore = (await mindmapOfCourse()).nodes[src].parentId;
+  await mmDrag(src, target, 'in', { hold: async () => {
+    const o = await tools.tutor_visualize.execute({ courseId: cid, view: 'mindmap' });
+    await tools.tutor_mindmap_edit.execute({ courseId: cid, mindmapRevision: o.mindmapRevision, operations: [{ op: 'rename', id: topic3, title: renamed }] });
     await page.waitForTimeout(1600); // more than one poll
     assert.equal(await page.locator(`[data-testid=mindmap-elixir] .me-tpc:has-text("${renamed}")`).count(), 0, 'map not refreshed under the pointer');
     assert.equal(await page.locator('[data-testid=mindmap-elixir] .mind-elixir-ghost').evaluate((g) => g.style.display), 'block', 'drag still in progress');
   } });
   await page.waitForSelector('[data-testid=notice].err');
   await eventually(async () => assert.equal(await page.locator(`[data-testid=mindmap-elixir] .me-tpc:has-text("${renamed}")`).count(), 1, 'refreshed after the gesture'));
-  assert.equal((await topics())[2].subtopics[0].id, src.id, 'stale drop not applied');
-  assert.equal(await outlineRev(), revBefore + 1);
+  assert.equal((await mindmapOfCourse()).nodes[src].parentId, parentBefore, 'stale drop not applied');
+  assert.equal(JSON.stringify(await topics()), outlineBefore, 'outline untouched by the mind-map conflict');
 });
 
-await step('mind map: AI reorders and prunes via tutor_outline_edit; map, list and outline agree', async () => {
+await step('mind map: AI reorders and prunes via tutor_mindmap_edit; the outline does not follow', async () => {
+  const outlineBefore = JSON.stringify(await topics());
   const o = await tools.tutor_visualize.execute({ courseId: cid, view: 'mindmap' });
   const last = o.hierarchy.children.at(-1);
   const prune = o.hierarchy.children[3].children.at(-1);
-  await tools.tutor_outline_edit.execute({ reason: 'e2e：模拟 AI 按学习者要求改大纲', courseId: cid, syllabusRevision: o.syllabusRevision, operations: [
-    { op: 'moveTopic', topicId: last.id, beforeId: o.hierarchy.children[0].id }, { op: 'removeSubtopic', subtopicId: prune.id },
+  await tools.tutor_mindmap_edit.execute({ courseId: cid, mindmapRevision: o.mindmapRevision, operations: [
+    { op: 'move', ids: [last.id], target: o.hierarchy.children[0].id, where: 'before' },
+    { op: 'remove', ids: [prune.id] },
   ] });
   await eventually(async () => assert.equal(await page.locator(mmNode(prune.id)).count(), 0));
   await page.click('[data-testid=mindmap-modes] [data-mode=list]');
   assert.equal((await page.locator('[data-testid=mindmap-list] .treelevel > .treerow').first().textContent()).replace(/^●\s*/, ''), last.title);
   await page.click('[data-testid=mindmap-modes] [data-mode=side]');
-  await tab('outline');
-  assert.match(await page.locator('[data-testid=outline-view] .card b').first().textContent(), new RegExp(`^1\\. ${last.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.equal(JSON.stringify(await topics()), outlineBefore, 'outline unchanged');
   await tab('mindmap');
   await page.waitForSelector('[data-testid=mindmap-elixir] .me-tpc');
   await page.waitForTimeout(400);
   await page.screenshot({ path: join(shots, '05-mindmap-after-ai.png') });
+});
+
+await step('mind map: add an extension under a knowledge point, attach a note, promote only then creates a review object', async () => {
+  await tab('mindmap');
+  await page.waitForSelector('[data-testid=mindmap-elixir] .me-tpc');
+  const outlineBefore = JSON.stringify(await topics());
+  const reviewsBefore = (await store.data('reviews', { courseId: cid })).length;
+  const kpsBefore = (await store.data('knowledgePoints', { courseId: cid })).length;
+  const mm = await mindmapOfCourse();
+  const parent = Object.values(mm.nodes).find((n) => n.refersTo && !Object.values(mm.nodes).some((c) => c.parentId === n.id))
+    ?? Object.values(mm.nodes).find((n) => n.refersTo);
+  assert.ok(parent, 'need a knowledge-point node to extend');
+  const n0 = Object.values(mm.nodes).filter((n) => n.parentId === parent.id).length;
+  await page.click(mmNode(parent.id));
+  await page.waitForSelector('[data-testid=mindmap-toolbar] >> text=已选');
+  await page.keyboard.press('Tab');
+  let ext;
+  await eventually(async () => {
+    const kids = Object.values((await mindmapOfCourse()).nodes).filter((n) => n.parentId === parent.id).sort((a, b) => a.order - b.order);
+    assert.equal(kids.length, n0 + 1);
+    ext = kids.at(-1);
+  });
+  assert.equal(JSON.stringify(await topics()), outlineBefore, 'outline unchanged after adding an extension');
+  const note = await tools.tutor_write.execute({ action: 'note.add', payload_json: JSON.stringify({ courseId: cid, title: '关于这个扩展', content: '导图上的思考，还不是考点', anchors: [{ type: 'mindmapNode', id: ext.id }] }) });
+  assert.deepEqual(note.result.anchors, [{ type: 'mindmapNode', id: ext.id }]);
+  await page.click(mmNode(ext.id));
+  await page.waitForSelector('[data-testid=mindmap-promote]');
+  await page.click('[data-testid=mindmap-promote]');
+  let conceptId;
+  await eventually(async () => {
+    const node = (await mindmapOfCourse()).nodes[ext.id];
+    assert.ok(node.refersTo, 'promote writes refersTo back');
+    conceptId = node.refersTo;
+  });
+  const taught = (await topics()).flatMap((t) => t.subtopics.flatMap((s) => s.conceptIds ?? (s.conceptId ? [s.conceptId] : [])));
+  assert.ok(!taught.includes(conceptId), 'promoted concept is not auto-written into the syllabus');
+  assert.equal(JSON.stringify(await topics()), outlineBefore);
+  await eventually(async () => {
+    assert.equal((await store.data('knowledgePoints', { courseId: cid })).length, kpsBefore + 1);
+    const reviews = await store.data('reviews', { courseId: cid });
+    assert.equal(reviews.length, reviewsBefore + 1);
+    assert.ok(reviews.some((r) => r.concept_id === conceptId), 'review card appears only after promote');
+  });
 });
 
 const card = (i) => page.locator('[data-testid=board] .rf-card').nth(i);
@@ -593,8 +726,8 @@ const centreOf = async (loc) => { const b = await loc.boundingBox(); return { x:
 await step('board (React Flow): seed from syllabus → cards in topic sections + candidate relation arrow; enlarge / whole workbench / restore', async () => {
   await tab('board');
   await page.click('[data-testid=board-seed]');
-  const active = Object.values((await readState()).concepts).filter((c) => c.status === 'active').length;
-  await eventually(async () => assert.equal(await page.locator('[data-testid=board] .rf-card').count(), active));
+  const taught = (await topics()).flatMap((t) => t.subtopics.flatMap((s) => s.conceptIds?.length ? s.conceptIds : (s.conceptId ? [s.conceptId] : [])));
+  await eventually(async () => assert.equal(await page.locator('[data-testid=board] .rf-card').count(), taught.length));
   assert.equal(await arrowsOnScreen().count(), 1);
   assert.match(await arrowsOnScreen().first().locator('path').first().getAttribute('style'), /stroke-dasharray/, 'relation arrow dashed');
   assert.equal(await page.locator('[data-testid=board] .rf-section').count(), (await topics()).length, 'one section per topic');
@@ -608,7 +741,7 @@ await step('board (React Flow): seed from syllabus → cards in topic sections +
   });
   assert.equal(misplaced, 0);
   await assertSectionsClean(page, 'after seed');
-  assert.equal(await page.locator('[data-testid=board] .rf-card[data-actor=learner] .rf-by.me').count(), active, 'learner-seeded cards are tagged 你');
+  assert.equal(await page.locator('[data-testid=board] .rf-card[data-actor=learner] .rf-by.me').count(), taught.length, 'learner-seeded cards are tagged 你');
   await page.screenshot({ path: join(shots, '06-board-seeded.png') });
   await page.click('[data-testid=board-zoom]');
   await page.waitForSelector('[data-testid=tutor-workbench][data-mm-zoom=wide]');
@@ -684,17 +817,22 @@ await step('board: toolbar link mode, delete a card (cascade), add + edit a note
   await page.screenshot({ path: join(shots, '07-board-manual.png') });
 });
 
-await step('board: double-click a knowledge-point card renames it through the outline (course.editOutline, learner)', async () => {
+await step('board: double-click a knowledge-point card renames the concept, not the outline (concept.rename, learner)', async () => {
   const el = card(0); const conceptId = await el.getAttribute('data-concept');
+  const subBefore = (await topics()).flatMap((t) => t.subtopics).find((s) => (s.conceptIds ?? [s.conceptId]).includes(conceptId));
+  const outlineTitle = subBefore?.title;
   await el.dblclick();
   await page.fill('[data-testid=board-card-editor]', '适用场景（白板改名）');
   await page.keyboard.press('Enter');
   await eventually(async () => {
-    const sub = (await topics()).flatMap((t) => t.subtopics).find((s) => s.conceptId === conceptId);
-    assert.equal(sub.title, '适用场景（白板改名）');
+    assert.equal((await readState()).concepts[conceptId].title, '适用场景（白板改名）');
   });
   const ev = (await readState()).events.at(-1);
-  assert.equal(ev.action, 'course.editOutline'); assert.equal(ev.actor, 'learner');
+  assert.equal(ev.action, 'concept.rename'); assert.equal(ev.actor, 'learner');
+  if (outlineTitle != null) {
+    const sub = (await topics()).flatMap((t) => t.subtopics).find((s) => (s.conceptIds ?? [s.conceptId]).includes(conceptId));
+    assert.equal(sub.title, outlineTitle, 'outline subtopic title unchanged');
+  }
   await page.waitForSelector(`[data-testid=board] .rf-card[data-concept="${conceptId}"] >> text=适用场景（白板改名）`);
 });
 
@@ -835,9 +973,19 @@ await step('board: Backspace never deletes; Delete only with focus inside the bo
 });
 
 await step('board: re-seed after deleting a card brings back the card and its relation arrow (review #6)', async () => {
-  const st = await readState();
-  const relArrow = st.boards[cid].elements.find((e) => e.type === 'arrow' && e.relationId && !e.deleted);
-  const fromCard = st.boards[cid].elements.find((e) => e.id === relArrow.from);
+  const liveRel = async () => {
+    const st = await readState();
+    const relArrow = st.boards[cid].elements.find((e) => e.type === 'arrow' && e.relationId && !e.deleted);
+    const fromCard = relArrow && st.boards[cid].elements.find((e) => e.id === relArrow.from && !e.deleted);
+    const toCard = relArrow && st.boards[cid].elements.find((e) => e.id === relArrow.to && !e.deleted);
+    return fromCard && toCard ? { relArrow, fromCard } : null;
+  };
+  if (!(await liveRel())) {
+    const b = await tools.tutor_board_read.execute({ courseId: cid });
+    await tools.tutor_board_patch.execute({ courseId: cid, baseRevision: b.revision, seed: true });
+    await eventually(async () => assert.ok(await liveRel(), 'seed restores the candidate relation arrow'));
+  }
+  const { relArrow, fromCard } = await liveRel();
   await cardById(fromCard.id).click();
   await page.click('[data-testid=board-delete]');
   await eventually(async () => assert.ok((await liveEl(relArrow.id)).deleted));
@@ -878,14 +1026,15 @@ async function assertCardInView(id) {
 await step('data: 数据 tab loads the Glide grid chunk; 知识点总表 has the real SQLite rows, sort + filter', async () => {
   await tab('data');
   await page.waitForSelector('[data-testid=grid-kp] canvas');
+  const kps = Object.values((await readState()).concepts).filter((c) => c.status === 'active');
   const subs = (await topics()).flatMap((t) => t.subtopics);
-  await eventually(async () => assert.equal(await gridRows('grid-kp'), subs.length));
+  await eventually(async () => assert.equal(await gridRows('grid-kp'), kps.length));
   const keys = JSON.parse(await page.getAttribute('[data-testid=grid-kp]', 'data-row-keys'));
-  assert.deepEqual(new Set(keys), new Set(subs.map((s) => s.conceptId)), 'one row per knowledge point, keyed by conceptId');
+  assert.deepEqual(new Set(keys), new Set(kps.map((c) => c.id)), 'one row per knowledge point, keyed by conceptId (including points not in the syllabus)');
   const sqlRows = await store.data('knowledgePoints', { courseId: cid });
-  assert.equal(sqlRows.length, subs.length);
+  assert.equal(sqlRows.length, kps.length);
   const txt = await gridText('grid-kp');
-  assert.ok(txt.includes(subs[0].title), 'first knowledge point title drawn');
+  assert.ok(kps.some((c) => txt.includes(c.title)), 'a knowledge point title is drawn');
   assert.match(txt, /白板卡片 ›|主卡片/, 'board card link cells');
   // header click sorts (asc → desc → off)
   const g = await page.locator('[data-testid=grid-kp]').boundingBox();
@@ -898,9 +1047,9 @@ await step('data: 数据 tab loads the Glide grid chunk; 知识点总表 has the
   await page.mouse.click(g.x + xOf('title'), g.y + 17);
   await eventually(async () => assert.equal(await page.getAttribute('[data-testid=grid-kp]', 'data-sort'), ''));
   await page.fill('[data-testid=data-search]', subs[1].title.slice(0, 4));
-  await eventually(async () => assert.ok((await gridRows('grid-kp')) < subs.length && (await gridRows('grid-kp')) >= 1));
+  await eventually(async () => assert.ok((await gridRows('grid-kp')) < kps.length && (await gridRows('grid-kp')) >= 1));
   await page.fill('[data-testid=data-search]', '');
-  await eventually(async () => assert.equal(await gridRows('grid-kp'), subs.length));
+  await eventually(async () => assert.equal(await gridRows('grid-kp'), kps.length));
   for (const [k, id] of [['questions', 'grid-questions'], ['attempts', 'grid-attempts']]) {
     await page.click(`[data-testid=data-subtabs] [data-sub=${k}]`);
     await page.waitForSelector(`[data-testid=${id}] canvas`);
@@ -989,6 +1138,9 @@ await step('data: a knowledge point without a board card reads 还没有白板�
   const lonely = b.elements.find((e) => e.type === 'concept' && e.conceptId !== main.conceptId && !e.stale);
   await tools.tutor_board_patch.execute({ courseId: cid, baseRevision: b.revision, operations: [{ op: 'delete', id: lonely.id }] });
   assert.deepEqual((await store.data('knowledgePoints', { courseId: cid })).find((k) => k.concept_id === lonely.conceptId).board_cards, []);
+  // wait until the workbench has the same deletion (other knowledge points may already have no card)
+  await tab('board');
+  await eventually(async () => assert.equal(await page.locator(`[data-testid=board] .rf-card[data-concept="${lonely.conceptId}"]`).count(), 0));
   await tab('data');
   await page.waitForSelector('[data-testid=grid-kp] canvas');
   await eventually(async () => assert.match(await gridText('grid-kp'), /还没有白板卡片/));
@@ -1231,10 +1383,10 @@ await step('restart recovery: kill harness, restart, reload — all edits persis
   const after = await readState();
   assert.equal(after.revision, before.revision);
   assert.equal(Number(await page.getAttribute('[data-testid=tutor-workbench]', 'data-revision')), after.revision);
-  await tab('outline');
+  await tab('mindmap');
   await page.waitForSelector('text=什么是间隔重复（导图改名）');
-  await page.waitForSelector('text=适用场景（白板改名）');
   await tab('board');
+  await page.waitForSelector('[data-testid=board] .rf-card >> text=适用场景（白板改名）');
   await page.waitForSelector('text=我的复习节奏：1-2-4-8 天');
   await page.waitForSelector('text=AI：先复习「间隔效应」再看调度算法');
   const actors = new Set(after.events.map((e) => e.actor).filter(Boolean));
@@ -1298,6 +1450,7 @@ await step('notes: a lesson note can be placed on the board', async () => {
 
 await step('links: clicking a tutor.invalid href opens the knowledge point detail', async () => {
   const kp = (await course()).syllabus.topics[0].subtopics[0];
+  const conceptTitle = (await readState()).concepts[kp.conceptId].title;
   const href = `https://tutor.invalid/concept/${kp.conceptId}?course=${cid}`;
   await page.evaluate((href) => {
     const a = document.createElement('a');
@@ -1306,7 +1459,7 @@ await step('links: clicking a tutor.invalid href opens the knowledge point detai
   }, href);
   await page.click('[data-testid=injected-tutor-link]');
   await page.waitForSelector('[data-testid=kp-detail]');
-  assert.match(await page.textContent('[data-testid=kp-detail-title]'), new RegExp(kp.title.slice(0, 4).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(await page.textContent('[data-testid=kp-detail-title]'), new RegExp(conceptTitle.slice(0, 4).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });
 
 await step('feedback: finish → feedback_pending → skip completes the lesson', async () => {

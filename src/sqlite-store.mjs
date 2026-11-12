@@ -11,10 +11,11 @@ import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { newState, validateState, transition, SCHEMA_VERSION, MAX_EVENTS, ACTORS } from './core.mjs';
+import { normalizeState, legacyAnchors, conceptIdsFromAnchors } from './resources.mjs';
 import { cardFromRow, rowFromCard, review as fsrsReview, preview as fsrsPreview, replay, spreadOverdue, ratingFromAttempt, RATING_LABEL, STATE_NAME } from './review.mjs';
 
 /** Physical layout version of this database (PRAGMA user_version). Bump only with a migration step below. */
-export const DB_VERSION = 3;
+export const DB_VERSION = 4;
 const APPLICATION_ID = 0x4f4d5454; // "OMTT": never adopt or reset an unrelated SQLite file
 export const TODO_STATUS = Object.freeze(['open', 'done', 'dropped']);
 
@@ -206,7 +207,124 @@ CREATE VIEW v_knowledge_points AS
     (SELECT count(*) FROM v_note_concepts nc WHERE nc.concept_id = o.concept_id) AS notes
   FROM v_outline o LEFT JOIN concepts k ON k.id = o.concept_id LEFT JOIN review_cards rc ON rc.concept_id = o.concept_id;
 `,
+  // 4: four resources become independent. Mind maps and graph nodes get their own tables; notes/todos/board
+  // gain anchors; applySyllabus no longer retires unmentioned concepts (that is a core change). Existing
+  // courses are upgraded in JS: syllabus projection → a stored mind map, each concept → a graph node that
+  // refers to it, relations remapped onto those nodes, learning records keep their concept ids.
+  4: migrateToV4,
 };
+
+const V4_SCHEMA = `
+CREATE TABLE mindmaps (course_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, updated_at TEXT, doc TEXT NOT NULL CHECK (json_valid(doc)));
+CREATE TABLE graph_nodes (id TEXT PRIMARY KEY, course_id TEXT, title TEXT, refers_to TEXT,
+  doc TEXT NOT NULL CHECK (json_valid(doc)));
+CREATE INDEX graph_nodes_course ON graph_nodes(course_id);
+CREATE INDEX graph_nodes_refers ON graph_nodes(refers_to);
+ALTER TABLE todos ADD COLUMN anchors TEXT;
+UPDATE todos SET anchors = CASE WHEN concept_id IS NOT NULL AND concept_id != ''
+  THEN json_array(json_object('type', 'concept', 'id', concept_id)) ELSE json('[]') END
+  WHERE anchors IS NULL;
+CREATE VIEW v_mindmap_nodes AS
+  SELECT m.course_id, json_extract(n.value, '$.id') AS node_id, json_extract(n.value, '$.title') AS title,
+    json_extract(n.value, '$.parentId') AS parent_id, json_extract(n.value, '$.order') AS ord,
+    json_extract(n.value, '$.belongsTo.type') AS belongs_type, json_extract(n.value, '$.belongsTo.id') AS belongs_id,
+    json_extract(n.value, '$.refersTo') AS refers_to
+  FROM mindmaps m, json_each(m.doc, '$.nodes') n;
+CREATE VIEW v_graph_nodes AS
+  SELECT g.id, g.course_id, g.title, g.refers_to, k.title AS concept_title, k.mastery,
+    json_extract(g.doc, '$.belongsTo.type') AS belongs_type, json_extract(g.doc, '$.belongsTo.id') AS belongs_id
+  FROM graph_nodes g LEFT JOIN concepts k ON k.id = g.refers_to;
+DROP VIEW IF EXISTS v_outline;
+CREATE VIEW v_outline AS
+  SELECT c.id AS course_id, CAST(t.key AS INTEGER) AS topic_index, json_extract(t.value, '$.id') AS topic_id,
+    json_extract(t.value, '$.title') AS topic_title, CAST(s.key AS INTEGER) AS sub_index, json_extract(s.value, '$.id') AS subtopic_id,
+    json_extract(s.value, '$.title') AS title, json_extract(s.value, '$.description') AS description,
+    COALESCE(json_extract(s.value, '$.conceptId'), json_extract(s.value, '$.conceptIds[0]')) AS concept_id
+  FROM courses c, json_each(c.doc, '$.syllabus.topics') t, json_each(t.value, '$.subtopics') s;
+DROP VIEW IF EXISTS v_knowledge_points;
+CREATE VIEW v_knowledge_points AS
+  SELECT k.course_id, k.id AS concept_id, k.title, k.topic_id,
+    o.topic_title, o.topic_index, o.sub_index, o.subtopic_id, COALESCE(json_extract(k.doc, '$.description'), o.description) AS description,
+    k.mastery,
+    (SELECT count(*) FROM assessments a WHERE a.concept_id = k.id) AS attempts,
+    (SELECT round(avg(a.score), 2) FROM assessments a WHERE a.concept_id = k.id) AS avg_score,
+    (SELECT max(a.recorded_at) FROM assessments a WHERE a.concept_id = k.id) AS last_attempt_at,
+    (SELECT count(*) FROM relations r WHERE r.from_id = k.id OR r.to_id = k.id
+      OR r.from_id IN (SELECT id FROM graph_nodes g WHERE g.refers_to = k.id)
+      OR r.to_id IN (SELECT id FROM graph_nodes g WHERE g.refers_to = k.id)) AS relations,
+    (SELECT json_group_array(element_id) FROM (SELECT element_id FROM v_board_cards b WHERE b.concept_id = k.id AND b.course_id = k.course_id ORDER BY b.ord)) AS board_cards,
+    (SELECT count(*) FROM todos t WHERE t.concept_id = k.id AND t.status = 'open') AS open_todos,
+    rc.id AS review_card_id, rc.state AS review_state, CASE WHEN rc.state = 'new' THEN NULL ELSE rc.due_at END AS next_review_at,
+    rc.reps AS review_reps, rc.revision AS review_revision,
+    (SELECT count(DISTINCT lc.lesson_id) FROM v_lesson_concepts lc WHERE lc.concept_id = k.id) AS lessons,
+    (SELECT count(*) FROM v_note_concepts nc WHERE nc.concept_id = k.id) AS notes
+  FROM concepts k
+  LEFT JOIN v_outline o ON o.concept_id = k.id AND o.subtopic_id = (
+    SELECT v.subtopic_id FROM v_outline v WHERE v.concept_id = k.id ORDER BY v.topic_index, v.sub_index LIMIT 1)
+  LEFT JOIN review_cards rc ON rc.concept_id = k.id;
+DROP VIEW IF EXISTS v_review_cards;
+CREATE VIEW v_review_cards AS
+  SELECT r.id, r.course_id, r.concept_id, k.title AS concept_title, o.topic_title, o.topic_index, o.sub_index, r.state,
+    CASE WHEN r.state = 'new' THEN NULL ELSE r.due_at END AS due_at, r.last_review_at, r.reps, r.lapses, r.stability, r.difficulty,
+    r.scheduled_days, r.source, r.revision, r.updated_at
+  FROM review_cards r JOIN concepts k ON k.id = r.concept_id
+  LEFT JOIN v_outline o ON o.concept_id = r.concept_id AND o.subtopic_id = (
+    SELECT v.subtopic_id FROM v_outline v WHERE v.concept_id = r.concept_id ORDER BY v.topic_index, v.sub_index LIMIT 1);
+DROP VIEW IF EXISTS v_notes;
+CREATE VIEW v_notes AS
+  SELECT n.course_id, n.id AS note_id, n.lesson_id, json_extract(n.doc, '$.title') AS title, n.author,
+    COALESCE(json_extract(n.doc, '$.conceptIds'), '[]') AS concept_ids,
+    COALESCE(json_extract(n.doc, '$.anchors'), '[]') AS anchors,
+    substr(json_extract(n.doc, '$.content'), 1, 300) AS excerpt, n.created_at
+  FROM notes n;
+CREATE VIEW v_note_anchors AS
+  SELECT n.course_id, n.id AS note_id, json_extract(a.value, '$.type') AS type, json_extract(a.value, '$.id') AS anchor_id
+  FROM notes n, json_each(n.doc, '$.anchors') a;
+DROP VIEW IF EXISTS v_todos;
+CREATE VIEW v_todos AS
+  SELECT t.id, t.course_id, t.concept_id, k.title AS concept_title, t.title, t.status, t.due_at, t.remind_at, t.note, t.created_by,
+    t.created_at, t.updated_at, t.revision, COALESCE(t.anchors, '[]') AS anchors
+  FROM todos t LEFT JOIN concepts k ON k.id = t.concept_id;
+`;
+
+function loadDocs(db, table) {
+  const out = {};
+  for (const row of db.prepare(`SELECT id, doc FROM ${table}`).all()) out[row.id] = JSON.parse(row.doc);
+  return out;
+}
+
+function migrateToV4(db) {
+  db.exec(V4_SCHEMA);
+  const state = newState();
+  state.courses = loadDocs(db, 'courses');
+  state.concepts = loadDocs(db, 'concepts');
+  state.relations = loadDocs(db, 'relations');
+  state.notes = loadDocs(db, 'notes');
+  state.lessons = loadDocs(db, 'lessons');
+  state.goals = loadDocs(db, 'goals');
+  state.assessments = loadDocs(db, 'assessments');
+  state.sources = loadDocs(db, 'sources');
+  for (const row of db.prepare('SELECT course_id, doc FROM boards').all()) state.boards[row.course_id] = { ...JSON.parse(row.doc), elements: [] };
+  for (const row of db.prepare('SELECT course_id, doc FROM board_elements ORDER BY course_id, ord').all()) {
+    state.boards[row.course_id]?.elements.push(JSON.parse(row.doc));
+  }
+  normalizeState(state);
+  const upCourse = db.prepare('UPDATE courses SET doc = ?, syllabus_revision = ?, updated_at = ? WHERE id = ?');
+  for (const [id, c] of Object.entries(state.courses)) upCourse.run(JSON.stringify(c), c.syllabus?.revision ?? 0, c.updatedAt ?? null, id);
+  const upRel = db.prepare('UPDATE relations SET from_id = ?, to_id = ?, doc = ? WHERE id = ?');
+  for (const [id, r] of Object.entries(state.relations)) upRel.run(r.from, r.to, JSON.stringify(r), id);
+  const upNote = db.prepare('UPDATE notes SET lesson_id = ?, doc = ? WHERE id = ?');
+  for (const [id, n] of Object.entries(state.notes)) upNote.run(n.lessonId ?? null, JSON.stringify(n), id);
+  const upBoardEl = db.prepare('UPDATE board_elements SET concept_id = ?, doc = ? WHERE course_id = ? AND id = ?');
+  for (const [courseId, board] of Object.entries(state.boards)) {
+    for (const e of board.elements ?? []) upBoardEl.run(e.conceptId ?? null, JSON.stringify(e), courseId, e.id);
+  }
+  const insGn = db.prepare('INSERT INTO graph_nodes (id, course_id, title, refers_to, doc) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET course_id = excluded.course_id, title = excluded.title, refers_to = excluded.refers_to, doc = excluded.doc');
+  for (const [id, n] of Object.entries(state.graphNodes)) insGn.run(id, n.courseId ?? null, n.title ?? null, n.refersTo ?? null, JSON.stringify(n));
+  const insMm = db.prepare('INSERT INTO mindmaps (course_id, revision, updated_at, doc) VALUES (?, ?, ?, ?) ON CONFLICT(course_id) DO UPDATE SET revision = excluded.revision, updated_at = excluded.updated_at, doc = excluded.doc');
+  for (const [courseId, mm] of Object.entries(state.mindmaps)) insMm.run(courseId, mm.revision ?? 1, mm.updatedAt ?? null, JSON.stringify(mm));
+}
+
 
 // collection → table, column extractors (doc is always the full entity)
 const ENTITY = {
@@ -218,6 +336,7 @@ const ENTITY = {
   notes: { table: 'notes', cols: (n) => ({ course_id: n.courseId ?? null, lesson_id: n.lessonId ?? null, author: n.author ?? null, created_at: n.createdAt ?? null }) },
   assessments: { table: 'assessments', cols: (a) => ({ lesson_id: a.lessonId ?? null, concept_id: a.conceptId ?? null, score: Number.isFinite(a.score) ? a.score : null, recorded_at: a.recordedAt ?? null }) },
   sources: { table: 'sources', cols: (s) => ({ kind: s.kind ?? null, title: s.title ?? null }) },
+  graphNodes: { table: 'graph_nodes', cols: (n) => ({ course_id: n.courseId ?? null, title: n.title ?? null, refers_to: n.refersTo ?? null }) },
 };
 const STATE_KEYS = Object.keys(ENTITY);
 
@@ -284,7 +403,9 @@ export class SqliteTutorStore {
         }
         const from = db.prepare('PRAGMA user_version').get().user_version;
         for (let n = from + 1; n <= DB_VERSION; n++) {
-          db.exec(MIGRATIONS[n]);
+          const step = MIGRATIONS[n];
+          if (typeof step === 'function') step(db);
+          else db.exec(step);
           db.exec(`PRAGMA user_version = ${n}`);
         }
         if (from < DB_VERSION && v !== 0) {
@@ -295,6 +416,10 @@ export class SqliteTutorStore {
         if (from < 3 && DB_VERSION >= 3) {
           db.prepare("INSERT INTO meta (key, value) VALUES ('migration.v3.learningFlow', ?) ON CONFLICT(key) DO NOTHING")
             .run(JSON.stringify({ from, at: this.now(), fresh: v === 0, ...(backup ? { backup } : {}), views: ['v_lessons', 'v_lesson_concepts', 'v_notes', 'v_note_concepts', 'v_sources', 'v_source_refs', 'v_syllabus_changes'] }));
+        }
+        if (from < 4 && DB_VERSION >= 4) {
+          db.prepare("INSERT INTO meta (key, value) VALUES ('migration.v4.fourResources', ?) ON CONFLICT(key) DO NOTHING")
+            .run(JSON.stringify({ from, at: this.now(), fresh: v === 0, ...(backup ? { backup } : {}), tables: ['mindmaps', 'graph_nodes'] }));
         }
         db.exec('COMMIT');
       } catch (e) { db.exec('ROLLBACK'); throw e; }
@@ -321,7 +446,7 @@ export class SqliteTutorStore {
     let json = null;
     if (src) {
       const raw = readFileSync(src, 'utf8');
-      json = validateState(JSON.parse(raw)); // corrupt JSON: throw, mark nothing, keep the file untouched
+      json = normalizeState(validateState(JSON.parse(raw))); // corrupt JSON: throw, mark nothing, keep the file untouched
       if (!json.boards) json.boards = {};
     }
     let info;
@@ -364,6 +489,9 @@ export class SqliteTutorStore {
     }
     for (const row of db.prepare('SELECT course_id, doc FROM boards ORDER BY rowid').all()) s.boards[row.course_id] = { ...JSON.parse(row.doc), elements: [] };
     for (const row of db.prepare('SELECT course_id, doc FROM board_elements ORDER BY course_id, ord').all()) s.boards[row.course_id]?.elements.push(JSON.parse(row.doc));
+    try {
+      for (const row of db.prepare('SELECT course_id, doc FROM mindmaps ORDER BY rowid').all()) s.mindmaps[row.course_id] = JSON.parse(row.doc);
+    } catch { /* pre-v4 file mid-migration; normalizeState will seed */ }
     s.events = db.prepare('SELECT doc FROM (SELECT seq, doc FROM events ORDER BY seq DESC LIMIT ?) ORDER BY seq').all(MAX_EVENTS).map((r) => JSON.parse(r.doc));
     return s;
   }
@@ -407,6 +535,15 @@ export class SqliteTutorStore {
       const keep = new Set(elements.map((e) => e.id));
       for (const id of oldEls.keys()) if (!keep.has(id)) db.prepare('DELETE FROM board_elements WHERE course_id = ? AND id = ?').run(courseId, id);
     }
+    const pm = prev.mindmaps ?? {}, nm = next.mindmaps ?? {};
+    for (const [courseId, mm] of Object.entries(nm)) {
+      const text = JSON.stringify(mm);
+      if (pm[courseId] !== undefined && JSON.stringify(pm[courseId]) === text) continue;
+      db.prepare(`INSERT INTO mindmaps (course_id, revision, updated_at, doc) VALUES (?, ?, ?, ?)
+        ON CONFLICT(course_id) DO UPDATE SET revision = excluded.revision, updated_at = excluded.updated_at, doc = excluded.doc`)
+        .run(courseId, mm.revision ?? 0, mm.updatedAt ?? null, text);
+    }
+    for (const courseId of Object.keys(pm)) if (nm[courseId] === undefined) db.prepare('DELETE FROM mindmaps WHERE course_id = ?').run(courseId);
     const ins = db.prepare('INSERT INTO events (revision, at, actor, action, entity_id, summary, doc) VALUES (?, ?, ?, ?, ?, ?, ?)');
     for (const e of next.events ?? []) {
       if (!(e.revision > prevRevision)) continue;
@@ -415,7 +552,7 @@ export class SqliteTutorStore {
   }
 
   // ---------- JsonTutorStore-compatible API ----------
-  async read() { this.open(); return validateState(this.#readState()); }
+  async read() { this.open(); return normalizeState(validateState(this.#readState())); }
   async head() { this.open(); return { revision: Number(this.db.prepare("SELECT value FROM meta WHERE key = 'revision'").get().value) }; }
   async mutate(action, payload, expectedRevision, opts = {}) {
     this.open();
@@ -449,8 +586,8 @@ export class SqliteTutorStore {
     return revision;
   }
   /**
-   * op 'create': { courseId, title, dueAt?, remindAt?, conceptId?, note? }
-   * op 'update': { id, baseRevision (the to-do's own revision), title?, dueAt? (null clears), remindAt?, status?, conceptId?, note? }
+   * op 'create': { courseId, title, dueAt?, remindAt?, conceptId?, anchors?, note? }
+   * op 'update': { id, baseRevision (the to-do's own revision), title?, dueAt? (null clears), remindAt?, status?, conceptId?, anchors?, note? }
    */
   async todo(op, input = {}, { actor = 'ai' } = {}) {
     this.open();
@@ -471,16 +608,27 @@ export class SqliteTutorStore {
       if (courseId && k.course_id !== courseId) throw new Error('Knowledge point belongs to another course');
       return conceptId;
     };
+    const anchorsOf = (raw, courseId, conceptId) => {
+      const list = Array.isArray(raw) ? raw.map((a) => ({ type: a?.type, id: a?.id })) : legacyAnchors({ conceptId });
+      if (conceptId && !list.some((a) => a.type === 'concept' && a.id === conceptId)) list.push({ type: 'concept', id: conceptId });
+      const allowed = new Set(['concept', 'topic', 'mindmapNode', 'graphNode', 'relation', 'lesson']);
+      for (const a of list) {
+        if (!allowed.has(a.type) || typeof a.id !== 'string' || !a.id) throw new Error('anchors entries must be { type, id }');
+      }
+      return list;
+    };
     return this.#tx(() => {
       const now = this.now();
       if (op === 'create') {
         const courseId = text(input.courseId, 'courseId', 200);
         if (!db.prepare('SELECT 1 FROM courses WHERE id = ?').get(courseId)) throw new Error(`Unknown courses id: ${courseId}`);
-        const row = { id: `todo-${randomUUID()}`, course_id: courseId, concept_id: conceptOf(input.conceptId, courseId), title: text(input.title, 'title', 200),
+        const anchors = anchorsOf(input.anchors, courseId, conceptOf(input.conceptId, courseId));
+        const concept_id = conceptIdsFromAnchors(anchors)[0] ?? conceptOf(input.conceptId, courseId);
+        const row = { id: `todo-${randomUUID()}`, course_id: courseId, concept_id, title: text(input.title, 'title', 200),
           status: 'open', due_at: when(input.dueAt, 'dueAt'), remind_at: when(input.remindAt, 'remindAt'),
-          note: typeof input.note === 'string' ? input.note.slice(0, 2000) : null, created_by: actor, created_at: now, updated_at: now, revision: 1 };
-        db.prepare(`INSERT INTO todos (id, course_id, concept_id, title, status, due_at, remind_at, note, created_by, created_at, updated_at, revision)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(...Object.values(row));
+          note: typeof input.note === 'string' ? input.note.slice(0, 2000) : null, created_by: actor, created_at: now, updated_at: now, revision: 1, anchors: JSON.stringify(anchors) };
+        db.prepare(`INSERT INTO todos (id, course_id, concept_id, title, status, due_at, remind_at, note, created_by, created_at, updated_at, revision, anchors)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(...Object.values(row));
         const revision = this.#bump('todo.create', actor, row.id, `${actor === 'learner' ? '你' : 'AI'}新建待办「${row.title}」`);
         return { revision, todo: this.#todoRow(row.id) };
       }
@@ -496,6 +644,11 @@ export class SqliteTutorStore {
         if (input.remindAt !== undefined) set.remind_at = when(input.remindAt, 'remindAt');
         if (input.note !== undefined) set.note = input.note === null ? null : String(input.note).slice(0, 2000);
         if (input.conceptId !== undefined) set.concept_id = conceptOf(input.conceptId, cur.course_id);
+        if (input.anchors !== undefined || input.conceptId !== undefined) {
+          const anchors = anchorsOf(input.anchors !== undefined ? input.anchors : (cur.anchors ? JSON.parse(cur.anchors) : null), cur.course_id, set.concept_id ?? cur.concept_id);
+          set.anchors = JSON.stringify(anchors);
+          if (input.conceptId === undefined) set.concept_id = conceptIdsFromAnchors(anchors)[0] ?? null;
+        }
         if (input.status !== undefined) { if (!TODO_STATUS.includes(input.status)) throw new Error(`status must be one of ${TODO_STATUS.join(', ')}`); set.status = input.status; }
         if (!Object.keys(set).length) throw new Error('Nothing to update');
         set.updated_at = now; set.revision = cur.revision + 1;
@@ -507,7 +660,11 @@ export class SqliteTutorStore {
       throw new Error('op must be create | update');
     });
   }
-  #todoRow(id) { return { ...this.db.prepare('SELECT * FROM v_todos WHERE id = ?').get(id) }; }
+  #todoRow(id) {
+    const row = { ...this.db.prepare('SELECT * FROM v_todos WHERE id = ?').get(id) };
+    if (typeof row.anchors === 'string') { try { row.anchors = JSON.parse(row.anchors); } catch { row.anchors = []; } }
+    return row;
+  }
 
   // ---------- FSRS review cards ----------
   /**
@@ -609,10 +766,19 @@ export class SqliteTutorStore {
       case 'concept': {
         const id = String(params.conceptId ?? '');
         const kp = db.prepare('SELECT * FROM v_knowledge_points WHERE course_id = ? AND concept_id = ?').get(courseId, id);
-        if (!kp) throw new Error(`Knowledge point not in this course outline: ${id}`);
+        if (!kp) throw new Error(`Knowledge point not in this course: ${id}`);
         const concept = JSON.parse(db.prepare('SELECT doc FROM concepts WHERE id = ?').get(id)?.doc ?? 'null');
-        const relations = plain(db.prepare(`SELECT r.id, r.type, r.status, r.from_id, r.to_id, f.title AS from_title, t.title AS to_title, json_extract(r.doc, '$.note') AS note
-          FROM relations r LEFT JOIN concepts f ON f.id = r.from_id LEFT JOIN concepts t ON t.id = r.to_id WHERE r.from_id = ? OR r.to_id = ? ORDER BY r.rowid`).all(id, id));
+        const relations = plain(db.prepare(`SELECT r.id, r.type, r.status, r.from_id, r.to_id,
+            COALESCE(f.title, gf.title) AS from_title, COALESCE(t.title, gt.title) AS to_title, json_extract(r.doc, '$.note') AS note
+          FROM relations r
+          LEFT JOIN graph_nodes gf ON gf.id = r.from_id
+          LEFT JOIN graph_nodes gt ON gt.id = r.to_id
+          LEFT JOIN concepts f ON f.id = COALESCE(json_extract(r.doc, '$.fromConceptId'), gf.refers_to, r.from_id)
+          LEFT JOIN concepts t ON t.id = COALESCE(json_extract(r.doc, '$.toConceptId'), gt.refers_to, r.to_id)
+          WHERE r.from_id = ? OR r.to_id = ?
+            OR gf.refers_to = ? OR gt.refers_to = ?
+            OR json_extract(r.doc, '$.fromConceptId') = ? OR json_extract(r.doc, '$.toConceptId') = ?
+          ORDER BY r.rowid`).all(id, id, id, id, id, id));
         const attempts = plain(db.prepare('SELECT * FROM v_attempts WHERE concept_id = ? ORDER BY recorded_at DESC').all(id));
         const todos = plain(db.prepare("SELECT * FROM v_todos WHERE concept_id = ? ORDER BY status = 'open' DESC, due_at").all(id));
         // lessons that teach it (lesson.conceptIds), then lessons that only show up through an attempt (older lessons)
@@ -642,7 +808,7 @@ export class SqliteTutorStore {
 
   // ---------- model-facing read-only SQL (tutor_table_query) ----------
   static QUERYABLE = Object.freeze(['v_knowledge_points', 'v_outline', 'v_board_cards', 'v_attempts', 'v_questions', 'v_todos', 'v_events', 'v_review_cards', 'v_review_logs',
-    'v_lessons', 'v_lesson_concepts', 'v_notes', 'v_note_concepts', 'v_sources', 'v_source_refs', 'v_syllabus_changes']);
+    'v_lessons', 'v_lesson_concepts', 'v_notes', 'v_note_concepts', 'v_note_anchors', 'v_sources', 'v_source_refs', 'v_syllabus_changes', 'v_mindmap_nodes', 'v_graph_nodes']);
   /**
    * One SELECT/WITH statement on a separate read-only connection. No RECURSIVE (cannot be interrupted once running),
    * no ATTACH/PRAGMA, only the documented views; at most `limit` (<= 200) rows, truncation reported.

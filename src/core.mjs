@@ -2,6 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { BOARD_CARD, boardSeedPosition } from './board-layout.mjs';
 import { parseLocator, linksFor, refView } from './links.mjs';
 import { diffOutline, diffLines } from './outline-diff.mjs';
+import {
+  subConceptIds, stampSubConcepts, originOf, mergeAnchors, conceptIdsFromAnchors, lessonIdFromAnchors,
+  legacyAnchors, normalizeBelongsTo, mindmapOf, mindmapHierarchy, buildMindmapFromSyllabus,
+  ensureCanonicalGraphNode, resolveGraphEndpoint, conceptIdOfEndpoint, graphNodeForConcept,
+  normalizeState, editMindmap, mindmapRootId,
+} from './resources.mjs';
 
 export const SCHEMA_VERSION = 1;
 export const EDGE_TYPES = Object.freeze([
@@ -40,11 +46,12 @@ function normalizeTopics(topics, oldTopics = []) {
     const subtopics = t.subtopics.map((s) => {
       const prev = s.id ? prevSubs.get(s.id) : null;
       if (s.id && !prev) throw new Error('Unknown subtopic ID; add new subtopics without an id');
-      return {
+      const inherited = subConceptIds(s).length ? subConceptIds(s) : subConceptIds(prev ?? {});
+      const ids = inherited.length ? inherited : [id('kp')];
+      return stampSubConcepts({
         id: prev?.id ?? id('sub'), title: requireText(s.title, 'subtopic.title', 160),
         description: typeof s.description === 'string' ? s.description.slice(0, 1500) : (prev?.description ?? ''),
-        conceptId: prev?.conceptId ?? id('kp'),
-      };
+      }, ids);
     });
     unique(subtopics, 'id');
     return { id: old?.id ?? id('topic'), title: requireText(t.title, 'topic.title', 160),
@@ -90,16 +97,32 @@ function applySyllabus(s, course, topics, now, change = {}) {
     via: change.via ?? 'edit', reason: change.reason ?? '', entries, lines: diffLines(entries),
     ...(adjusting ? { forLessonId: adjusting.id } : {}) };
   course.syllabusChanges = [...(course.syllabusChanges ?? []), record].slice(-MAX_CHANGES);
-  const activeIds = new Set();
+  // Concepts are an independent pool: a syllabus entry *references* them. Unmentioned concepts stay active.
   for (const t of topics) for (const sub of t.subtopics) {
-    activeIds.add(sub.conceptId);
-    const old = s.concepts[sub.conceptId];
-    s.concepts[sub.conceptId] = { id: sub.conceptId, courseId: course.id, topicId: t.id, subtopicId: sub.id,
-      title: sub.title, description: sub.description, status: 'active',
-      evidenceRefs: old?.evidenceRefs ?? [], mastery: old?.mastery ?? 'unverified', updatedAt: now };
+    let ids = subConceptIds(sub);
+    if (!ids.length) ids = [id('kp')];
+    for (const cid of ids) {
+      const old = s.concepts[cid];
+      if (!old) {
+        s.concepts[cid] = { id: cid, courseId: course.id, topicId: t.id, subtopicId: sub.id,
+          title: sub.title, description: sub.description ?? '', status: 'active',
+          evidenceRefs: [], mastery: 'unverified', updatedAt: now,
+          origin: originOf('authoring', change.actor ?? 'ai', now) };
+      } else {
+        old.topicId = t.id;
+        old.subtopicId = sub.id;
+        if (old.status === 'retired') old.status = 'active';
+        old.updatedAt = now;
+      }
+      ensureCanonicalGraphNode(s, s.concepts[cid], { now, actor: change.actor });
+    }
+    stampSubConcepts(sub, ids);
   }
-  for (const concept of Object.values(s.concepts))
-    if (concept.courseId === course.id && !activeIds.has(concept.id)) concept.status = 'retired';
+  const existing = s.mindmaps[course.id];
+  const unused = !existing || ((existing.revision ?? 1) <= 1 && Object.keys(existing.nodes ?? {}).length <= 1);
+  if (unused) {
+    s.mindmaps[course.id] = buildMindmapFromSyllabus({ ...course, syllabus: { ...(course.syllabus ?? {}), topics } }, { now, actor: change.actor ?? 'ai' });
+  }
   // Any syllabus change re-opens the learner approval gate (same rule as course.plan).
   course.syllabus = { topics, revision: course.syllabus.revision + 1, approvedAt: null, approvedBy: null,
     ...(course.syllabus.lastApproved ? { lastApproved: course.syllabus.lastApproved } : {}) };
@@ -247,8 +270,9 @@ function editOutline(oldTopics, operations) {
   const newSub = (x, field) => {
     if (!x || typeof x !== 'object') throw new Error(`${field} must be an object`);
     if (x.id !== undefined) throw new Error('New subtopics must not carry an id; the store assigns one');
-    return { id: id('sub'), title: requireText(x.title, `${field}.title`, 160),
-      description: optionalText(x.description, `${field}.description`, 1500) ?? '', conceptId: id('kp') };
+    const cid = id('kp');
+    return stampSubConcepts({ id: id('sub'), title: requireText(x.title, `${field}.title`, 160),
+      description: optionalText(x.description, `${field}.description`, 1500) ?? '', conceptId: cid }, [cid]);
   };
   operations.forEach((op, n) => {
     if (!op || typeof op !== 'object' || !OUTLINE_OPS.includes(op.op)) throw new Error(`operations[${n}].op must be one of ${OUTLINE_OPS.join(', ')}`);
@@ -460,7 +484,7 @@ function boardPatch(s, course, board, operations, now, actor, maxOps = 100, inte
 
 export function newState() {
   return { schemaVersion: SCHEMA_VERSION, revision: 0, goals: {}, courses: {}, concepts: {},
-    lessons: {}, relations: {}, notes: {}, assessments: {}, sources: {}, boards: {}, events: [] };
+    lessons: {}, relations: {}, notes: {}, assessments: {}, sources: {}, boards: {}, mindmaps: {}, graphNodes: {}, events: [] };
 }
 export function validateState(state) {
   if (!state || state.schemaVersion !== SCHEMA_VERSION || !Number.isSafeInteger(state.revision) || state.revision < 0)
@@ -468,17 +492,17 @@ export function validateState(state) {
   for (const key of ['goals', 'courses', 'concepts', 'lessons', 'relations', 'notes', 'assessments', 'sources'])
     if (!state[key] || typeof state[key] !== 'object' || Array.isArray(state[key])) throw new Error(`Missing ${key}`);
   if (!Array.isArray(state.events)) throw new Error('Missing event ledger');
-  // `boards` was added after schema v1 shipped; older files simply have no boards yet.
-  if (state.boards !== undefined && (!state.boards || typeof state.boards !== 'object' || Array.isArray(state.boards)))
-    throw new Error('Corrupt boards');
+  // `boards`, `mindmaps` and `graphNodes` were added after schema v1 shipped; older files simply have none yet.
+  for (const key of ['boards', 'mindmaps', 'graphNodes'])
+    if (state[key] !== undefined && (!state[key] || typeof state[key] !== 'object' || Array.isArray(state[key])))
+      throw new Error(`Corrupt ${key}`);
   return state;
 }
 
 /** Pure transactional state transition. Never infer learner answers or mastery from reading completion. */
 export function transition(original, action, input = {}, opts = {}) {
   validateState(original);
-  const s = clone(original);
-  if (!s.boards) s.boards = {};
+  const s = normalizeState(clone(original));
   const now = opts.now ?? iso();
   const actor = ACTORS.includes(opts.actor) ? opts.actor : 'ai';
   const payload = input ?? {};
@@ -705,24 +729,32 @@ export function transition(original, action, input = {}, opts = {}) {
       result = { lessonId: lesson.id, phase: lesson.phase, skipped: lesson.reviewSkipped, ...(dropped ? { droppedQuestion: dropped.question } : {}) }; break;
     }
     case 'note.add': {
-      const lesson = requireId(s, 'lessons', payload.lessonId);
-      const note = { id: id('note'), courseId: lesson.courseId, lessonId: lesson.id,
+      const lesson = payload.lessonId ? requireId(s, 'lessons', payload.lessonId) : null;
+      const courseId = lesson?.courseId ?? payload.courseId;
+      if (!courseId || !s.courses[courseId]) throw new Error('note.add needs lessonId or courseId');
+      const conceptIds = courseConcepts(s, courseId, payload.conceptIds, 'conceptIds');
+      const anchors = mergeAnchors(s, courseId, payload.anchors, { conceptIds, lessonId: lesson?.id }, 'anchors');
+      if (!anchors.length && !lesson) throw new Error('note.add needs a lessonId or at least one anchor');
+      const note = { id: id('note'), courseId, lessonId: lessonIdFromAnchors(anchors) ?? lesson?.id ?? null,
         title: requireText(payload.title, 'note.title', 160), content: requireText(payload.content, 'note.content', 50_000),
-        author: actor, conceptIds: courseConcepts(s, lesson.courseId, payload.conceptIds, 'conceptIds'),
-        sourceRefs: normalizeSourceRefs(s, s.courses[lesson.courseId], payload.sourceRefs),
+        author: actor, anchors, conceptIds: conceptIdsFromAnchors(anchors),
+        sourceRefs: normalizeSourceRefs(s, s.courses[courseId], payload.sourceRefs),
         createdAt: now };
       s.notes[note.id] = note; result = note; break;
     }
     case 'note.link': {
       const note = requireId(s, 'notes', payload.noteId);
-      note.conceptIds = courseConcepts(s, note.courseId, payload.conceptIds ?? [], 'conceptIds');
+      const conceptIds = payload.conceptIds !== undefined ? courseConcepts(s, note.courseId, payload.conceptIds, 'conceptIds') : conceptIdsFromAnchors(note.anchors ?? legacyAnchors(note));
+      note.anchors = mergeAnchors(s, note.courseId, payload.anchors ?? (payload.conceptIds === undefined ? note.anchors : []), { conceptIds, lessonId: payload.lessonId === undefined ? note.lessonId : payload.lessonId }, 'anchors');
+      note.conceptIds = conceptIdsFromAnchors(note.anchors);
+      note.lessonId = lessonIdFromAnchors(note.anchors) ?? note.lessonId ?? null;
       note.updatedAt = now;
-      result = { id: note.id, noteId: note.id, conceptIds: note.conceptIds }; break;
+      result = { id: note.id, noteId: note.id, conceptIds: note.conceptIds, anchors: note.anchors, lessonId: note.lessonId }; break;
     }
     case 'lesson.finish': {
       const lesson = requireId(s, 'lessons', payload.lessonId);
       if (lesson.phase !== 'summary_pending') throw new Error('Finish only after review choice');
-      if (!Object.values(s.notes).some(note => note.lessonId === lesson.id) && payload.skipNotes !== true)
+      if (!Object.values(s.notes).some(note => note.lessonId === lesson.id || (note.anchors ?? []).some((a) => a.type === 'lesson' && a.id === lesson.id)) && payload.skipNotes !== true)
         throw new Error('Create a lesson note or explicitly skip notes');
       // end-of-lesson feedback comes next (it may adjust the outline); lesson.feedback completes the lesson
       lesson.phase = 'feedback_pending'; lesson.notesSkipped = payload.skipNotes === true; touchLesson(lesson);
@@ -774,13 +806,26 @@ export function transition(original, action, input = {}, opts = {}) {
       result = { lessonId: lesson.id, phase: lesson.phase, status: lesson.status, adjust: lesson.adjust, nextPreview: lesson.nextPreview ?? null }; break;
     }
     case 'relation.propose': {
-      const from = requireId(s, 'concepts', payload.from), to = requireId(s, 'concepts', payload.to);
+      const courseHint = payload.courseId ?? s.graphNodes[payload.from]?.courseId ?? s.concepts[payload.from]?.courseId
+        ?? s.graphNodes[payload.to]?.courseId ?? s.concepts[payload.to]?.courseId;
+      if (!courseHint) throw new Error('relation.propose needs from/to (graph node or knowledge point ids)');
+      const from = resolveGraphEndpoint(s, courseHint, payload.from, 'from');
+      const to = resolveGraphEndpoint(s, courseHint, payload.to, 'to');
       if (from.courseId !== to.courseId) throw new Error('Cross-course relation needs a dedicated merge/review workflow');
       if (!EDGE_SET.has(payload.type)) throw new Error(`Invalid relation type: ${payload.type}`);
       if (Object.values(s.relations).some(r => r.from === from.id && r.to === to.id && r.type === payload.type)) throw new Error('Duplicate relation');
-      if (['prerequisite', 'partOf'].includes(payload.type) && wouldCycle(s.relations, from.id, to.id, payload.type)) throw new Error('Relation would create a cycle');
       if (from.id === to.id) throw new Error('Self relation is not allowed');
+      const fromConcept = from.refersTo ?? null, toConcept = to.refersTo ?? null;
+      if (fromConcept && toConcept && fromConcept === toConcept) throw new Error('Self relation is not allowed');
+      if (['prerequisite', 'partOf'].includes(payload.type)) {
+        if (wouldCycle(s.relations, from.id, to.id, payload.type)) throw new Error('Relation would create a cycle');
+        if (fromConcept && toConcept) {
+          const byConcept = Object.fromEntries(Object.entries(s.relations).map(([k, r]) => [k, { ...r, from: r.fromConceptId ?? conceptIdOfEndpoint(s, r.from), to: r.toConceptId ?? conceptIdOfEndpoint(s, r.to) }]));
+          if (wouldCycle(byConcept, fromConcept, toConcept, payload.type)) throw new Error('Relation would create a cycle');
+        }
+      }
       const item = { id: id('rel'), courseId: from.courseId, from: from.id, to: to.id,
+        fromConceptId: fromConcept, toConceptId: toConcept,
         type: payload.type, status: 'candidate', note: typeof payload.note === 'string' ? payload.note.slice(0, 1000) : '',
         evidenceRefs: Array.isArray(payload.evidenceRefs) ? payload.evidenceRefs.filter(x => typeof x === 'string').slice(0, 50) : [],
         createdAt: now };
@@ -795,20 +840,28 @@ export function transition(original, action, input = {}, opts = {}) {
       const used = new Set(board.elements.map((e) => e.id));
       const cards = new Map(board.elements.filter((e) => !e.deleted && e.type === 'concept').map((e) => [e.conceptId, e.id]));
       const ops = [];
+      const taught = [];
       for (const t of course.syllabus.topics) for (const sub of t.subtopics) {
-        if (cards.has(sub.conceptId) || s.concepts[sub.conceptId]?.status !== 'active') continue;
-        let cid = `card-${sub.conceptId}`.slice(0, 120);
+        const ids = sub.conceptIds?.length ? sub.conceptIds : (sub.conceptId ? [sub.conceptId] : []);
+        for (const conceptId of ids) if (!taught.includes(conceptId)) taught.push(conceptId);
+      }
+      for (const conceptId of taught) {
+        if (cards.has(conceptId) || s.concepts[conceptId]?.status !== 'active') continue;
+        let cid = `card-${conceptId}`.slice(0, 120);
         if (used.has(cid)) cid = id('card');
-        used.add(cid); cards.set(sub.conceptId, cid);
-        ops.push({ op: 'add', type: 'concept', conceptId: sub.conceptId, id: cid });
+        used.add(cid); cards.set(conceptId, cid);
+        ops.push({ op: 'add', type: 'concept', conceptId, id: cid });
       }
       // Candidate relation arrows: re-drawn when missing, EXCEPT ones somebody deleted on purpose (deletedBy "direct").
       // Arrows that only vanished because their card was deleted (deletedBy "cascade") come back with the re-seeded card.
       // A visual arrow never becomes a semantic edge by itself.
       const drawn = new Set(board.elements.filter((e) => e.type === 'arrow' && e.relationId && (!e.deleted || e.deletedBy !== 'cascade')).map((e) => e.relationId));
-      for (const r of Object.values(s.relations))
-        if (r.courseId === course.id && !drawn.has(r.id) && cards.has(r.from) && cards.has(r.to))
-          ops.push({ op: 'add', type: 'arrow', from: cards.get(r.from), to: cards.get(r.to), label: r.type, relationId: r.id });
+      for (const r of Object.values(s.relations)) {
+        const fromC = r.fromConceptId ?? conceptIdOfEndpoint(s, r.from) ?? r.from;
+        const toC = r.toConceptId ?? conceptIdOfEndpoint(s, r.to) ?? r.to;
+        if (r.courseId === course.id && !drawn.has(r.id) && cards.has(fromC) && cards.has(toC))
+          ops.push({ op: 'add', type: 'arrow', from: cards.get(fromC), to: cards.get(toC), label: r.type, relationId: r.id });
+      }
       if (!ops.length) { result = { courseId: course.id, revision: board.revision, added: 0 }; break; }
       const next = boardPatch(s, course, board, ops, now, actor, MAX_BOARD_ELEMENTS, true);
       delete next.touched; delete next.refs;
@@ -826,6 +879,107 @@ export function transition(original, action, input = {}, opts = {}) {
       s.boards[course.id] = next;
       result = { courseId: course.id, revision: next.revision, touched, ...(Object.keys(refs).length ? { refs } : {}) }; break;
     }
+    case 'mindmap.ensure': {
+      const course = requireId(s, 'courses', payload.courseId);
+      if (!s.mindmaps[course.id]) s.mindmaps[course.id] = buildMindmapFromSyllabus(course, { now, actor });
+      for (const c of Object.values(s.concepts)) if (c.courseId === course.id) ensureCanonicalGraphNode(s, c, { now, actor });
+      const mm = s.mindmaps[course.id];
+      result = { courseId: course.id, mindmapRevision: mm.revision, rootId: mm.rootId, created: true }; break;
+    }
+    case 'mindmap.edit': {
+      const course = requireId(s, 'courses', payload.courseId);
+      if (!s.mindmaps[course.id]) s.mindmaps[course.id] = buildMindmapFromSyllabus(course, { now, actor });
+      const mm = s.mindmaps[course.id];
+      if (payload.mindmapRevision !== undefined && payload.mindmapRevision !== null) {
+        if (!Number.isInteger(payload.mindmapRevision)) throw new Error('mindmapRevision must be an integer');
+        if (payload.mindmapRevision !== mm.revision)
+          throw Object.assign(new Error(`Mind map changed (revision ${mm.revision}); read it again`), { code: 'conflict', mindmapRevision: mm.revision });
+      }
+      const { touched } = editMindmap(mm, payload.operations, { id, now, actor });
+      s.mindmaps[course.id] = mm;
+      result = { courseId: course.id, mindmapRevision: mm.revision, applied: payload.operations.length, touched,
+        hierarchy: mindmapHierarchy(mm, course) }; break;
+    }
+    case 'graphNode.add': {
+      const course = requireId(s, 'courses', payload.courseId);
+      const refersTo = payload.refersTo ? requireId(s, 'concepts', payload.refersTo).id : null;
+      if (refersTo && s.concepts[refersTo].courseId !== course.id) throw new Error('refersTo belongs to another course');
+      const node = { id: id('gn'), courseId: course.id, title: requireText(payload.title, 'title', 160),
+        description: typeof payload.description === 'string' ? payload.description.slice(0, 1500) : '',
+        refersTo, belongsTo: normalizeBelongsTo(payload.belongsTo),
+        origin: originOf(payload.phase === 'authoring' ? 'authoring' : 'learning', actor, now),
+        createdAt: now, updatedAt: now };
+      s.graphNodes[node.id] = node; result = node; break;
+    }
+    case 'graphNode.rename': {
+      const node = requireId(s, 'graphNodes', payload.id);
+      node.title = requireText(payload.title, 'title', 160);
+      if (payload.description !== undefined) node.description = typeof payload.description === 'string' ? payload.description.slice(0, 1500) : '';
+      node.updatedAt = now; result = node; break;
+    }
+    case 'graphNode.remove': {
+      const node = requireId(s, 'graphNodes', payload.id);
+      if (node.refersTo) throw new Error('A graph node that refers to a knowledge point cannot be deleted; retire or unlink it first');
+      for (const r of Object.values(s.relations)) if (r.from === node.id || r.to === node.id) delete s.relations[r.id];
+      delete s.graphNodes[node.id];
+      result = { id: node.id, removed: true }; break;
+    }
+    case 'concept.create': {
+      const course = requireId(s, 'courses', payload.courseId);
+      const item = { id: id('kp'), courseId: course.id, title: requireText(payload.title, 'title', 160),
+        description: typeof payload.description === 'string' ? payload.description.slice(0, 1500) : '',
+        topicId: payload.topicId ?? null, subtopicId: null, status: 'active', evidenceRefs: [], mastery: 'unverified',
+        origin: originOf(payload.phase === 'learning' ? 'learning' : 'authoring', actor, now), updatedAt: now };
+      if (item.topicId) courseTopic(course, item.topicId, 'topicId');
+      s.concepts[item.id] = item;
+      ensureCanonicalGraphNode(s, item, { now, actor });
+      result = item; break;
+    }
+    case 'concept.promote': {
+      const course = requireId(s, 'courses', payload.courseId);
+      const from = payload.from;
+      if (!from || typeof from !== 'object' || !['mindmapNode', 'graphNode'].includes(from.type) || typeof from.id !== 'string')
+        throw new Error("concept.promote needs from: { type: 'mindmapNode'|'graphNode', id }");
+      let srcTitle, node, mm = null;
+      if (from.type === 'mindmapNode') {
+        mm = mindmapOf(s, course.id);
+        node = mm?.nodes?.[from.id];
+        if (!node) throw new Error(`Unknown mind-map node: ${from.id}`);
+        if (node.refersTo && s.concepts[node.refersTo])
+          throw Object.assign(new Error('This mind-map node already refers to a knowledge point'), { conceptId: node.refersTo });
+        srcTitle = node.title;
+      } else {
+        node = requireId(s, 'graphNodes', from.id);
+        if (node.courseId !== course.id) throw new Error('Graph node belongs to another course');
+        if (node.refersTo && s.concepts[node.refersTo])
+          throw Object.assign(new Error('This graph node already refers to a knowledge point'), { conceptId: node.refersTo });
+        srcTitle = node.title;
+      }
+      const item = { id: id('kp'), courseId: course.id,
+        title: payload.title !== undefined ? requireText(payload.title, 'title', 160) : requireText(srcTitle, 'title', 160),
+        description: typeof payload.description === 'string' ? payload.description.slice(0, 1500) : '',
+        topicId: node.belongsTo?.type === 'topic' ? node.belongsTo.id : (s.concepts[node.belongsTo?.id]?.topicId ?? null),
+        subtopicId: null, status: 'active', evidenceRefs: [], mastery: 'unverified',
+        origin: originOf('learning', actor, now), updatedAt: now };
+      s.concepts[item.id] = item;
+      node.refersTo = item.id;
+      node.updatedAt = now;
+      if (from.type === 'graphNode') {
+        // the promoted node itself is the graph node that refers to the new knowledge point
+      } else {
+        ensureCanonicalGraphNode(s, item, { now, actor });
+      }
+      result = { conceptId: item.id, concept: item, from, refersTo: item.id }; break;
+    }
+    case 'concept.rename': {
+      const concept = requireId(s, 'concepts', payload.conceptId ?? payload.id);
+      concept.title = requireText(payload.title, 'title', 160);
+      if (payload.description !== undefined) concept.description = typeof payload.description === 'string' ? payload.description.slice(0, 1500) : '';
+      concept.updatedAt = now;
+      const gn = graphNodeForConcept(s, concept.courseId, concept.id);
+      if (gn) { gn.title = concept.title; gn.updatedAt = now; }
+      result = concept; break;
+    }
     default: throw new Error(`Unknown tutor action: ${action}`);
   }
   s.revision = original.revision + 1;
@@ -841,17 +995,20 @@ export function transition(original, action, input = {}, opts = {}) {
 /** Minimal scoped read model; this is domain state, not the DSH Session transcript. */
 export function snapshot(state, courseId) {
   validateState(state);
-  if (!courseId) return { revision: state.revision, goals: Object.values(state.goals), courses: Object.values(state.courses),
-    resume: Object.values(state.courses).map((c) => resumePointer(state, c)) };
-  const course = requireId(state, 'courses', courseId);
-  return { revision: state.revision, course,
-    concepts: Object.values(state.concepts).filter(x => x.courseId === courseId && x.status === 'active'),
-    relations: Object.values(state.relations).filter(x => x.courseId === courseId),
-    lessons: Object.values(state.lessons).filter(x => x.courseId === courseId),
-    notes: Object.values(state.notes).filter(x => x.courseId === courseId),
-    sources: (course.sourceIds ?? []).map(id => state.sources[id]).filter(Boolean),
-    assessments: Object.values(state.assessments).filter(x => state.lessons[x.lessonId]?.courseId === courseId),
-    board: liveBoard(state, course), resume: resumePointer(state, course), outlineSinceApproved: sinceApproved(course) };
+  const s = normalizeState(clone(state));
+  if (!courseId) return { revision: s.revision, goals: Object.values(s.goals), courses: Object.values(s.courses),
+    resume: Object.values(s.courses).map((c) => resumePointer(s, c)) };
+  const course = requireId(s, 'courses', courseId);
+  return { revision: s.revision, course,
+    concepts: Object.values(s.concepts).filter(x => x.courseId === courseId && x.status === 'active'),
+    relations: Object.values(s.relations).filter(x => x.courseId === courseId),
+    graphNodes: Object.values(s.graphNodes).filter(x => x.courseId === courseId),
+    mindmap: s.mindmaps[courseId] ?? null,
+    lessons: Object.values(s.lessons).filter(x => x.courseId === courseId),
+    notes: Object.values(s.notes).filter(x => x.courseId === courseId),
+    sources: (course.sourceIds ?? []).map(id => s.sources[id]).filter(Boolean),
+    assessments: Object.values(s.assessments).filter(x => s.lessons[x.lessonId]?.courseId === courseId),
+    board: liveBoard(s, course), resume: resumePointer(s, course), outlineSinceApproved: sinceApproved(course) };
 }
 
 const NEXT_STEP = {
@@ -903,7 +1060,7 @@ export function liveBoard(state, course) {
       if (e.type === 'note' && e.noteId) {
         const n = state.notes?.[e.noteId];
         return { ...e, text: n?.title ?? '(已删除的笔记)', excerpt: n ? String(n.content).slice(0, 140) : '', noteAuthor: n?.author ?? null,
-          conceptIds: n?.conceptIds ?? [], lessonId: n?.lessonId ?? null, stale: !n };
+          conceptIds: n?.conceptIds ?? conceptIdsFromAnchors(n?.anchors), lessonId: n?.lessonId ?? null, anchors: n?.anchors ?? e.anchors ?? [], stale: !n };
       }
       if (e.type !== 'concept') return e;
       const c = state.concepts[e.conceptId];

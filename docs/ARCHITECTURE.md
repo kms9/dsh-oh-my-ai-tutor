@@ -4,7 +4,7 @@
 
 1. **Learning Domain owns learning truth**：Goal/Course/Syllabus/KnowledgePoint/Lesson/Assessment 在本插件中统一管理；别的插件是可替换的能力提供方。
 2. **Tutor control plane vs content workers**：阶段转换、确认门禁属于 Orchestrator；大纲生成、内容编写、评价、笔记生成属于可替换 Worker。
-3. **One semantic graph, many projections**：课程目录是树，思维导图是树的视觉投影，知识图谱是有证据的有向多关系图，白板是可编辑图形布局。它们不互相代替。
+3. **四种资源独立，从属而不是等同**：课程大纲、知识点、思维导图、知识图谱各自是权威，用可选的从属（belongsTo）或引用（refersTo）关联，不绑成同一棵树、同一批节点。投影只负责展示，不负责定义对方的内容。大纲回答「教什么、按什么顺序」；图谱回答「要知道什么、如何依赖、如何判断学会了」。思维导图用适合自己的层次结构组织「要学内容如何展开」，深度不限。不要把导图做成大纲的 1:1 投影，也不要把导图做成图谱的一种视图。
 4. **Coverage != mastery**：记录学过/看过与可迁移解答的证据；模型评分须标明不确定性，不捏造掌握概率。
 5. **Snapshot + immutable evidence**：课程和概念有稳定 ID / revision，原始回答、引用、评分和关系提案保留可审计记录。
 6. **Plugin compatibility**：优先使用 DSH Cordis API / StorageDomain / Client Slots / User Questions；避免修改 DSH core、读取第三方私有状态文件。
@@ -38,13 +38,13 @@ flowchart TB
 | `LearningGoal` | `id,learnerId,title,outcome,profile,revision` | 目标可以拥有多门 Course |
 | `Course` | `id,goalId,status,syllabusRevision` | 课程目录的批准与变更可审计 |
 | `Topic/Subtopic` | `id,parentId,order,title,objective,sourceRefs` | 结构修改应保留旧 ID |
-| `KnowledgePoint` | `id,title,aliases,description,courseLinks,version` | 不因更名更换 ID；跨课程去重需人工核对 |
+| `KnowledgePoint` | `id,title,aliases,description,courseLinks,version` | 独立的可教、可测、可复习对象池；不因更名更换 ID；不再等同于大纲条目或导图/图谱节点 |
 | `KnowledgeRelation` | `id,fromId,toId,type,status,evidenceRefs,revision` | 关系端点存在；前置/包含关系不得有环；候选不自动确认 |
 | `LearningSession/Lesson` | `id,courseId,dshSessionIds,plan,phase,currentPart` | 属于课程，业务阶段与 DSH turn 分离 |
 | `LessonPart` | `id,title,objective,content,sourceRefs,status` | 有内容、用户确认才覆盖，不等于掌握 |
 | `AssessmentEvidence` | `id,conceptId,lessonId,question,response,score,hints,rubric,origin,time` | 保存真实答案与实际提示；可追溯、不可猜测 |
 | `LearnerConceptState` | `learnerId,conceptId,status,modelVersion,evidenceIds` | 进度状态与知识掌握状态分离 |
-| `LearningNote` | `id,lessonId,conceptIds,body,author,sourceRefs,version` | 用户笔记与 AI 生成内容分开 |
+| `LearningNote` | `id,lessonId,anchors,conceptIds,body,author,sourceRefs,version` | 用户笔记与 AI 生成内容分开；anchors 可挂知识点、主题、导图节点、图谱节点/关系、课时 |
 | `SourceRef` | `{sourceId,locator}`（旧自由文本仍可读） | 必须指向已登记 Source；locator 尽量带页码/时间；点击打开 URI |
 | `CanvasBinding` | `courseId,boardId,owningSessionId,sceneRevision,conceptElementIds,relationElementIds` | 逻辑 ID ≠ 元素 ID；不能静默覆盖用户布局 |
 | `ReviewItem` | `id,conceptId,questionId,scheduler,dueAt,reviewHistory` | 一条复习流仅有一个权威调度器 |
@@ -71,12 +71,16 @@ flowchart TD
 
 原型（及当前实现）的阶段为 `plan_pending → teaching → review_pending → summary_pending → feedback_pending → complete`，课中/课后调整走 `plan_adjustment_pending`。批准是绑定 entity+revision 的 CAS 动作，默认由学习者在工作台发起；学习者说「交给你」「跳过批准」或打开「交给 AI 批准」时，AI 可以代为调用同一 `approve` 动作并记录 actor 与依据，但**不能**在写入大纲时自动生效，也不能在未经请求时自行批准。
 
-## 5. 视觉模型：四层不可混淆
+## 5. 视觉模型：四种资源不可混淆
 
-- `SyllabusTree`：严格父子树，显示计划、进度和目录；来自课程 Syllabus。
-- `MindMap`：SyllabusTree 的可视化，输出 `id,title,children`，可生成 Mermaid 或 UI 的 ReactFlow 视图；仅反映“包含/课程层级”。
-- `KnowledgeGraph`：独立的 `KnowledgePoint` 和 `KnowledgeRelation`，含 `prerequisite/partOf/explains/contrasts/applies/exampleOf/relatedTo` 与来源证据；支持跨章节、跨课程关系。
-- `KnowledgeWhiteboard`：由图谱部分投影的 `node/arrow/text/layout`，包含讲课时的标注和用户自定义布局。白板的视觉箭头可能只是演示标记，**不得自动回写成已验证语义关系**。
+- `SyllabusTree`：严格父子树，显示计划、进度和目录；来自课程大纲。回答「教什么、按什么顺序」。改「教什么」仍须批准（ADR-009）。子主题用 `conceptIds` 引用知识点，而不是自己就是一个知识点。
+- `MindMap`：独立存储、独立编辑的思考结构，深度不限；节点有自己的 ID，可 `belongsTo` 主题或知识点，也可以只是扩展。做课或首次打开时若还没有导图，可用当时大纲生成骨架，生成后即独立。改导图不是改大纲，也不走大纲批准。
+- `KnowledgeGraph`：独立的图谱节点和带类型关系（`prerequisite/partOf/explains/contrasts/applies/exampleOf/relatedTo`）。节点可 `refersTo` 某个知识点，也可以为扩展单独存在。两端都引用了知识点的关系，可以同时作为教学上的 `KnowledgeRelation` 候选；候选不自动确认。支持跨章节、跨课程关系（跨课程仍须单独审核）。
+- `KnowledgeWhiteboard`：可编辑的 `node/arrow/text/layout`，卡片可挂到第 5 节所述的更宽对象上，也可以是自由便签。白板的视觉箭头可能只是演示标记，**不得自动回写成已验证语义关系**（ADR-004）。
+
+知识和学习记录的挂接：作答、掌握、复习只指向知识点。笔记、待办和白板可以挂到知识点、大纲主题、导图节点、图谱节点或关系、课时。导图或图谱上的扩展不自动成为考点；明确升格（`concept.promote`）之后，才可以出现在测验和复习里，且不自动写入大纲。
+
+每种资源只保留一份协同结果，由学习者和 AI 一起改，留下的就是准绳。不做快照，也不做两套可切换的「课程版 / 我的理解版」。节点上可记下轻量来源（做课时产生的还是学习中补的、是谁改的），仅供阅读，不用来切换或回退。
 
 ### 数据变更原则
 

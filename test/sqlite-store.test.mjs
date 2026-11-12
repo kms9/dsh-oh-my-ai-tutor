@@ -6,6 +6,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { SqliteTutorStore, DB_VERSION } from '../src/sqlite-store.mjs';
+import { normalizeState } from '../src/resources.mjs';
 import { JsonTutorStore } from '../src/store.mjs';
 import { dispatch } from '../src/rpc.mjs';
 import { toolSpecs } from '../src/tools.mjs';
@@ -48,7 +49,20 @@ test('legacy JSON is imported once: identical state, counts match, old file rena
   for (const k of ['goals', 'courses', 'concepts', 'lessons', 'relations', 'notes', 'assessments', 'sources'])
     assert.equal(m.counts[k], Object.keys(original[k]).length, k);
   assert.equal(m.counts.events, original.events.length);
-  assert.deepEqual(await store.read(), { ...original, boards: {} }, 'the imported state reads back exactly');
+  const loaded = await store.read();
+  const expected = normalizeState(structuredClone({ ...original, boards: {} }));
+  assert.equal(loaded.revision, expected.revision);
+  for (const k of ['goals', 'courses', 'concepts', 'lessons', 'notes', 'assessments', 'sources'])
+    assert.equal(Object.keys(loaded[k]).length, Object.keys(expected[k]).length, k);
+  for (const [id, a] of Object.entries(original.assessments)) {
+    assert.ok(loaded.assessments[id], 'assessment kept');
+    assert.equal(loaded.assessments[id].conceptId, a.conceptId);
+  }
+  for (const [id, c] of Object.entries(original.concepts))
+    assert.equal(loaded.concepts[id].mastery, c.mastery, 'mastery kept');
+  assert.ok(loaded.mindmaps[Object.keys(original.courses)[0]], 'mind map seeded from the syllabus');
+  assert.equal(Object.keys(loaded.graphNodes).length, Object.keys(original.concepts).length);
+
   // the old file is kept, renamed
   assert.equal(existsSync(join(dir, 'state.json')), false);
   const kept = (await readdir(dir)).filter((f) => f.startsWith('state.json.migrated-'));
@@ -94,7 +108,8 @@ test('CAS: stale expectedRevision and stale board/syllabus revisions are rejecte
   assert.equal(seeded.result.revision, 1);
   await assert.rejects(() => a.mutate('board.patch', { courseId: course.id, baseRevision: 0, operations: [{ op: 'add', type: 'note', text: 'stale' }] }, undefined, { actor: 'learner' }), (e) => e.code === 'conflict');
   const now = await a.read();
-  assert.equal(now.concepts[sub.conceptId].title, '学习者改的名字', 'learner edit survived');
+  const renamed = now.courses[course.id].syllabus.topics.flatMap((t) => t.subtopics).find((s) => s.id === sub.id);
+  assert.equal(renamed.title, '学习者改的名字', 'learner edit survived');
   assert.equal(now.boards[course.id].elements.filter((e) => e.type === 'concept').length, 15);
   assert.equal(now.events.at(-1).actor, 'ai');
   // approval gate unchanged: the model cannot approve

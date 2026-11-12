@@ -7,6 +7,8 @@ const MAX_BODY_BYTES = 2 * 1024 * 1024;
 export const LEARNER_ACTIONS = Object.freeze([
   'course.editOutline', 'course.approve', 'course.setApproval', 'lesson.approve', 'board.seed', 'board.patch', 'relation.propose',
   'note.add', 'note.link', 'lesson.feedback',
+  'mindmap.ensure', 'mindmap.edit', 'graphNode.add', 'graphNode.rename', 'graphNode.remove',
+  'concept.create', 'concept.promote', 'concept.rename',
 ]);
 
 /** One UI read model: everything the three-column workbench needs, derived from the same state file. */

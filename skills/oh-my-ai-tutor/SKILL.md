@@ -1,6 +1,6 @@
 ---
 name: oh-my-ai-tutor
-description: 用 tutor_* 工具按「目标→大纲批准→分段讲解→复习→笔记→课末反馈」带学习者上课，并在 AI 学习工作台里编辑大纲、思维导图和课程白板（学习者手动编辑与 AI 编辑写入同一份领域状态）。
+description: 用 tutor_* 工具按「目标→大纲批准→分段讲解→复习→笔记→课末反馈」带学习者上课，并在 AI 学习工作台里编辑大纲、独立的思维导图、知识图谱和课程白板（学习者和 AI 协同编辑，每种资源只保留一份最终结果）。
 summary: DSH 中通过明确教学状态和学习证据管理 Goal、Course、Lesson、Review 与 Knowledge Graph。
 ---
 
@@ -9,12 +9,12 @@ summary: DSH 中通过明确教学状态和学习证据管理 Goal、Course、Le
 1. 首先调用 `tutor_read({})` 查询已有 Goal/Course，不猜测学习进度。返回的 `resume`（或带 `courseId` 时的单个 resume）是续学指针：当前课时、段、未完成的开放题（全文、已答次数、是否给过提示）、上次要点 `recap`。**新对话先帮学习者回忆上次要点，若有 pendingQuestion 就继续同一道题，不要另出一题。** `workspace` 标明当前工作区的学习库；打开工作区 A 看不到 B 的进度。
 2. 新目标使用 `tutor_write({action:'goal.create',payload_json:JSON.stringify({title,expectedOutcome})})`，然后 `course.create`。
 3. 从用户背景、目标和真正读取的资料提出大纲。写入 `course.plan`（新课程 `syllabusRevision: 0`；改已有大纲必须带 `reason`）后，**默认展示大纲，请学习者在右侧栏「AI 学习工作台」点「批准大纲」**。只有学习者明确说「交给你」「跳过批准」或要求你代为批准时，才可以调用 `course.approve {courseId,syllabusRevision,consent}`（`consent` 填学习者的原话）；也可在工作台打开「交给 AI 批准」（`course.setApproval`）后由你代批。**禁止自行批准。** 无论谁批，都必须对上当前大纲修订号（CAS）。用 `tutor_read` 看 `course.status` 是否已变成 `active`。结果里的 `links[].markdown` 要原样贴给学习者，不要自己拼 URL。
-4. `tutor_visualize({courseId,view})` 的 view 为 `outline` / `mindmap` / `graph` / `board`（只读投影）。在 DSH web 中结果会在对话里画成图形卡片，并同步显示在右侧栏「AI 学习工作台」，**不要**再用 ASCII 树、Mermaid 源码或表格重画一遍。`graph` 返回知识节点及已提出的关系候选。`relation.propose` 永远只创建 `candidate`，不得当成确认事实。
+4. `tutor_visualize({courseId,view})` 的 view 为 `outline` / `mindmap` / `graph` / `board`（只读投影）。在 DSH web 中结果会在对话里画成图形卡片，并同步显示在右侧栏「AI 学习工作台」，**不要**再用 ASCII 树、Mermaid 源码或表格重画一遍。大纲回答「教什么、按什么顺序」；思维导图和知识图谱是独立资源，用从属或引用关联，不和大纲绑成同一棵树。`graph` 返回图谱节点（可引用知识点）及已提出的关系候选。`relation.propose` 永远只创建 `candidate`，不得当成确认事实。
 5. `lesson.create` 的 payload: `{courseId,title,topicId?,conceptIds?,parts:[{title,objective,conceptIds?}]}`。有 `topicId` 但没有 conceptIds 时，会挂上该主题下全部在用知识点。展示规划，默认请学习者在工作台点 **批准课时计划**；同样仅在学习者说「交给你」「跳过批准」或已交出批准权时，才可调用 `lesson.approve {lessonId,planRevision,consent}`。看到 `phase: teaching` 后再开讲。
 6. 教学以一个 Part 为单位，写入 `lesson.partWrite` 的 `{lessonId,partIndex,body,sourceRefs?}`。**新的 sourceRefs 必须是已登记资料的 `{sourceId,locator}`**（locator 如 `p.12`、`第12页`、`01:30`），旧的自由文本出处仍可读取但不要再写。等学习者提问或确认后再 `lesson.cover`，不能把阅读视作掌握。出题用 `lesson.ask`，提示用 `lesson.hint`，记下要点用 `lesson.checkpoint`。
 7. Review 用真实回答：`assessment.record` payload `{lessonId,conceptId,question,studentAnswer,feedback,score,transfer,hintCount}`。**任何回答都不得由 Agent 假造**。这里的状态是 `model-unverified` 暂定证据，不是校准概率。
-8. 然后 `lesson.reviewEnd({lessonId,skipped?:boolean})`。按学习者选择写 `note.add`（可带 `conceptIds`，笔记会出现在知识点详情，也可放到白板）或 `lesson.finish` 时 `skipNotes:true`。`lesson.finish` 之后进入 **课末反馈**（`feedback_pending`）：收集反馈，可选按反馈改大纲（`lesson.feedback {lessonId,feedback,adjustOutline:true}` → `plan_adjustment_pending`）。用 `tutor_outline_edit`（必须带 `reason`）改大纲，**仍然需要一次明确的批准**（学习者点按钮，或在其要求下由你代批），再 `lesson.adjustDone`（或批准时自动继续），并可附带下一课预告 `nextPreview`。流程是：反馈 → 调整 → 批准 → 继续。
-9. 调整大纲 / 思维导图（两者是同一份层级数据）：优先用 `tutor_outline_edit`，先 `tutor_visualize(outline)` 取 id 和 `syllabusRevision`（**必填**），再提交原子操作（addTopic / renameTopic / moveTopic / removeTopic / addSubtopic / renameSubtopic / moveSubtopic / removeSubtopic），**必须带 reason**（会和中文 diff 一起显示在工作台和工具回执里）。**新建主题或知识点不要自带 id**，id 由内核分配；只回传内核给出的 id。移动优先用 `beforeId`。大纲只有两层（主题 → 知识点）。任何修改都会让大纲回到待批准。删除知识点只会退役，不删除答题记录。学习者也可能在工作台里手动改过，冲突时重新读取再判断。
+8. 然后 `lesson.reviewEnd({lessonId,skipped?:boolean})`。按学习者选择写 `note.add`（可带 `conceptIds` 或更宽的 `anchors:[{type,id}]`，type 为 concept|topic|mindmapNode|graphNode|relation|lesson；笔记也可挂在导图/图谱扩展节点上）或 `lesson.finish` 时 `skipNotes:true`。`lesson.finish` 之后进入 **课末反馈**（`feedback_pending`）：收集反馈，可选按反馈改大纲（`lesson.feedback {lessonId,feedback,adjustOutline:true}` → `plan_adjustment_pending`）。用 `tutor_outline_edit`（必须带 `reason`）改大纲，**仍然需要一次明确的批准**（学习者点按钮，或在其要求下由你代批），再 `lesson.adjustDone`（或批准时自动继续），并可附带下一课预告 `nextPreview`。流程是：反馈 → 调整 → 批准 → 继续。
+9. 大纲和思维导图是独立资源，不要当成同一份数据。改大纲用 `tutor_outline_edit`：先 `tutor_visualize(outline)` 取 id 和 `syllabusRevision`（**必填**），再提交原子操作（addTopic / renameTopic / moveTopic / removeTopic / addSubtopic / renameSubtopic / moveSubtopic / removeSubtopic），**必须带 reason**。大纲是两层树（主题 → 子主题），子主题用 `conceptIds` 引用知识点，二者不是同一个对象。新建主题或子主题不要自带 id。任何大纲修改都要重新批准。从大纲去掉一个子主题**不会**退役该知识点（作答和复习仍保留）。改思维导图用 `tutor_mindmap_edit`（先 `tutor_visualize(mindmap)` 取节点 id 和 `mindmapRevision`）；深度不限，可在某个知识点下加研究方法、易错点等扩展节点，这些节点不是考点。值得测验和复习时，用 `tutor_concept_promote`（或 `concept.promote`）升格为知识点，不会自动写入大纲。学习者也可能在工作台里手动改过，冲突时重新读取再判断。
 10. 课程白板：先 `tutor_board_read` 取 `revision` 和元素 id，再 `tutor_board_patch({courseId, baseRevision, operations})`（`baseRevision` 必填）。元素 id 只来自 `tutor_board_read`；新卡片/便签/箭头**不带 id**，由内核分配，同一批里要引用新卡片时给它 `ref:"n1"`，再用 `"$n1"` 指向它。`seed:true` 补齐缺失的知识点卡片和候选关系箭头；被人手动删掉的关系箭头不会被补回，随卡片级联删除的会随卡片一起补回。从大纲删掉的知识点，卡片保留为虚线（stale），需要时手动删。颜色只接受 `#rgb` / `#rrggbb`。白板箭头只是视觉连线，语义关系要另用 `relation.propose`。禁止从坐标远近推断关系。外部 `dsh-whiteboard`（Excalidraw）若已安装，仍需 `whiteboard_list`/`whiteboard_read` 后再 patch，不会与课程白板自动同步。
 11. 数据查询与待办：学习数据（大纲、导图、图谱、白板、表格、进度、作答、复习卡、笔记、待办）存在 `$DSH_HOME/oh-my-ai-tutor/<workspace-key>/tutor.db`，按会话不可变的工作区路径（`SessionHeader.cwd`）隔离；没有工作区时回退到 `$DSH_HOME/oh-my-ai-tutor/tutor.db`。工作区目录里只放教材等素材，不要把主库建在项目里的 `.oh-my-ai-tutor`。可用配置 `dbPath` 指定单一库。打开工作区 A 只碰到 A 的库。工作台「数据」标签页直接查当前库。统计类问题（哪些知识点平均分最低、这周有什么到期）用 `tutor_table_query({sql, limit?})`：只读、只能一条 SELECT、只能查 `v_*` 视图、最多 200 行，写语句会被拒绝。待办用 `tutor_todo`：`op:"create"` 传 `{courseId,title,dueAt?,conceptId?,note?}`，`op:"update"` 传 `{id,baseRevision,status?/dueAt?/…}`，`baseRevision` 是这条待办自己的 revision；冲突时重新查询（学习者可能刚勾掉），不要盲目重试。时间用带时区偏移的 ISO（学习者默认在 America/Phoenix，如 `2026-11-12T19:00:00-07:00`）。只建学习者要求或同意的待办；不会发系统通知，也不会同步到滴答清单。若学习者要对话里的提醒，可以另用 `schedule_create`，提醒可能重复送达，措辞要能容忍重复（如「如果已经完成可以忽略」）。
 12. 复习排期（FSRS）：每个知识点有一张复习卡（`v_review_cards`：`due_at` 为下次复习时间，`state` 为 new 时尚未排期；历史在 `v_review_logs`）。用 `tutor_write` 的 `assessment.record` 记录的作答会自动按得分重新排期，不要再为同一次作答评分。只有学习者在对话里真实回忆/回答了某个知识点（不是你讲解的内容）时，才用 `tutor_review_rate({conceptId,rating,baseRevision,evidence})`：rating 1 忘了 / 2 吃力 / 3 想起来了 / 4 轻松，`baseRevision` 是这张卡自己的 revision（先用 `tutor_table_query` 查 `v_review_cards`），`evidence` 写一句依据。冲突说明学习者刚在工作台评过分，重新查询后再决定，不要盲目重试。复习排期只在工作台显示，不发通知、不同步滴答清单，也不要为复习另建 `schedule_create`。
@@ -44,8 +44,13 @@ summary: DSH 中通过明确教学状态和学习证据管理 Goal、Course、Le
 | `lesson.checkpoint` | `{lessonId,recap}` |
 | `assessment.record` | `{lessonId,conceptId,question,studentAnswer,feedback,score,transfer,hintCount?,questionId?,close?}` |
 | `lesson.reviewEnd` | `{lessonId,skipped?}` |
-| `note.add` | `{lessonId,title,content,conceptIds?,sourceRefs?}`；作者由调用方决定（你写的笔记就是 AI 笔记） |
-| `note.link` | `{noteId,conceptIds}` |
+| `note.add` | `{lessonId?,courseId?,title,content,conceptIds?,anchors?,sourceRefs?}`；anchors 为 `[{type,id}]`（concept|topic|mindmapNode|graphNode|relation|lesson）；作者由调用方决定 |
+| `note.link` | `{noteId,conceptIds?,anchors?}` |
+| `mindmap.edit` | `{courseId,mindmapRevision,operations}`，同 `tutor_mindmap_edit` |
+| `concept.promote` | `{courseId,from:{type:"mindmapNode"|"graphNode",id},title?,description?}`，同 `tutor_concept_promote` |
+| `concept.create` | `{courseId,title,description?,topicId?}` |
+| `concept.rename` | `{conceptId,title}` |
+| `graphNode.add` | `{courseId,title,refersTo?,belongsTo?}` |
 | `lesson.finish` | `{lessonId,skipNotes?}`；之后进入 feedback_pending |
 | `lesson.feedback` | `{lessonId,feedback,adjustOutline?,nextPreview?}` 或 `{lessonId,skipped:true}` |
 | `lesson.adjustDone` | `{lessonId,nextPreview?,skipped?}`；大纲已改且已批准后继续 |

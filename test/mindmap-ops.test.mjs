@@ -1,8 +1,9 @@
-// Mind-map gestures (mind-elixir) → course.editOutline ops, replayed against the real core.
+// Mind-map gestures (mind-elixir) → mindmap.edit ops, replayed against the real core.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { newState, transition } from '../src/core.mjs';
-import { toMindData, indexHierarchy, gestureToOps, TWO_LEVELS } from '../src/client/mindmap-ops.mjs';
+import { toMindData, indexHierarchy, gestureToOps } from '../src/client/mindmap-ops.mjs';
+import { mindmapHierarchy, skeletonMindNodeId } from '../src/resources.mjs';
 
 function seed() {
   let state = newState();
@@ -15,57 +16,71 @@ function seed() {
     { title: 'T3', subtopics: [{ title: 'f' }] },
   ] });
   const c = () => state.courses[course.id];
-  const h = () => ({ id: c().id, title: c().title, children: c().syllabus.topics.map((t) => ({ id: t.id, title: t.title, children: t.subtopics.map((s) => ({ id: s.id, title: s.title })) })) });
+  const mm = () => state.mindmaps[course.id];
+  const h = () => mindmapHierarchy(mm(), c());
   const gesture = (name, args) => {
     const res = gestureToOps(indexHierarchy(h()), name, args);
     if (res.refuse !== undefined) return res;
-    run('course.editOutline', { courseId: c().id, syllabusRevision: c().syllabus.revision, operations: res.ops }, 'learner');
+    run('mindmap.edit', { courseId: c().id, mindmapRevision: mm().revision, operations: res.ops }, 'learner');
     return res;
   };
-  const titles = () => c().syllabus.topics.map((t) => `${t.title}:${t.subtopics.map((s) => s.title).join('')}`).join(' ');
-  return { c, h, gesture, titles, state: () => state };
+  const titles = () => {
+    const tree = h();
+    return tree.children.map((t) => `${t.title}:${t.children.map((s) => s.title).join('')}`).join(' ');
+  };
+  return { c, h, mm, gesture, titles, state: () => state, run, courseId: course.id };
 }
 
-test('toMindData keeps syllabus ids and two levels', () => {
+test('toMindData uses mind-map ids and can nest deeper than two levels', () => {
   const ctx = seed();
   const d = toMindData(ctx.h());
-  assert.equal(d.nodeData.id, ctx.c().id);
+  assert.equal(d.nodeData.id, ctx.mm().rootId);
   assert.equal(d.nodeData.children.length, 3);
-  assert.equal(d.nodeData.children[0].children[1].id, ctx.c().syllabus.topics[0].subtopics[1].id);
-  assert.ok(d.nodeData.children.every((t) => t.children.every((s) => !s.children)));
+  const t1 = ctx.c().syllabus.topics[0];
+  assert.equal(d.nodeData.children[0].id, skeletonMindNodeId(t1.id));
+  assert.equal(d.nodeData.children[0].children[1].id, skeletonMindNodeId(t1.subtopics[1].id));
+  ctx.gesture('addChild', { parentId: skeletonMindNodeId(t1.subtopics[0].id), title: '扩展' });
+  const d2 = toMindData(ctx.h());
+  const a = d2.nodeData.children[0].children[0];
+  assert.equal(a.children[0].topic, '扩展');
 });
 
-test('move before / after / in, step, rename, add and remove become outline ops', () => {
+test('move, step, rename, add and remove edit the mind map and leave the outline alone', () => {
   const ctx = seed();
-  const [t1, t2, t3] = ctx.c().syllabus.topics; const [a, b, c] = t1.subtopics;
-  ctx.gesture('move', { where: 'after', ids: [a.id], target: b.id });
+  const outlineBefore = JSON.stringify(ctx.c().syllabus.topics);
+  const [t1, t2, t3] = ctx.c().syllabus.topics;
+  const [a, b, c] = t1.subtopics.map((s) => skeletonMindNodeId(s.id));
+  const t1n = skeletonMindNodeId(t1.id), t2n = skeletonMindNodeId(t2.id), t3n = skeletonMindNodeId(t3.id);
+  ctx.gesture('move', { where: 'after', ids: [a], target: b });
   assert.equal(ctx.titles(), 'T1:bac T2:e T3:f');
-  ctx.gesture('move', { where: 'before', ids: [c.id], target: t2.subtopics[0].id });
+  ctx.gesture('move', { where: 'before', ids: [c], target: skeletonMindNodeId(t2.subtopics[0].id) });
   assert.equal(ctx.titles(), 'T1:ba T2:ce T3:f');
-  ctx.gesture('move', { where: 'in', ids: [b.id], target: t3.id });
+  ctx.gesture('move', { where: 'in', ids: [b], target: t3n });
   assert.equal(ctx.titles(), 'T1:a T2:ce T3:fb');
-  ctx.gesture('move', { where: 'before', ids: [t3.id], target: t1.id });
+  ctx.gesture('move', { where: 'before', ids: [t3n], target: t1n });
   assert.equal(ctx.titles(), 'T3:fb T1:a T2:ce');
-  ctx.gesture('step', { id: t3.id, dir: 1 });
+  ctx.gesture('step', { id: t3n, dir: 1 });
   assert.equal(ctx.titles(), 'T1:a T3:fb T2:ce');
-  ctx.gesture('rename', { id: a.id, title: 'A' });
-  ctx.gesture('addChild', { parentId: t1.id });
-  assert.equal(ctx.titles(), 'T1:A新知识点 T3:fb T2:ce');
-  ctx.gesture('insertSibling', { id: t3.id, position: 'before' });
-  assert.equal(ctx.titles(), 'T1:A新知识点 新主题:新知识点 T3:fb T2:ce');
-  ctx.gesture('remove', { ids: [t2.id, t2.subtopics[0].id] }); // topic removal covers its points
-  assert.equal(ctx.titles(), 'T1:A新知识点 新主题:新知识点 T3:fb');
-  assert.ok(ctx.state().events.slice(-8).every((e) => e.actor === 'learner'));
+  ctx.gesture('rename', { id: a, title: 'A' });
+  ctx.gesture('addChild', { parentId: t1n });
+  assert.equal(ctx.titles(), 'T1:A新节点 T3:fb T2:ce');
+  ctx.gesture('insertSibling', { id: t3n, position: 'before' });
+  assert.match(ctx.titles(), /T1:A新节点 新节点: T3:fb T2:ce/);
+  ctx.gesture('remove', { ids: [t2n] });
+  assert.match(ctx.titles(), /T1:A新节点 新节点: T3:fb$/);
+  assert.equal(JSON.stringify(ctx.c().syllabus.topics), outlineBefore, 'outline unchanged');
+  assert.ok(ctx.state().events.filter((e) => e.action === 'mindmap.edit').every((e) => e.actor === 'learner'));
 });
 
-test('a third level and root edits are refused', () => {
+test('a third level under a knowledge-point node is allowed; root cannot be deleted', () => {
   const ctx = seed();
-  const [t1, t2] = ctx.c().syllabus.topics; const a = t1.subtopics[0];
-  assert.equal(ctx.gesture('addChild', { parentId: a.id }).refuse, TWO_LEVELS);
-  assert.equal(ctx.gesture('move', { where: 'in', ids: [t1.id], target: t2.id }).refuse, TWO_LEVELS);
-  assert.equal(ctx.gesture('move', { where: 'in', ids: [a.id], target: t1.subtopics[1].id }).refuse, TWO_LEVELS);
-  assert.ok(ctx.gesture('move', { where: 'before', ids: [a.id], target: t2.id }).refuse);
-  assert.ok(ctx.gesture('rename', { id: ctx.c().id, title: 'x' }).refuse);
-  assert.ok(ctx.gesture('remove', { ids: [ctx.c().id] }).refuse);
-  assert.equal(ctx.titles(), 'T1:abc T2:e T3:f');
+  const [t1] = ctx.c().syllabus.topics;
+  const a = skeletonMindNodeId(t1.subtopics[0].id);
+  const outlineBefore = JSON.stringify(ctx.c().syllabus.topics);
+  const res = ctx.gesture('addChild', { parentId: a, title: '极限定义法' });
+  assert.equal(res.refuse, undefined);
+  const child = ctx.h().children[0].children[0].children[0];
+  assert.equal(child.title, '极限定义法');
+  assert.equal(JSON.stringify(ctx.c().syllabus.topics), outlineBefore);
+  assert.ok(ctx.gesture('remove', { ids: [ctx.mm().rootId] }).refuse);
 });

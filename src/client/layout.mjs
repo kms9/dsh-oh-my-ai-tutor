@@ -178,6 +178,9 @@ export const ACTION_LABEL = {
   'lesson.reviewEnd': '结束复习', 'note.add': '添加笔记', 'note.link': '关联笔记知识点', 'lesson.finish': '结课',
   'lesson.feedback': '课末反馈', 'lesson.adjustDone': '完成大纲调整', 'course.setApproval': '设置批准方式',
   'relation.propose': '提出候选关系',
+  'mindmap.ensure': '生成思维导图', 'mindmap.edit': '编辑思维导图',
+  'graphNode.add': '添加图谱节点', 'graphNode.rename': '重命名图谱节点', 'graphNode.remove': '删除图谱节点',
+  'concept.create': '新增知识点', 'concept.promote': '升格为知识点', 'concept.rename': '重命名知识点',
   'board.seed': '生成白板', 'board.patch': '编辑白板', 'todo.create': '添加待办', 'todo.update': '更新待办', 'review.rate': '复习评分',
 };
 export function relTime(iso, now = Date.now()) {

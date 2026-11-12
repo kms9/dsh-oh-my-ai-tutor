@@ -12,12 +12,17 @@ export function buildGraph(view, topics) {
   const topicOf = new Map();
   topics.forEach((t, i) => {
     nodes.push({ id: `topic:${t.id}`, kind: 'topic', topicId: t.id, topicIndex: i, label: t.title });
-    for (const s of t.subtopics) topicOf.set(s.conceptId, t.id);
+    for (const s of t.subtopics) {
+      const ids = Array.isArray(s.conceptIds) && s.conceptIds.length ? s.conceptIds : (s.conceptId ? [s.conceptId] : []);
+      for (const cid of ids) topicOf.set(cid, t.id);
+    }
   });
   const index = new Map(topics.map((t, i) => [t.id, i]));
   for (const n of view.nodes) {
-    const tid = topicOf.get(n.id) ?? n.topicId;
-    nodes.push({ id: n.id, kind: 'concept', topicId: tid, topicIndex: index.get(tid) ?? 0, label: n.label, mastery: n.mastery });
+    const conceptId = n.conceptId ?? n.refersTo ?? null;
+    const tid = (conceptId && topicOf.get(conceptId)) ?? n.topicId ?? (n.belongsTo?.type === 'topic' ? n.belongsTo.id : undefined);
+    const kind = conceptId ? 'concept' : 'extension';
+    nodes.push({ id: n.id, kind, topicId: tid, topicIndex: index.get(tid) ?? 0, label: n.label, mastery: n.mastery, conceptId, refersTo: n.refersTo ?? conceptId });
     if (index.has(tid)) edges.push({ id: `in:${n.id}`, kind: 'contains', source: `topic:${tid}`, target: n.id });
   }
   const ids = new Set(nodes.map((n) => n.id));
@@ -32,9 +37,9 @@ export function buildGraph(view, topics) {
  */
 export function visibleGraph(graph, collapsed = new Set()) {
   const hidden = new Map(); // conceptId → topic node id
-  for (const n of graph.nodes) if (n.kind === 'concept' && collapsed.has(n.topicId)) hidden.set(n.id, `topic:${n.topicId}`);
+  for (const n of graph.nodes) if (n.kind !== 'topic' && n.topicId && collapsed.has(n.topicId)) hidden.set(n.id, `topic:${n.topicId}`);
   const nodes = graph.nodes.filter((n) => !hidden.has(n.id)).map((n) => n.kind === 'topic'
-    ? { ...n, collapsed: collapsed.has(n.topicId), count: graph.nodes.filter((c) => c.kind === 'concept' && c.topicId === n.topicId).length } : n);
+    ? { ...n, collapsed: collapsed.has(n.topicId), count: graph.nodes.filter((c) => c.kind !== 'topic' && c.topicId === n.topicId).length } : n);
   const seen = new Map();
   for (const e of graph.edges) {
     if (e.kind === 'contains' && hidden.has(e.target)) continue;

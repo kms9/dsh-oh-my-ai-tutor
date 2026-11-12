@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { newState, validateState, transition } from './core.mjs';
+import { normalizeState } from './resources.mjs';
 
 const queues = new Map();
 export function defaultStatePath() {
@@ -15,7 +16,7 @@ export class JsonTutorStore {
     try {
       const bytes = await readFile(this.path, 'utf8');
       if (bytes.length > 16_000_000) throw new Error('Tutor data exceeds 16MB; use the default SQLite store (tutor.db) instead of storage: json');
-      return validateState(JSON.parse(bytes));
+      return normalizeState(validateState(JSON.parse(bytes)));
     } catch (e) {
       if (e.code === 'ENOENT') return newState();
       throw e;

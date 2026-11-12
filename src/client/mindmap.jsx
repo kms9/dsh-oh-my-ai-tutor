@@ -1,7 +1,7 @@
 import React, { useEffect, useImperativeHandle, useRef, forwardRef } from 'react';
 // Full ESM build (≈150 KB raw / ≈38 KB gzip before minify). The "lite" build has no node selection, which the editor needs.
 import MindElixir from 'mind-elixir';
-import { PALETTE, TWO_LEVELS, toMindData, indexHierarchy, gestureToOps } from './mindmap-ops.mjs';
+import { PALETTE, toMindData, indexHierarchy, gestureToOps } from './mindmap-ops.mjs';
 
 export { toMindData, indexHierarchy, gestureToOps };
 
@@ -19,17 +19,18 @@ const THEME = {
 };
 /**
  * mind-elixir as a pure renderer + gesture collector. The library never owns course data: every structural
- * gesture is vetoed in its `before` hooks and replayed as course.editOutline ops (actor = learner, with the
- * syllabusRevision that was on screen when the gesture began). AI edits arrive through props and are applied
+ * gesture is vetoed in its `before` hooks and replayed as mindmap.edit ops (actor = learner, with the
+ * mind-map revision that was on screen when the gesture began). AI edits arrive through props and are applied
  * with refresh() only when no gesture or submit is in flight, so a drag / rename is never interrupted.
  */
 /** Smallest zoom "fit" may use: 13 px topics stay ≥ 10 px. Bigger maps keep this size and are panned (drag the background / wheel) or enlarged. */
 export const MIN_READABLE_SCALE = 0.8;
-export const MindElixirMap = forwardRef(function MindElixirMap({ hierarchy, syllabusRevision, direction = 'side', submit, notify, onSelect, onFit, selectedId, height = 520 }, ref) {
+export const MindElixirMap = forwardRef(function MindElixirMap({ hierarchy, mapRevision, syllabusRevision, direction = 'side', submit, notify, onSelect, onFit, selectedId, height = 520 }, ref) {
   const elRef = useRef(null);
   const meRef = useRef(null);
-  const st = useRef({ shownRev: syllabusRevision, pointer: false, editing: false, submitting: false, pending: null, expanded: new Map(), userZoomed: false, index: indexHierarchy(hierarchy), key: '' });
-  const props = useRef({}); props.current = { hierarchy, syllabusRevision, submit, notify, onSelect, onFit, direction };
+  const revOf = (r) => (r !== undefined && r !== null ? r : 0);
+  const st = useRef({ shownRev: revOf(mapRevision ?? syllabusRevision), pointer: false, editing: false, submitting: false, pending: null, expanded: new Map(), userZoomed: false, index: indexHierarchy(hierarchy), key: '' });
+  const props = useRef({}); props.current = { hierarchy, mapRevision: mapRevision ?? syllabusRevision, submit, notify, onSelect, onFit, direction };
 
   const find = (id) => { try { return meRef.current?.findEle(id) ?? null; } catch { return null; } }; // findEle throws when absent
   const fit = () => {
@@ -102,12 +103,12 @@ export const MindElixirMap = forwardRef(function MindElixirMap({ hierarchy, syll
   useEffect(() => {
     const me = new MindElixir({
       el: elRef.current, direction: MM_DIRECTIONS[direction] ?? MindElixir.SIDE, editable: true, contextMenu: false, toolBar: false,
-      allowUndo: false, overflowHidden: false, alignment: 'root', theme: THEME, newTopicName: '新知识点',
+      allowUndo: false, overflowHidden: false, alignment: 'root', theme: THEME, newTopicName: '新节点',
       keypress: { Backspace: () => {} }, // only Delete removes nodes (an accidental Backspace never deletes a topic)
       before: {
         addChild: (el) => { const pid = (el ?? me.currentNode)?.nodeObj?.id; if (pid) run('addChild', { parentId: pid }); return false; },
         insertSibling: (type, el) => { const id = (el ?? me.currentNode)?.nodeObj?.id; if (id) run('insertSibling', { id, position: type }); return false; },
-        insertParent: () => { props.current.notify?.(TWO_LEVELS, true); return false; },
+        insertParent: (el) => { const id = (el ?? me.currentNode)?.nodeObj?.id; if (id) run('insertParent', { id }); return false; },
         copyNodes: () => false, reshapeNode: () => false, setNodeTopic: () => false, rmSubline: () => false,
         removeNodes: (tpcs) => { run('remove', { ids: (tpcs ?? []).map((t) => t.nodeObj.id) }); return false; },
         moveUpNode: (el) => { const id = (el ?? me.currentNode)?.nodeObj?.id; if (id) run('step', { id, dir: -1 }); return false; },
@@ -121,7 +122,7 @@ export const MindElixirMap = forwardRef(function MindElixirMap({ hierarchy, syll
     meRef.current = me;
     const s = st.current;
     me.init(toMindData(hierarchy));
-    s.key = JSON.stringify(hierarchy); s.shownRev = syllabusRevision;
+    s.key = JSON.stringify(hierarchy); s.shownRev = revOf(mapRevision ?? syllabusRevision);
     me.bus.addListener('operation', async (op) => {
       if (op.name === 'beginEdit') {
         s.editing = true;
@@ -133,14 +134,14 @@ export const MindElixirMap = forwardRef(function MindElixirMap({ hierarchy, syll
         s.editing = false;
         const lock = s.editLockRev ?? s.shownRev;
         const res = gestureToOps(s.index, 'rename', { id, title });
-        if (res.refuse !== undefined || !title || title.length > 160) { if (res.refuse) props.current.notify?.(res.refuse, true); s.key = ''; apply(props.current.hierarchy, props.current.syllabusRevision); return; }
+        if (res.refuse !== undefined || !title || title.length > 160) { if (res.refuse) props.current.notify?.(res.refuse, true); s.key = ''; apply(props.current.hierarchy, props.current.mapRevision); return; }
         s.submitting = true;
         let ok = false;
         try { ok = await props.current.submit(res.ops, res.summary, lock, { draft: true }); }
         finally { s.submitting = false; }
         if (!ok) {
           // keep the learner's draft: show the latest outline, then reopen the editor on that node with the draft text
-          s.key = ''; s.pending = null; apply(props.current.hierarchy, props.current.syllabusRevision);
+          s.key = ''; s.pending = null; apply(props.current.hierarchy, props.current.mapRevision);
           const el = find(id);
           if (el) { me.selectNode(el); me.beginEdit(el); requestAnimationFrame(() => { const box = me.container.querySelector('#input-box'); if (box) box.textContent = title; }); }
         } else flush();
@@ -177,9 +178,9 @@ export const MindElixirMap = forwardRef(function MindElixirMap({ hierarchy, syll
   // AI / other-window edits: apply now, or right after the current gesture / submit.
   useEffect(() => {
     const s = st.current;
-    s.pending = { h: hierarchy, rev: syllabusRevision };
+    s.pending = { h: hierarchy, rev: mapRevision ?? syllabusRevision };
     flush();
-  }, [hierarchy, syllabusRevision]);
+  }, [hierarchy, mapRevision, syllabusRevision]);
 
   useEffect(() => {
     const me = meRef.current; if (!me) return;
@@ -201,5 +202,5 @@ export const MindElixirMap = forwardRef(function MindElixirMap({ hierarchy, syll
     run,
   }));
 
-  return <div className="mm-elixir" ref={elRef} style={{ height }} data-testid="mindmap-elixir" data-direction={direction} data-revision={syllabusRevision} />;
+  return <div className="mm-elixir" ref={elRef} style={{ height }} data-testid="mindmap-elixir" data-direction={direction} data-revision={mapRevision ?? syllabusRevision} />;
 });

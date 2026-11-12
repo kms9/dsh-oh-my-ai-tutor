@@ -1,4 +1,5 @@
 import { snapshot, SOURCE_KINDS, OUTLINE_OPS, liveBoard, sinceApproved, refsView } from './core.mjs';
+import { MINDMAP_OPS } from './resources.mjs';
 import { projectCourse } from './projections.mjs';
 import { linksFor, parseLocator } from './links.mjs';
 import { SqliteTutorStore } from './sqlite-store.mjs';
@@ -15,6 +16,8 @@ export const WRITE_ACTIONS = Object.freeze([
   'lesson.ask', 'lesson.hint', 'lesson.dropQuestion', 'lesson.checkpoint', 'assessment.record',
   'lesson.reviewEnd', 'note.add', 'note.link', 'lesson.finish', 'lesson.feedback', 'lesson.adjustDone',
   'relation.propose', 'board.seed', 'board.patch',
+  'mindmap.ensure', 'mindmap.edit', 'graphNode.add', 'graphNode.rename', 'graphNode.remove',
+  'concept.create', 'concept.promote', 'concept.rename',
 ]);
 
 /** Clickable links for whatever a write touched (internal → workbench, sources → their URI + locator). */
@@ -40,7 +43,9 @@ export function linksForWrite(state, action, payload, result) {
     if (action === 'lesson.partWrite') want.sourceRefs = lesson.parts[payload.partIndex]?.sourceRefs ?? [];
   }
   if (note && (action === 'note.add' || action === 'note.link')) { want.noteIds = [note.id]; want.conceptIds = note.conceptIds; want.sourceRefs = note.sourceRefs; }
-  if (action === 'relation.propose') want.conceptIds = [payload.from, payload.to];
+  if (action === 'relation.propose') want.conceptIds = [payload.from, payload.to].filter(Boolean);
+  if (action === 'concept.promote' || action === 'concept.create') want.conceptIds = [result?.conceptId ?? result?.id].filter(Boolean);
+  if (action.startsWith('mindmap.')) want.outline = false;
   if (action.startsWith('board.')) want.elementIds = (result?.touched ?? []).slice(0, 12);
   return linksFor(state, courseId, want);
 }
@@ -65,6 +70,18 @@ export const OUTLINE_OP_SCHEMA = { oneOf: [
   op('moveSubtopic', { subtopicId: req(str()), toTopicId: str('Target topic id (default: same topic).'), beforeId: str('Place before this knowledge point id (resolved after removal, so it never lands one slot late).'), toIndex: int('0-based position in the resulting list (prefer beforeId).') }),
   op('removeSubtopic', { subtopicId: req(str()) }),
 ] };
+const mmOp = (name, properties, description) => ({ type: 'object', additionalProperties: false, ...(description ? { description } : {}),
+  properties: { op: { type: 'string', const: name, required: true }, ...properties } });
+export const MINDMAP_OP_SCHEMA = { oneOf: [
+  mmOp('addChild', { parentId: req(str()), title: str(), belongsTo: { type: 'object' }, index: int() }),
+  mmOp('insertSibling', { id: req(str()), position: str(), title: str(), belongsTo: { type: 'object' } }),
+  mmOp('insertParent', { id: req(str()), title: str(), belongsTo: { type: 'object' } }),
+  mmOp('remove', { ids: { type: 'array', items: { type: 'string' } }, id: str() }),
+  mmOp('move', { ids: { type: 'array', items: { type: 'string' } }, id: str(), target: req(str()), where: req(str()) }),
+  mmOp('rename', { id: req(str()), title: req(str()) }),
+  mmOp('setBelongsTo', { id: req(str()), belongsTo: { type: 'object' } }),
+] };
+
 const coord = { type: 'number', description: 'Canvas pixels; clamped to [0, 20000].' };
 const color = str('"#rgb", "#rrggbb" or "" (default).');
 const ref = str('Batch-local name for this new card (letters/digits/_-). Later operations in the SAME batch may refer to it as "$name".');
@@ -103,7 +120,7 @@ export function toolSpecs(storeOrResolve) {
       description: 'Persist a real learner tutoring event in the durable tutor domain. Read the state first; only use approved transitions. payload_json is a JSON object string for the chosen action (see the oh-my-ai-tutor skill). '
         + `source.register: {title, uri, kind?} where kind is one of ${SOURCE_KINDS.join(' | ')} (an article/web page is "web"; anything else is stored as "other"). `
         + 'course.plan: {courseId, syllabusRevision, topics:[{id?, title, subtopics:[{id?, title}]}]} — syllabusRevision is required (0 for a new course; otherwise from tutor_visualize(outline)); NEW topics/subtopics must NOT carry an id (the store assigns ids); existing items you do not mention are KEPT (remove them with tutor_outline_edit). '
-        + 'For outline/mind-map edits prefer tutor_outline_edit; changing an existing outline needs reason (shown with the diff). '
+        + 'For syllabus edits prefer tutor_outline_edit (changing an existing outline needs reason, shown with the diff). For the mind map use tutor_mindmap_edit (it does not change the outline). concept.promote {courseId, from:{type:"mindmapNode"|"graphNode", id}, title?} turns an extension node into a knowledge point (quiz/review); it is not added to the syllabus. '
         + 'Approvals: by default show the outline / lesson plan and ask the learner to approve (批准 in the AI 学习工作台). Call course.approve {courseId, syllabusRevision, consent} / lesson.approve {lessonId, planRevision, consent} yourself ONLY when the learner told you to (consent = their words, e.g. 「交给你」「跳过批准」), or after course.setApproval {courseId, mode:"delegated", consent} recorded a standing delegation. Never approve on your own initiative. '
         + 'lesson.create {courseId, title, topicId?, conceptIds?, parts:[{title, objective, conceptIds?}]} ties the lesson to the outline. sourceRefs are [{sourceId, locator?}] of registered sources (locator like "p.12" or "01:30"). '
         + LINK_RULE
@@ -140,9 +157,9 @@ export function toolSpecs(storeOrResolve) {
     },
     {
       name: 'tutor_visualize',
-      description: 'Project one course as syllabus outline, mind map, semantic knowledge graph, or the editable course board (read-only view; edit with tutor_outline_edit / tutor_board_patch). '
+      description: 'Project one course as syllabus outline, mind map, semantic knowledge graph, or the editable course board (read-only view). '
         + 'In DSH web the result is drawn as a graphic card in the chat and the same data is live in the "AI 学习工作台" right-sidebar tab, so do NOT redraw it as ASCII, Mermaid or tables in your reply; just summarise what changed or matters. '
-        + 'The mind map is the syllabus hierarchy (edit it with tutor_outline_edit); the board is edited with tutor_board_patch.',
+        + 'The outline answers what is taught and in what order (edit with tutor_outline_edit, approval required). The mind map is an independent thinking structure (edit with tutor_mindmap_edit; no outline approval). The graph has its own nodes, which may refer to knowledge points. The board is edited with tutor_board_patch.',
       parameters: {
         courseId: { type: 'string', required: true },
         view: { type: 'string', enum: VIEWS, required: true },
@@ -151,11 +168,11 @@ export function toolSpecs(storeOrResolve) {
     },
     {
       name: 'tutor_outline_edit',
-      description: 'Edit the course outline (= the mind map hierarchy) with small atomic operations; the learner edits the same data in the workbench UI. '
+      description: 'Edit the course outline (what is taught and in what order) with small atomic operations; the learner edits the same outline in the workbench. This does not rewrite the mind map. '
         + `ops: ${OUTLINE_OPS.join(', ')}. Shapes: {op:"addTopic", title, subtopics:[{title}], index?} | {op:"renameTopic", topicId, title?, description?} | {op:"moveTopic", topicId, toIndex} | {op:"removeTopic", topicId} | `
         + '{op:"addSubtopic", topicId, title, index?} | {op:"renameSubtopic", subtopicId, title?, description?} | {op:"moveSubtopic", subtopicId, toTopicId?, toIndex} | {op:"removeSubtopic", subtopicId}. '
-        + 'Prefer beforeId over toIndex for moves. Only two levels exist (topic → knowledge point). New topics/subtopics never carry ids. Use ids from tutor_visualize(outline) and pass its syllabusRevision (required); on conflict read again (the learner may have edited) and re-decide. '
-        + 'Removing a knowledge point retires it but keeps its assessment history. Every edit resets syllabus approval (the outline goes back to draft): show the diff (change.lines) and ask the learner to re-approve, unless they told you to approve it (then course.approve with consent). '
+        + 'Prefer beforeId over toIndex for moves. The outline is a two-level tree (topic → subtopic); subtopics reference knowledge points (conceptIds) rather than being identical to them. New topics/subtopics never carry ids. Use ids from tutor_visualize(outline) and pass its syllabusRevision (required); on conflict read again (the learner may have edited) and re-decide. '
+        + 'Removing a subtopic does not retire the knowledge point (assessments and review stay). Every edit resets syllabus approval (the outline goes back to draft): show the diff (change.lines) and ask the learner to re-approve, unless they told you to approve it (then course.approve with consent). '
         + 'reason (required): one sentence on why, e.g. the learner\'s feedback; it is stored with the diff. ' + LINK_RULE,
       parameters: {
         courseId: { type: 'string', required: true },
@@ -166,11 +183,46 @@ export function toolSpecs(storeOrResolve) {
       execute: run(async (store, args) => {
         if (typeof args.reason !== 'string' || !args.reason.trim()) throw new Error('reason is required: one sentence on why the outline changes (shown to the learner with the diff)');
         const payload = { courseId: requireCourseId(args), operations: args.operations, syllabusRevision: args.syllabusRevision, reason: args.reason };
-        const out = await store.mutate('course.editOutline', payload, undefined, { actor: 'ai', summary: summarize('AI 编辑大纲/导图', args.operations) });
+        const out = await store.mutate('course.editOutline', payload, undefined, { actor: 'ai', summary: summarize('AI 编辑大纲', args.operations) });
         const state = await store.read();
         const course = state.courses[payload.courseId];
         return { revision: out.revision, applied: out.result.applied, change: out.result.change, sinceApproved: sinceApproved(course),
           outline: projectCourse(state, payload.courseId, 'outline'), links: linksForWrite(state, 'course.editOutline', payload, out.result) };
+      }),
+    },
+    {
+      name: 'tutor_mindmap_edit',
+      description: 'Edit the course mind map (an independent thinking structure, not the syllabus). Operations: addChild, insertSibling, insertParent, remove, move, rename, setBelongsTo. '
+        + 'Depth is unlimited: you may add extension nodes under a knowledge-point node (methods, pitfalls, examples). Those nodes are not quiz or review items until concept.promote. '
+        + 'belongsTo is optional ({type:"topic"|"concept", id}). Use node ids from tutor_visualize(mindmap) and pass its mindmapRevision; on conflict read again. Edits do not require outline approval. ' + LINK_RULE,
+      parameters: {
+        courseId: { type: 'string', required: true },
+        operations: { type: 'array', required: true, items: MINDMAP_OP_SCHEMA, description: 'Atomic batch, 1..100 operations.' },
+        mindmapRevision: { type: 'integer', required: true, description: 'mindmapRevision from tutor_visualize(mindmap); rejects the batch if the map changed meanwhile.' },
+      },
+      execute: run(async (store, args) => {
+        const payload = { courseId: requireCourseId(args), operations: args.operations, mindmapRevision: args.mindmapRevision };
+        const out = await store.mutate('mindmap.edit', payload, undefined, { actor: 'ai', summary: summarize('AI 编辑思维导图', args.operations) });
+        const state = await store.read();
+        return { revision: out.revision, applied: out.result.applied, mindmapRevision: out.result.mindmapRevision, touched: out.result.touched,
+          mindmap: projectCourse(state, payload.courseId, 'mindmap'), links: linksForWrite(state, 'mindmap.edit', payload, out.result) };
+      }),
+    },
+    {
+      name: 'tutor_concept_promote',
+      description: 'Promote a mind-map or graph extension node to a knowledge point (quiz and review). Writes refersTo back onto the node. Does not add the point to the syllabus (that takes tutor_outline_edit + approval).',
+      parameters: {
+        courseId: { type: 'string', required: true },
+        fromType: { type: 'string', enum: ['mindmapNode', 'graphNode'], required: true },
+        fromId: { type: 'string', required: true },
+        title: { type: 'string', description: 'Optional title; defaults to the node title.' },
+        description: { type: 'string' },
+      },
+      execute: run(async (store, args) => {
+        const payload = { courseId: requireCourseId(args), from: { type: args.fromType, id: args.fromId }, title: args.title, description: args.description };
+        const out = await store.mutate('concept.promote', payload, undefined, { actor: 'ai', summary: `AI 将「${args.title ?? args.fromId}」升格为知识点` });
+        const state = await store.read();
+        return { ...out, links: linksForWrite(state, 'concept.promote', payload, out.result) };
       }),
     },
     {

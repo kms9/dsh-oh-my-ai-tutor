@@ -259,7 +259,9 @@ export function Workbench({ api, visible = true, initialView, navRevision, focus
   const conceptById = new Map(concepts.map((c) => [c.id, c]));
   const syllabusRevision = course.syllabus.revision;
   // `rev` = the outline revision that was on screen when the gesture began (locked by the caller); default = rendered one.
-  const outlineEdit = (operations, summary, rev = syllabusRevision, opts) => mutate('course.editOutline', { courseId: course.id, syllabusRevision: rev, operations }, summary, '已保存到课程大纲（思维导图同步更新）', opts);
+  const outlineEdit = (operations, summary, rev = syllabusRevision, opts) => mutate('course.editOutline', { courseId: course.id, syllabusRevision: rev, operations }, summary, '已保存到课程大纲（思维导图不会自动改写）', opts);
+  const mindmapRevision = views.mindmap?.mindmapRevision ?? 0;
+  const mindmapEdit = (operations, summary, rev = mindmapRevision, opts) => mutate('mindmap.edit', { courseId: course.id, mindmapRevision: rev, operations }, summary, '已保存到思维导图（不改大纲）', opts);
 
   const lessons = model.lessons.slice().sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
   const lesson = lessons.find((l) => l.id === lessonId) ?? lessons.find((l) => l.status !== 'complete') ?? lessons.at(-1) ?? null;
@@ -421,7 +423,7 @@ export function Workbench({ api, visible = true, initialView, navRevision, focus
             onApprove={() => mutate('course.approve', { courseId: course.id, syllabusRevision }, `学习者批准大纲第 ${syllabusRevision} 版`, '大纲已批准')}
             onMode={(mode) => mutate('course.setApproval', { courseId: course.id, mode }, mode === 'delegated' ? '学习者把批准交给 AI' : '学习者收回批准', mode === 'delegated' ? '已交给 AI 批准：之后大纲和课时计划由 AI 代你批准（随时可收回）' : '已恢复为由你批准')} />}
           {tab === 'outline' && <OutlineView changes={course.syllabusChanges ?? []} topics={topics} busy={busy} edit={outlineEdit} syllabusRevision={syllabusRevision} selected={selectedConcept?.id} onSelect={setSelected} focus={outlineFocus} nav={nav} />}
-          {tab === 'mindmap' && <MindmapView view={views.mindmap} topics={topics} busy={busy} edit={outlineEdit} syllabusRevision={syllabusRevision} selected={selectedConcept?.id} onSelectConcept={setSelected} flash={flash} wide={rightWidth >= 640} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} />}
+          {tab === 'mindmap' && <MindmapView view={views.mindmap} courseId={course.id} topics={topics} busy={busy} edit={mindmapEdit} promote={(from, title) => mutate('concept.promote', { courseId: course.id, from, title }, `升格「${title}」为知识点`, '已升格为知识点（尚未写入大纲）')} mapRevision={mindmapRevision} selected={selectedConcept?.id} onSelectConcept={setSelected} flash={flash} wide={rightWidth >= 640} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} />}
           {tab === 'graph' && <GraphView view={views.graph} topics={topics} selected={selectedConcept?.id} onSelect={setSelected} conceptById={conceptById} relations={model.relations} nav={nav} boardElements={views.board.elements} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} wide={rightWidth >= 760} />}
           {tab === 'board' && <BoardView onOpenNote={(id) => { const n = model.notes.find((x) => x.id === id); if (n?.lessonId) { setLessonId(n.lessonId); setPartIndex(null); } setNoteFocus({ id, nonce: Date.now() }); }} view={views.board} course={course} topics={topics} concepts={concepts} busy={busy} mutate={mutate} outlineEdit={outlineEdit} syllabusRevision={syllabusRevision} onSelectConcept={setSelected} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} wide={rightWidth >= 760} focus={boardFocus} nav={nav} />}
           {tab === 'data' && <DataPane api={api} course={course} revision={model.revision} topics={topics} selected={selectedConcept?.id} onSelectConcept={setSelected} nav={nav}
@@ -715,19 +717,31 @@ function useFillHeight(el, root, enabled, fallback, reserve = 0) {
   return h;
 }
 
-const MM_HINT = '拖动节点可调序或换到别的主题；双击改名；选中后 Tab 加子节点、Enter 加同级、Delete 删除；拖动空白处或滚轮平移，Ctrl+滚轮缩放。只有两层：主题 → 知识点。';
-function MindmapView({ view, topics, busy, edit, syllabusRevision, selected, onSelectConcept, flash, wide, zoom = 'off', setZoom, fill, rootRef }) {
-  const [sel, setSel] = useState(null); // { id, kind, topicId?, conceptId? } from the mind map selection
+const MM_HINT = '拖动节点可调序或移到别的节点下；双击改名；选中后 Tab 加子节点、Enter 加同级、Delete 删除；深度不限。扩展节点不是考点，可升格为知识点。拖动空白处或滚轮平移，Ctrl+滚轮缩放。';
+function walkNodes(n, acc = []) { if (!n) return acc; acc.push(n); for (const c of n.children ?? []) walkNodes(c, acc); return acc; }
+function MindmapList({ node, depth, onSelect }) {
+  return (
+    <>
+      <div className="treerow" style={{ fontWeight: depth === 0 ? 700 : 500, marginTop: depth === 0 ? 12 : 0 }} onClick={depth === 0 ? undefined : () => onSelect?.(node)}>{depth === 0 ? '◉' : (depth === 1 ? '●' : '└')} {node.title}</div>
+      {node.children?.length ? <div className="treelevel">{node.children.map((c) => <MindmapList key={c.id} node={c} depth={depth + 1} onSelect={onSelect} />)}</div> : null}
+    </>
+  );
+}
+function MindmapView({ view, topics, busy, edit, promote, mapRevision, selected, onSelectConcept, flash, wide, zoom = 'off', setZoom, fill, rootRef }) {
+  const [sel, setSel] = useState(null); // { id, kind, refersTo?, conceptId?, belongsTo? }
   const [mode, setMode] = useState('side');
   const [fitInfo, setFitInfo] = useState({ overflow: false });
   const mapRef = useRef(null);
   const wrapRef = useRef(null);
   const height = useFillHeight(wrapRef, rootRef, fill && mode !== 'list', wide ? 560 : 440);
   const h = view.hierarchy;
-  const node = sel && (sel.kind === 'topic' ? topics.find((t) => t.id === sel.id) : topics.flatMap((t) => t.subtopics.map((s) => ({ ...s, topic: t }))).find((s) => s.id === sel.id));
-  const topicIdx = node && sel.kind === 'topic' ? topics.indexOf(node) : -1;
-  const subIdx = node && sel.kind === 'sub' ? node.topic.subtopics.findIndex((s) => s.id === node.id) : -1;
-  const selectedSubId = topics.flatMap((t) => t.subtopics).find((s) => s.conceptId === selected)?.id;
+  const all = walkNodes(h);
+  const node = sel && all.find((n) => n.id === sel.id);
+  const parent = node && all.find((n) => (n.children ?? []).some((c) => c.id === node.id));
+  const sibs = parent ? parent.children : (h?.children ?? []);
+  const idx = node ? sibs.findIndex((s) => s.id === node.id) : -1;
+  const selectedNodeId = all.find((n) => (n.conceptId ?? n.refersTo) === selected)?.id;
+  const canPromote = node && node.kind !== 'root' && !(node.refersTo || node.conceptId) && promote;
   const submit = (ops, summary, rev, opts) => edit(ops, summary, rev, opts);
   return (
     <div data-testid="mindmap-view">
@@ -739,7 +753,7 @@ function MindmapView({ view, topics, busy, edit, syllabusRevision, selected, onS
         </span>
       </div>
       <div className={`card ${mode !== 'list' ? 'mmcard' : ''}`}>
-        {mode === 'list' && <span className="tag">基于课程大纲</span>}
+        {mode === 'list' && <span className="tag">独立思维导图</span>}
         {mode !== 'list' ? (
           <>
             {/* fixed height: selecting a node must not shift the map under the pointer (a double-click would miss) */}
@@ -747,26 +761,27 @@ function MindmapView({ view, topics, busy, edit, syllabusRevision, selected, onS
               {node ? <>
                 <span className="small mmsel" title={node.title}>已选：{node.title}</span>
                 <button className="tbtn" disabled={busy} onClick={() => mapRef.current?.beginRename(node.id)}>改名</button>
-                <button className="tbtn" disabled={busy || (sel.kind === 'topic' ? topicIdx === 0 : subIdx === 0)} onClick={() => mapRef.current?.run('step', { id: node.id, dir: -1 })}>上移</button>
-                <button className="tbtn" disabled={busy || (sel.kind === 'topic' ? topicIdx === topics.length - 1 : subIdx === node.topic.subtopics.length - 1)} onClick={() => mapRef.current?.run('step', { id: node.id, dir: 1 })}>下移</button>
-                <button className="tbtn" disabled={busy} onClick={() => mapRef.current?.run(sel.kind === 'topic' ? 'addChild' : 'insertSibling', sel.kind === 'topic' ? { parentId: node.id } : { id: node.id, position: 'after' })}>＋ {sel.kind === 'topic' ? '子节点' : '同级'}</button>
-                <button className="tbtn danger" disabled={busy || (sel.kind === 'topic' ? topics.length === 1 : node.topic.subtopics.length === 1)} onClick={async () => { if (await mapRef.current?.run('remove', { ids: [node.id] })) setSel(null); }}>删除</button>
+                <button className="tbtn" disabled={busy || idx <= 0} onClick={() => mapRef.current?.run('step', { id: node.id, dir: -1 })}>上移</button>
+                <button className="tbtn" disabled={busy || idx < 0 || idx >= sibs.length - 1} onClick={() => mapRef.current?.run('step', { id: node.id, dir: 1 })}>下移</button>
+                <button className="tbtn" disabled={busy} onClick={() => mapRef.current?.run('addChild', { parentId: node.id })}>＋ 子节点</button>
+                <button className="tbtn" disabled={busy || node.kind === 'root'} onClick={() => mapRef.current?.run('insertSibling', { id: node.id, position: 'after' })}>＋ 同级</button>
+                {canPromote ? <button className="tbtn" data-testid="mindmap-promote" disabled={busy} onClick={async () => { if (await promote({ type: 'mindmapNode', id: node.id }, node.title)) setSel((s) => s); }}>升格为知识点</button> : null}
+                <button className="tbtn danger" disabled={busy || node.kind === 'root'} onClick={async () => { if (await mapRef.current?.run('remove', { ids: [node.id] })) setSel(null); }}>删除</button>
               </> : <span className="small mmhint" title={MM_HINT}>{fitInfo.overflow ? '导图比画布大：拖动空白处平移，或点右上角「放大」。' : MM_HINT}</span>}
             </div>
             <div className="mm" ref={wrapRef}>
-              <MindElixirMap ref={mapRef} hierarchy={h} syllabusRevision={syllabusRevision} direction={mode} submit={submit} notify={flash}
-                selectedId={sel?.id ?? selectedSubId} height={height} onFit={(f) => setFitInfo((x) => (x.overflow === f.overflow ? x : f))}
-                onSelect={(n) => { if (!n || n.kind === 'root') { setSel(null); return; } setSel(n); if (n.conceptId) onSelectConcept(n.conceptId); }} />
+              <MindElixirMap ref={mapRef} hierarchy={h} mapRevision={mapRevision} direction={mode} submit={submit} notify={flash}
+                selectedId={sel?.id ?? selectedNodeId} height={height} onFit={(f) => setFitInfo((x) => (x.overflow === f.overflow ? x : f))}
+                onSelect={(n) => { if (!n || n.kind === 'root') { setSel(null); return; } setSel(n); if (n.conceptId || n.refersTo) onSelectConcept(n.conceptId || n.refersTo); }} />
             </div>
           </>
         ) : (
           <div data-testid="mindmap-list">
-            <div className="treerow" style={{ fontWeight: 700, marginTop: 12 }}>◉ {h.title}</div>
-            <div className="treelevel">{topics.map((t) => <React.Fragment key={t.id}><div className="treerow">● {t.title}</div><div className="treelevel">{t.subtopics.map((s) => <div key={s.id} className="treerow" onClick={() => onSelectConcept(s.conceptId)}>└ {s.title}</div>)}</div></React.Fragment>)}</div>
+            <MindmapList node={h} depth={0} onSelect={(n) => { if (n.conceptId || n.refersTo) onSelectConcept(n.conceptId || n.refersTo); }} />
           </div>
         )}
       </div>
-      <p className="legend">导图只表达课程包含关系，不自动产生“知识前置/因果”语义边。导图与课程大纲是同一份数据：在这里调序、改名或删减，大纲同步变化；AI 用 tutor_outline_edit 改的也会实时出现在这里（你正在拖动或改名时，会等你做完再刷新）。</p>
+      <p className="legend">思维导图独立于课程大纲：这里的改动不会改「教什么、按什么顺序」。节点可以属于某章或某个知识点，也可以是思考扩展（研究方法、易错点、例子）。扩展不是考点；值得测验和复习时再升格为知识点。知识图谱另有自己的节点和关系。你正在拖动或改名时，会等你做完再刷新。</p>
     </div>
   );
 }
@@ -785,8 +800,19 @@ function ZoomButtons({ zoom, setZoom, prefix, what }) {
 const GRAPH_HINT = '悬停或点击：高亮一跳邻居；双击主题：收起 / 展开它的知识点；双击知识点：展开它关系所在的主题；拖动节点时力导向会带动邻居（只改这次的摆放，不保存）。';
 const GRAPH_LAZY = 60; // same as LAZY_THRESHOLD in graph-flow.jsx: bigger courses start collapsed
 function GraphView({ view, topics, selected, onSelect, conceptById, relations, zoom, setZoom, fill, rootRef, wide, nav, boardElements = [] }) {
-  const c = conceptById.get(selected) ?? (view.nodes[0] && conceptById.get(view.nodes[0].id));
-  const related = relations.filter((r) => r.from === c?.id || r.to === c?.id);
+  const graphNode = view.nodes.find((n) => n.id === selected || n.conceptId === selected || n.refersTo === selected);
+  const c = (graphNode?.conceptId && conceptById.get(graphNode.conceptId)) ?? conceptById.get(selected) ?? null;
+  const selectedGraphId = graphNode?.id ?? null;
+  const related = relations.filter((r) => {
+    const fromC = r.fromConceptId ?? view.nodes.find((n) => n.id === r.from)?.conceptId;
+    const toC = r.toConceptId ?? view.nodes.find((n) => n.id === r.to)?.conceptId;
+    return r.from === selectedGraphId || r.to === selectedGraphId || (c && (fromC === c.id || toC === c.id));
+  });
+  const selectNode = (id) => {
+    if (!id) { onSelect(null); return; }
+    const n = view.nodes.find((x) => x.id === id);
+    onSelect(n?.conceptId ?? n?.refersTo ?? id);
+  };
   const wrapRef = useRef(null);
   const flowRef = useRef(null);
   const [fitInfo, setFitInfo] = useState({ overflow: false });
@@ -802,11 +828,11 @@ function GraphView({ view, topics, selected, onSelect, conceptById, relations, z
   const findFirst = () => {
     const q = query.trim().toLowerCase(); if (!q) return;
     const n = view.nodes.find((x) => x.label.toLowerCase().includes(q));
-    if (n) { setCollapsed((s) => { const next = new Set(s); next.delete(n.topicId); return next; }); onSelect(n.id); setTimeout(() => flowRef.current?.centreOn(n.id), 80); }
+    if (n) { setCollapsed((s) => { const next = new Set(s); next.delete(n.topicId); return next; }); selectNode(n.id); setTimeout(() => flowRef.current?.centreOn(n.id), 80); }
   };
   return (
     <div data-testid="graph-view">
-      <div className="title2"><span>语义知识图谱 <span className="small">{view.nodes.length} 个知识点 · {topics.length} 个主题 · {view.edges.length} 条候选关系</span></span>
+      <div className="title2"><span>语义知识图谱 <span className="small">{view.nodes.length} 个节点 · {topics.length} 个主题 · {view.edges.length} 条关系</span></span>
         <span className="tools">
           <button className="tbtn" onClick={() => flowRef.current?.fit()} data-testid="graph-fit" title="缩放到能看到全部节点（不小于可读字号）">适配</button>
           <ZoomButtons zoom={zoom} setZoom={setZoom} prefix="graph" what="图谱" />
@@ -830,14 +856,14 @@ function GraphView({ view, topics, selected, onSelect, conceptById, relations, z
           : fitInfo.overflow ? '图谱比画布大：拖动空白处或滚轮平移，或点右上角「放大」。' : GRAPH_HINT}
       </div>
       <div className="rfhost" ref={wrapRef}>
-        <GraphFlow ref={flowRef} view={view} topics={topics} selectedId={selected} onSelect={onSelect} height={height} minimap={wide}
+        <GraphFlow ref={flowRef} view={view} topics={topics} selectedId={selectedGraphId} onSelect={selectNode} height={height} minimap={wide}
           layout={layout} query={query} pathMode={pathMode} collapsed={collapsed} setCollapsed={setCollapsed} onPath={setPathInfo}
           onFit={(f) => setFitInfo((x) => (x.overflow === f.overflow ? x : f))} />
       </div>
-      {c && (
+      {(c || graphNode) && (
         <div className="card" data-testid="graph-detail">
-          <b>{c.title}</b>
-          <p className="kmeta">知识点 ID: {c.id}</p>
+          <b>{c?.title ?? graphNode?.label}</b>
+          <p className="kmeta">{c ? `知识点 ID: ${c.id}` : '扩展节点（尚未升格为知识点）'}</p>
           {c.kind !== 'topic' && (() => {
             const cardIds = boardElements.filter((e) => e.type === 'concept' && e.conceptId === c.id).map((e) => e.id);
             return (
@@ -870,11 +896,10 @@ function BoardView({ view, course, topics, concepts, busy, mutate, outlineEdit, 
   const missing = concepts.filter((c) => !onBoard.has(c.id)).length;
   // `rev` = board revision on screen when the gesture began (BoardFlow locks it at drag start / connect start / double-click)
   const patch = useCallback((operations, summary, ok, rev = view.boardRevision, opts) => mutate('board.patch', { courseId: course.id, baseRevision: rev, operations }, summary, ok, opts), [mutate, course.id, view.boardRevision]);
-  const renameConcept = useCallback((conceptId, title, rev) => {
-    const sub = topics.flatMap((t) => t.subtopics).find((s) => s.conceptId === conceptId);
-    if (!sub) return Promise.resolve(false);
-    return outlineEdit([{ op: 'renameSubtopic', subtopicId: sub.id, title }], `白板：知识点改名为「${title}」`, rev ?? syllabusRevision, { draft: true });
-  }, [topics, outlineEdit, syllabusRevision]);
+  const renameConcept = useCallback((conceptId, title) => {
+    if (!conceptId) return Promise.resolve(false);
+    return mutate('concept.rename', { conceptId, title }, `白板：知识点改名为「${title}」`, '已重命名知识点（不改大纲）', { draft: true });
+  }, [mutate]);
   const arrange = arrangeOps(els, topics, concepts);
   const cards = els.filter((e) => e.type !== 'arrow');
   // a link from 数据 / 知识点详情: list sibling cards of the same knowledge point (real conceptId, ordered like the data view)

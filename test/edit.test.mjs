@@ -42,9 +42,10 @@ test('outline edit ops keep ids/concepts stable and reset approval', () => {
   assert.equal(ctx.state.courses[ctx.course.id].syllabus.approvedAt, null);
   assert.equal(ctx.state.courses[ctx.course.id].status, 'draft');
   assert.equal(ctx.state.events.at(-1).actor, 'learner');
-  // remove retires concept, gate on empty topic and self-made ids
+  // remove unlinks the subtopic but does not retire the knowledge point
+  const removedConcept = after[1].subtopics[0].conceptId;
   ctx.run('course.editOutline', { courseId: ctx.course.id, syllabusRevision: 2, operations: [{ op: 'removeSubtopic', subtopicId: after[1].subtopics[0].id }] });
-  assert.equal(Object.values(ctx.state.concepts).filter((c) => c.status === 'retired').length, 1);
+  assert.equal(ctx.state.concepts[removedConcept].status, 'active');
   assert.throws(() => ctx.run('course.editOutline', { courseId: ctx.course.id, syllabusRevision: 3, operations: [{ op: 'removeSubtopic', subtopicId: topicsOf(ctx.state, ctx.course.id)[1].subtopics[0].id }] }), /no knowledge points/);
   assert.throws(() => ctx.run('course.editOutline', { courseId: ctx.course.id, syllabusRevision: 3, operations: [{ op: 'addTopic', id: 't9', title: 'x', subtopics: [{ title: 'y' }] }] }), /must not carry an id/);
   assert.throws(() => ctx.run('course.editOutline', { courseId: ctx.course.id, syllabusRevision: 1, operations: [{ op: 'moveTopic', topicId: after[0].id, toIndex: 1 }] }), /Outline changed/);
@@ -72,8 +73,10 @@ test('board seed, patch with CAS, cascade delete, stale concept cards', () => {
   board = snapshot(ctx.state, ctx.course.id).board;
   assert.equal(board.elements.filter((e) => e.type === 'arrow').length, 0);
   assert.throws(() => ctx.run('board.patch', { courseId: ctx.course.id, baseRevision: board.revision, operations: [{ op: 'add', type: 'note', id: cardA.id, text: 'x' }] }), /must not carry an id/);
-  // renaming the subtopic renames the card (card text follows syllabus)
+  // renaming the subtopic does not rename the knowledge point or its board card
   ctx.run('course.editOutline', { courseId: ctx.course.id, syllabusRevision: 1, operations: [{ op: 'renameSubtopic', subtopicId: t1.subtopics[1].id, title: 'b2' }] });
+  assert.equal(projectCourse(ctx.state, ctx.course.id, 'board').elements.find((e) => e.conceptId === b).text, 'b');
+  ctx.run('concept.rename', { conceptId: b, title: 'b2' });
   assert.equal(projectCourse(ctx.state, ctx.course.id, 'board').elements.find((e) => e.conceptId === b).text, 'b2');
 });
 

@@ -69,7 +69,7 @@ const gap = (p, r) => Math.hypot(Math.max(r.x - p.x, 0, p.x - (r.x + r.width)), 
  */
 export function assignTopics(elements, topics, concepts = []) {
   const byConcept = new Map();
-  for (const t of topics) for (const s of t.subtopics) byConcept.set(s.conceptId, t.id);
+  for (const t of topics) for (const s of t.subtopics) for (const cid of (s.conceptIds?.length ? s.conceptIds : (s.conceptId ? [s.conceptId] : []))) byConcept.set(cid, t.id);
   for (const c of concepts) if (!byConcept.has(c.id) && c.topicId && topics.some((t) => t.id === c.topicId)) byConcept.set(c.id, c.topicId);
   const cards = elements.filter((e) => e.type !== 'arrow');
   const out = new Map();
