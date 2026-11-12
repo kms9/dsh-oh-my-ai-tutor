@@ -8,6 +8,7 @@ import { refView } from '../links.mjs';
 import { AddToChatButton } from './AddToChat.jsx';
 import { buildGraph } from './graph-model.mjs';
 import { focusGraph, learningPathTo, FOCUS_DEPTHS, DEFAULT_DEPTH, FOLD_AT } from './graph-focus.mjs';
+import { pickGraphNode, resolveGraphSelection, selectionActions, relationRows } from './graph-select.mjs';
 import { RELATION_LABEL } from './flow-layout.mjs';
 
 // heavy views load on first use (DSH: package-local chunks lib/client.flow.js and lib/client.mindmap.js)
@@ -97,6 +98,9 @@ export function Workbench({ api, visible = true, initialView, navRevision, focus
   }, [zoom, setMmZoom]);
   const [courseId, setCourseId] = useState(null);
   const [selected, setSelected] = useState(null); // conceptId
+  // the knowledge graph's own selection (graph node id + the knowledge-point selection it was made under, see
+  // graph-select.mjs): extension and topic nodes are not knowledge points, so they must not go through `selected`
+  const [graphPick, setGraphPick] = useState(null);
   const [lessonId, setLessonId] = useState(null);
   const [partIndex, setPartIndex] = useState(null);
   // cross-view links: { id|conceptId, nonce } — a new nonce re-runs the jump even for the same target
@@ -248,7 +252,7 @@ export function Workbench({ api, visible = true, initialView, navRevision, focus
       nav.toTopic(f.id);
     } else if (f.kind === 'outline') setTab('outline');
     else if (f.kind === 'mindmapNode') { setTab('mindmap'); setMindmapFocus({ id: f.id, nonce: Date.now() }); }
-    else if (f.kind === 'graphNode') { setTab('graph'); setSelected(f.id); setGraphFocus({ id: f.id, nonce: Date.now() }); }
+    else if (f.kind === 'graphNode') { setTab('graph'); setGraphFocus({ id: f.id, nonce: Date.now() }); }
     else if (f.kind === 'relation') {
       const rel = (m.relations ?? []).find((r) => r.id === f.id);
       setTab('graph');
@@ -453,7 +457,7 @@ export function Workbench({ api, visible = true, initialView, navRevision, focus
             onMode={(mode) => mutate('course.setApproval', { courseId: course.id, mode }, mode === 'delegated' ? '学习者把批准交给 AI' : '学习者收回批准', mode === 'delegated' ? '已交给 AI 批准：之后大纲和课时计划由 AI 代你批准（随时可收回）' : '已恢复为由你批准')} />}
           {tab === 'outline' && <OutlineView changes={course.syllabusChanges ?? []} topics={topics} busy={busy} edit={outlineEdit} syllabusRevision={syllabusRevision} selected={selectedConcept?.id} onSelect={setSelected} focus={outlineFocus} nav={nav} courseId={course.id} onAddToChat={addToChat} />}
           {tab === 'mindmap' && <MindmapView view={views.mindmap} courseId={course.id} topics={topics} busy={busy} edit={mindmapEdit} promote={(from, title) => mutate('concept.promote', { courseId: course.id, from, title }, `升格「${title}」为知识点`, '已升格为知识点（尚未写入大纲）')} mapRevision={mindmapRevision} selected={selectedConcept?.id} onSelectConcept={setSelected} flash={flash} wide={rightWidth >= 640} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} focus={mindmapFocus} onAddToChat={addToChat} />}
-          {tab === 'graph' && <GraphView view={views.graph} topics={topics} selected={selectedConcept?.id} onSelect={setSelected} conceptById={conceptById} relations={model.relations} nav={nav} boardElements={views.board.elements} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} wide={rightWidth >= 760} focus={graphFocus} onAddToChat={addToChat} />}
+          {tab === 'graph' && <GraphView view={views.graph} topics={topics} selected={selectedConcept?.id} onSelect={setSelected} pick={graphPick} setPick={setGraphPick} conceptById={conceptById} relations={model.relations} nav={nav} boardElements={views.board.elements} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} wide={rightWidth >= 760} focus={graphFocus} onAddToChat={addToChat} />}
           {tab === 'board' && <BoardView onOpenNote={(id) => { const n = model.notes.find((x) => x.id === id); if (n?.lessonId) { setLessonId(n.lessonId); setPartIndex(null); } setNoteFocus({ id, nonce: Date.now() }); }} view={views.board} course={course} topics={topics} concepts={concepts} busy={busy} mutate={mutate} outlineEdit={outlineEdit} syllabusRevision={syllabusRevision} onSelectConcept={setSelected} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} wide={rightWidth >= 760} focus={boardFocus} nav={nav} onAddToChat={addToChat} />}
           {tab === 'data' && <DataPane api={api} course={course} revision={model.revision} topics={topics} selected={selectedConcept?.id} onSelectConcept={setSelected} nav={nav}
             reviewRate={reviewRate} busy={busy} focus={dataFocus} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} onAddToChat={addToChat} />}
@@ -855,14 +859,23 @@ const DEPTH_LABEL = { 1: '1层', 2: '2层', 3: '3层', all: '全部' };
 function readDepth() {
   try { const v = globalThis.sessionStorage?.getItem(DEPTH_KEY); return FOCUS_DEPTHS.map(String).includes(v) ? (v === 'all' ? 'all' : Number(v)) : DEFAULT_DEPTH; } catch { return DEFAULT_DEPTH; }
 }
-function GraphView({ view, topics, selected, onSelect, conceptById, relations, zoom, setZoom, fill, rootRef, wide, nav, boardElements = [], focus, onAddToChat }) {
-  const graphNode = view.nodes.find((n) => n.id === selected || n.conceptId === selected || n.refersTo === selected);
-  const c = (graphNode?.conceptId && conceptById.get(graphNode.conceptId)) ?? conceptById.get(selected) ?? null;
-  const selectedGraphId = graphNode?.id ?? null;
+function GraphView({ view, topics, selected, onSelect, pick, setPick, conceptById, relations, zoom, setZoom, fill, rootRef, wide, nav, boardElements = [], focus, onAddToChat }) {
+  const fullGraph = useMemo(() => buildGraph(view, topics), [view, topics]);
+  // the graph's own selection (any graph node: knowledge point, extension, topic); synced to the shared knowledge-point
+  // selection only when the picked node is backed by a knowledge point (graph-select.mjs)
+  const selNode = resolveGraphSelection(fullGraph, pick, selected ?? null);
+  const graphNode = selNode && selNode.kind !== 'topic' ? view.nodes.find((n) => n.id === selNode.id) ?? null : null;
+  const c = selNode?.kind === 'concept' ? conceptById.get(selNode.conceptId) ?? null : null;
+  const selectedGraphId = selNode?.id ?? null;
   const selectNode = (id) => {
-    if (!id) { onSelect(null); return; }
-    const n = view.nodes.find((x) => x.id === id);
-    onSelect(n?.conceptId ?? n?.refersTo ?? id);
+    if (!id) { setPick(null); onSelect(null); return; }
+    // a raw knowledge-point id (e.g. a relation end from model.relations) → its graph node
+    const gid = fullGraph.nodes.some((n) => n.id === id) ? id : fullGraph.nodes.find((n) => n.kind === 'concept' && n.conceptId === id)?.id;
+    if (!gid) { if (conceptById.has(id)) { setPick(null); onSelect(id); } return; }
+    const { pick: p, syncKp } = pickGraphNode(fullGraph, gid, selected ?? null);
+    if (!p) return;
+    setPick(p);
+    if (syncKp) onSelect(syncKp);
   };
   useEffect(() => {
     if (!focus?.id) return;
@@ -881,8 +894,8 @@ function GraphView({ view, topics, selected, onSelect, conceptById, relations, z
   const [depth, setDepthState] = useState(readDepth);
   const [unfold, setUnfold] = useState(false);
   const [pathTarget, setPathTarget] = useState(null);
+  const [sideHidden, setSideHidden] = useState(false);
   const setDepth = (d) => { setDepthState(d); setUnfold(false); try { globalThis.sessionStorage?.setItem(DEPTH_KEY, String(d)); } catch { /* private mode */ } };
-  const fullGraph = useMemo(() => buildGraph(view, topics), [view, topics]);
   const local = useMemo(() => {
     if (focusId) return focusGraph(fullGraph, focusId, { up: depth, down: 1, unfold });
     if (pathTarget) return learningPathTo(fullGraph, pathTarget);
@@ -921,7 +934,7 @@ function GraphView({ view, topics, selected, onSelect, conceptById, relations, z
     <div data-testid="graph-view">
       <div className="title2"><span>语义知识图谱 <span className="small">{view.nodes.length} 个节点 · {topics.length} 个主题 · {view.edges.length} 条关系</span></span>
         <span className="tools">
-          <button className="tbtn" onClick={() => flowRef.current?.fit()} data-testid="graph-fit" title="缩放到能看到全部节点（不小于可读字号）">适配</button>
+          <button className="tbtn" onClick={() => flowRef.current?.fit()} data-testid="graph-fit" title="缩放到能看到全部节点（必要时缩小）">适配</button>
           <ZoomButtons zoom={zoom} setZoom={setZoom} prefix="graph" what="图谱" />
         </span>
       </div>
@@ -955,8 +968,8 @@ function GraphView({ view, topics, selected, onSelect, conceptById, relations, z
             <button className={`tbtn ${layout === 'hierarchical' ? 'on' : ''}`} data-testid="graph-layout-hierarchical" onClick={() => setLayout('hierarchical')} title="dagre 层级布局（主题 → 知识点，左 → 右）">层级</button>
           </span>
           <button className="tbtn" data-testid="graph-collapse-all" onClick={() => setCollapsed(allCollapsed ? new Set() : new Set(topics.map((t) => t.id)))}>{allCollapsed ? '全部展开' : '全部收起'}</button>
-          <button className="tbtn" data-testid="graph-focus" disabled={!selectedGraphId} onClick={() => startFocus(selectedGraphId)}
-            title={selectedGraphId ? '只看选中节点和它的前置（沿「前置」关系向上，向下 1 层）' : '先点选一个节点'}>聚焦</button>
+          <button className="tbtn" data-testid="graph-focus" disabled={!selectedGraphId || !selectionActions(selNode).focus} onClick={() => startFocus(selectedGraphId)}
+            title={selectedGraphId && selectionActions(selNode).focus ? '只看选中节点和它的前置（沿「前置」关系向上，向下 1 层）' : '先点选一个知识点或扩展节点'}>聚焦</button>
           <button className={`tbtn ${pathMode ? 'on' : ''}`} data-testid="graph-path" onClick={() => { setPathMode((v) => !v); setPathInfo(null); }} title="依次点两个节点，找沿「前置」方向的学习路径">{pathMode ? '路径：点两个节点' : '路径'}</button>
         </div>
       )}
@@ -966,11 +979,12 @@ function GraphView({ view, topics, selected, onSelect, conceptById, relations, z
       <div className={`kgsplit${zoom === 'full' ? ' kgsplit-overlay' : wide ? ' kgsplit-side' : ''}`}>
         <div className="rfhost" ref={wrapRef}>
           <GraphFlow ref={flowRef} view={view} topics={topics} selectedId={selectedGraphId} onSelect={selectNode} height={height} minimap={wide && !local}
+            reserve={zoom === 'full' && !sideHidden ? { right: SIDE_OVERLAY_W } : undefined}
             layout={layout} query={local ? '' : query} pathMode={pathMode} collapsed={collapsed} setCollapsed={setCollapsed} onPath={setPathInfo}
             local={local} onLocalClick={onLocalClick} onUnfold={() => setUnfold(true)}
             onFit={(f) => setFitInfo((x) => (x.overflow === f.overflow ? x : f))} />
         </div>
-        <GraphSidePanel graphNode={graphNode} c={c} view={view} conceptById={conceptById} relations={relations} nav={nav} boardElements={boardElements}
+        <GraphSidePanel selNode={selNode} graphNode={graphNode} c={c} topics={topics} hidden={sideHidden} setHidden={setSideHidden} view={view} conceptById={conceptById} relations={relations} nav={nav} boardElements={boardElements}
           onAddToChat={onAddToChat} local={local} pathInfo={pathInfo} fullGraph={fullGraph} height={zoom === 'full' ? height - 16 : wide ? height : undefined} overlay={zoom === 'full'}
           onFocus={startFocus} onPathTo={startPathTo} focusId={focusId} onSelectNode={selectNode} />
       </div>
@@ -980,44 +994,58 @@ function GraphView({ view, topics, selected, onSelect, conceptById, relations, z
 }
 
 /** Persistent detail panel (right of the graph when wide, below it otherwise). */
-function GraphSidePanel({ graphNode, c, view, conceptById, relations, nav, boardElements, onAddToChat, local, pathInfo, fullGraph, height, overlay, onFocus, onPathTo, focusId, onSelectNode }) {
-  const [hidden, setHidden] = useState(false);
-  const selectedGraphId = graphNode?.id ?? null;
+const SIDE_OVERLAY_W = 266; // floating panel width + its 8 px inset, reserved by 「适配」 in 整个工作台
+const REL_PREVIEW = 5;
+function GraphSidePanel({ selNode, graphNode, c, topics, hidden, setHidden, view, conceptById, relations, nav, boardElements, onAddToChat, local, pathInfo, fullGraph, height, overlay, onFocus, onPathTo, focusId, onSelectNode }) {
+  const [allRels, setAllRels] = useState(false);
+  const selectedGraphId = selNode?.id ?? null;
+  useEffect(() => { setAllRels(false); }, [selectedGraphId]);
   if (overlay && hidden) return <button className="tbtn kgside-open" data-testid="graph-side-open" onClick={() => setHidden(false)}>详情 ‹</button>;
-  const titleOf = (id) => view.nodes.find((n) => n.id === id)?.label ?? conceptById.get(id)?.title ?? id;
-  // the graph view's own edges (every relation, endpoints are graph node ids); model.relations only keeps the ones whose
-  // ends are raw knowledge-point ids, so graph-node relations were missing from this list
-  const related = [...new Map([...view.edges, ...relations].map((r) => [r.id, r])).values()].filter((r) => {
-    const fromC = r.fromConceptId ?? view.nodes.find((n) => n.id === r.from)?.conceptId;
-    const toC = r.toConceptId ?? view.nodes.find((n) => n.id === r.to)?.conceptId;
-    return r.from === selectedGraphId || r.to === selectedGraphId || (c && (fromC === c.id || toC === c.id));
-  });
-  const relText = (r) => `${titleOf(r.from)} —${RELATION_LABEL[r.type] ?? r.type}→ ${titleOf(r.to)}`;
+  const kind = selNode?.kind ?? null;
+  const can = selectionActions(selNode);
+  const topic = kind === 'topic' ? topics.find((t) => t.id === selNode.topicId) : null;
+  // the graph view's own edges (every relation, endpoints are graph node ids) plus model.relations (raw knowledge-point
+  // ends); one compact row per relation
+  const rows = selNode && kind !== 'topic' ? relationRows(fullGraph, [...view.edges, ...relations], selectedGraphId, c?.id ?? null) : [];
+  const members = topic ? fullGraph.nodes.filter((n) => n.kind !== 'topic' && n.topicId === topic.id) : [];
   const nodeOf = (id) => fullGraph.nodes.find((n) => n.id === id);
   const pathIds = local?.kind === 'path' ? local.nodes : pathInfo?.path ? pathInfo.path.nodes : null;
   const pathWeak = local?.kind === 'path' ? local.weak : new Set(pathInfo?.weak ?? []);
   const pathTarget = local?.kind === 'path' ? local.target : pathInfo?.path?.to;
+  const title = c?.title ?? selNode?.label ?? '';
+  const meta = kind === 'concept' ? `知识点 · ${MASTERY_LABEL[c?.mastery] ?? '未验证'}` : kind === 'extension' ? '扩展节点（尚未升格为知识点）'
+    : kind === 'topic' ? `主题（课程大纲）· ${members.length} 个节点` : '';
+  const shownRows = allRels ? rows : rows.slice(0, REL_PREVIEW);
+  const shownMembers = allRels ? members : members.slice(0, REL_PREVIEW);
+  const more = (n) => (n > REL_PREVIEW ? (
+    <button className="linkbtn kgmore" data-testid="graph-rel-more" onClick={() => setAllRels((v) => !v)}>{allRels ? '收起' : `展开全部 ${n} 条`}</button>) : null);
   return (
-    <aside className="card kgside" data-testid="graph-side" style={height ? { maxHeight: height } : undefined}>
+    <aside className="card kgside" data-testid="graph-side" data-kind={kind ?? undefined} style={height ? { maxHeight: height } : undefined}>
       {overlay && <button className="tbtn kgside-hide" data-testid="graph-side-hide" onClick={() => setHidden(true)} title="收起详情栏（只在「整个工作台」时浮在图上）">收起 ›</button>}
-      {(c || graphNode) ? (
+      {selNode ? (
         <div data-testid="graph-detail">
-          <b>{c?.title ?? graphNode?.label}</b>
-          <p className="kmeta">{c ? `知识点 ID: ${c.id}` : '扩展节点（尚未升格为知识点）'}</p>
-          {c && (
-            <p className="kplinks">
-              <button className="tbtn primary kgquiz" data-testid="graph-quiz"
-                title="在输入框放入「测这个点」请求（不发送）；发送后导师就这个知识点出一道题，等你作答再评分"
-                onClick={async () => { await onAddToChat?.({ kind: 'quiz', id: c.id, title: c.title }); }} disabled={!onAddToChat}>测这个点</button>
+          <b className="kgside-title">{title}</b>
+          <p className={`kmeta kgkind ${kind}`} data-testid="graph-detail-kind">{meta}</p>
+          {(can.quiz || can.focus || can.path) && (
+            <p className="kplinks kgactions">
+              {can.quiz && c && (
+                <button className="tbtn primary kgquiz" data-testid="graph-quiz"
+                  title="在输入框放入「测这个点」请求（不发送）；发送后导师就这个知识点出一道题，等你作答再评分"
+                  onClick={async () => { await onAddToChat?.({ kind: 'quiz', id: c.id, title: c.title }); }} disabled={!onAddToChat}>测这个点</button>
+              )}
+              {can.focus && selectedGraphId !== focusId && <button className="tbtn" data-testid="graph-side-focus" onClick={() => onFocus(selectedGraphId)}>聚焦</button>}
+              {can.path && <button className="tbtn" data-testid="graph-side-path" onClick={() => onPathTo(selectedGraphId)}>学习路径</button>}
             </p>
           )}
-          <p className="kplinks">
-            {selectedGraphId && selectedGraphId !== focusId && <button className="tbtn" data-testid="graph-side-focus" onClick={() => onFocus(selectedGraphId)}>聚焦</button>}
-            {selectedGraphId && <button className="tbtn" data-testid="graph-side-path" onClick={() => onPathTo(selectedGraphId)}>学习路径</button>}
-            {graphNode && <AddToChatButton resource={{ kind: 'graphNode', id: graphNode.id, title: graphNode.label ?? c?.title }} onAddToChat={onAddToChat} testId="add-to-chat-graph" />}
-            {c && <AddToChatButton resource={{ kind: 'concept', id: c.id, title: c.title }} onAddToChat={onAddToChat} testId="add-to-chat-graph-concept" />}
+          <p className="kplinks kgchat">
+            {/* one primary add-to-chat per selection; for a knowledge point the graph-node ref (which also carries its
+                graph relations) is a secondary link */}
+            {c ? <AddToChatButton resource={{ kind: 'concept', id: c.id, title: c.title }} onAddToChat={onAddToChat} testId="add-to-chat-graph-concept" label="添加知识点到对话" />
+              : kind === 'extension' && graphNode ? <AddToChatButton resource={{ kind: 'graphNode', id: graphNode.id, title: graphNode.label }} onAddToChat={onAddToChat} testId="add-to-chat-graph" />
+              : topic ? <AddToChatButton resource={{ kind: 'topic', id: topic.id, title: topic.title }} onAddToChat={onAddToChat} testId="add-to-chat-graph-topic" label="添加主题到对话" /> : null}
+            {c && graphNode && rows.length > 0 && <AddToChatButton resource={{ kind: 'graphNode', id: graphNode.id, title: graphNode.label ?? c.title }} onAddToChat={onAddToChat} testId="add-to-chat-graph" label="连同图谱关系添加" variant="link" />}
           </p>
-          {c && c.kind !== 'topic' && (() => {
+          {c && (() => {
             const cardIds = boardElements.filter((e) => e.type === 'concept' && e.conceptId === c.id).map((e) => e.id);
             return (
               <p className="kplinks">
@@ -1027,13 +1055,30 @@ function GraphSidePanel({ graphNode, c, view, conceptById, relations, nav, board
               </p>
             );
           })()}
-          <p className="small">理解状态：{c ? `${MASTERY_LABEL[c.mastery]}（${c.mastery}）。` : '扩展节点没有掌握状态。'}</p>
-          <p className="small">{related.length ? `相关候选关系：${related.map(relText).join('；')}。` : '暂无候选关系。'}这里只展示候选关系，不把图形箭头误认为已验证知识。</p>
-          {related.length > 0 && (
-            <div className="kplinks">
-              {related.map((r) => (
-                <AddToChatButton key={r.id} resource={{ kind: 'relation', id: r.id, title: relText(r) }} onAddToChat={onAddToChat} testId="add-to-chat-relation" />
-              ))}
+          {kind === 'extension' && <p className="small muted" data-testid="graph-ext-note">扩展节点没有理解状态，也不出题；升格为知识点后才能测。</p>}
+          {topic ? (
+            <div className="kgrels" data-testid="graph-topic-members">
+              <div className="small kgrels-head">包含（来自大纲）</div>
+              {members.length ? (
+                <ul>{shownMembers.map((n) => (
+                  <li key={n.id}><button className="linkbtn" onClick={() => onSelectNode(n.id)} title={n.label}>{n.label}</button>{n.kind === 'extension' ? <span className="kgtag ext">扩展</span> : null}</li>
+                ))}</ul>
+              ) : <p className="small muted">这个主题下还没有节点。</p>}
+              {more(members.length)}
+            </div>
+          ) : (
+            <div className="kgrels" data-testid="graph-rels">
+              <div className="small kgrels-head" title="→ 从它指向对方，← 从对方指向它；都是候选关系，未验证">候选关系 {rows.length} 条 <span className="muted">· 均未验证</span></div>
+              {rows.length ? (
+                <ul>{shownRows.map((r) => (
+                  <li key={r.id} data-testid="graph-rel-row" title={`${r.dir === 'in' ? `${r.otherLabel} —${RELATION_LABEL[r.type] ?? r.type}→ ${title}` : `${title} —${RELATION_LABEL[r.type] ?? r.type}→ ${r.otherLabel}`}（候选）`}>
+                    <span className="kgreltype">{RELATION_LABEL[r.type] ?? r.type}</span>
+                    <span className="kgdir">{r.dir === 'in' ? '←' : '→'}</span>
+                    <button className="linkbtn" onClick={() => onSelectNode(r.otherId)}>{r.otherLabel}</button>
+                  </li>
+                ))}</ul>
+              ) : <p className="small muted">暂无候选关系。</p>}
+              {more(rows.length)}
             </div>
           )}
         </div>
@@ -1049,8 +1094,13 @@ function GraphSidePanel({ graphNode, c, view, conceptById, relations, nav, board
               return (
                 <li key={id} className={`${id === pathTarget ? 'target' : ''}${pathWeak.has(id) ? ' weak' : ''}`} data-node-id={id}>
                   <button className="linkbtn" onClick={() => onSelectNode(id)}>{n?.label ?? id}</button>
-                  {id === pathTarget ? <span className="small kgtag target">目标</span> : null}
-                  {pathWeak.has(id) ? <span className="small kgtag weak">薄弱 · {MASTERY_LABEL[n?.mastery] ?? '未验证'}</span> : n?.kind === 'extension' ? <span className="small muted"> 扩展</span> : null}
+                  {(id === pathTarget || pathWeak.has(id) || n?.kind === 'extension') && (
+                    <span className="kgtags">
+                      {id === pathTarget ? <span className="kgtag target">目标</span> : null}
+                      {pathWeak.has(id) ? <span className="kgtag weak" title={`薄弱：${MASTERY_LABEL[n?.mastery] ?? '未验证'}`}>薄弱 · {MASTERY_LABEL[n?.mastery] ?? '未验证'}</span> : null}
+                      {n?.kind === 'extension' ? <span className="kgtag ext">扩展</span> : null}
+                    </span>
+                  )}
                 </li>
               );
             })}

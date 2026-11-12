@@ -10,16 +10,29 @@
 //   top → bottom so a course fits a tall sidebar column; the force call passes linkDistance 110 / componentGap 60 and
 //   the packing aspect that best fits the canvas (several are tried) instead of upstream's 330 / 175 / 2.4 for the same reason.
 //   (2026-11-12) extra 'tb' layout = dagre top → bottom for the local focus / learning-path views (prerequisites above);
-//   node sizes for extension and folded-group nodes.
+//   node sizes for extension and folded-group nodes; sizeOfNode grows circles a little for long labels (dagre spacing
+//   and the live simulation's collision radius use it too).
 // Licensed under the Apache License, Version 2.0 (see THIRD_PARTY_NOTICES.md).
 import Dagre from '@dagrejs/dagre';
 import { layoutForceGraph } from './layout.mjs';
 
 /** Rendered node diameters (px), shared with the layouts so spacing matches. */
-export const NODE_SIZE = { topic: 80, concept: 66, extension: 62, fold: 78 };
+export const NODE_SIZE = { topic: 80, concept: 66, extension: 62, fold: 84 };
 /** Preferred edge length for the packed force layout and the live simulation (upstream: 330). */
 export const FORCE_LINK_DISTANCE = 110;
 export const sizeOfKind = (k) => NODE_SIZE[k] ?? NODE_SIZE.concept;
+/** Visual length of a label: CJK / full-width = 1, ASCII = 0.55 (about half as wide at the same font size). */
+export const labelWeight = (s) => [...String(s ?? '')].reduce((w, ch) => w + (ch.charCodeAt(0) < 0x2000 ? 0.55 : 1), 0);
+/** Long labels: up to two size steps (+12 / +22 px) so a 3–4 line label fits inside the circle. */
+export const LONG_LABEL = 9;
+export const VERY_LONG_LABEL = 14;
+export function sizeOfNode(n) {
+  const base = sizeOfKind(n?.kind);
+  if (!n || n.kind === 'fold') return base;
+  const w = labelWeight(n.label);
+  if (n.kind === 'topic') return w > VERY_LONG_LABEL ? base + 14 : w > LONG_LABEL + 1 ? base + 8 : base;
+  return w > VERY_LONG_LABEL ? base + 22 : w > LONG_LABEL ? base + 12 : base;
+}
 
 export function radialPositions(count) {
   if (count <= 0) return [];
@@ -58,11 +71,11 @@ export function layoutGraph(nodes, edges, layout, { aspect = 1.6, canvas } = {})
   }
   const g = new Dagre.graphlib.Graph({ multigraph: true }).setDefaultEdgeLabel(() => ({}));
   g.setGraph(layout === 'tb' ? { rankdir: 'TB', ranksep: 70, nodesep: 36 } : { rankdir: 'LR', ranksep: 100, nodesep: 40 });
-  for (const n of nodes) g.setNode(n.id, { width: sizeOfKind(n.kind) + 40, height: sizeOfKind(n.kind) });
+  for (const n of nodes) g.setNode(n.id, { width: sizeOfNode(n) + 40, height: sizeOfNode(n) });
   for (const e of edges) g.setEdge(e.source, e.target, {}, e.id);
   Dagre.layout(g);
   return new Map(nodes.map((n) => {
-    const p = g.node(n.id), half = sizeOfKind(n.kind) / 2;
+    const p = g.node(n.id), half = sizeOfNode(n) / 2;
     return [n.id, p ? { x: p.x - half, y: p.y - half } : { x: 0, y: 0 }];
   }));
 }

@@ -123,7 +123,7 @@ await step('graph (React Flow, after AWS OntologyGraphFlow): circles per topic c
   assert.equal(await page.locator(`${G} .react-flow__edge.kg-contains`).count(), 15);
   assert.ok(await page.locator(`${G} [data-testid=graph-legend]`).count() === 1, 'legend');
   await graphStill();
-  assert.ok(Number(await page.getAttribute(G, 'data-scale')) >= 0.8, 'readable zoom');
+  assert.ok(Number(await page.getAttribute(G, 'data-scale')) >= 0.8, 'readable zoom (automatic fit floor; only 「适配」 goes lower)');
   assert.equal(overlapCount(await kgBoxes()), 0, 'no two circles overlap after the force layout');
   assert.equal(await page.locator(`${G} .kg-node.dim`).count(), 0, 'nothing dimmed before any hover / click');
 });
@@ -219,11 +219,17 @@ await step('graph: focus on a node (前置 only, depth 1 / 2 / 3 / 全部), lear
   await eventually(async () => assert.equal(await page.getAttribute(G, 'data-local'), 'focus'));
   await eventually(async () => assert.match(await page.textContent('[data-testid=graph-status]'), /局部图 2 个节点、1 条前置。向上 2层，向下 1 层。/));
   assert.equal(await page.getAttribute(G, 'data-layout'), 'tb');
-  assert.equal(await page.locator(`${G} .kg-node`).count(), 2);
+  await eventually(async () => assert.equal(await page.locator(`${G} .kg-node`).count(), 2));
   assert.equal(await page.locator(`${G} .kg-node.focus[data-node-id="${r0.to}"]`).count(), 1);
   const a = await kgBox(r0.from), b = await kgBox(r0.to);
   assert.ok(a.y < b.y, 'prerequisite above the focused node');
-  assert.match(await page.textContent(`${G} .kg-elabel`), /前置 · 候选/);
+  // local views: every arrow is a candidate 前置 (legend), labels only while an edge is lit (no pile-up)
+  await awayFromGraph();
+  await eventually(async () => assert.equal(await page.locator(`${G} .kg-elabel`).count(), 0, 'no edge labels until hover'));
+  await kgNode(r0.from).hover();
+  await eventually(async () => assert.match(await page.textContent(`${G} .kg-elabel`), /前置 · 候选/));
+  await awayFromGraph();
+  assert.match(await page.textContent('[data-testid=graph-legend]'), /候选「前置」/);
   assert.match(await page.textContent('[data-testid=graph-legend]'), /不把这些箭头当成已验证知识/);
   await page.click('[data-testid=graph-depth-all]');
   await eventually(async () => assert.match(await page.textContent('[data-testid=graph-status]'), /向上 全部/));
@@ -258,12 +264,13 @@ await step('graph: dragging a node runs the live d3-force simulation (fx/fy pin,
   const kid = gnOf(Object.values(st.concepts).find((c) => c.topicId === t.id).id);
   const a = await kgBox(tid), k0 = await kgBox(kid);
   await page.mouse.move(a.x, a.y); await page.mouse.down();
-  for (let i = 1; i <= 14; i++) { await page.mouse.move(a.x + (90 * i) / 14, a.y + (60 * i) / 14); await page.waitForTimeout(16); }
-  await page.waitForTimeout(400);
-  const mid = await kgBox(tid), kmid = await kgBox(kid);
-  assert.ok(Math.hypot(mid.x - a.x - 90, mid.y - a.y - 60) < 20, 'dragged node pinned under the pointer');
-  assert.ok(Math.hypot(kmid.x - k0.x, kmid.y - k0.y) > 8, 'a contained knowledge point followed while dragging');
-  await page.mouse.up();
+  try {
+    for (let i = 1; i <= 14; i++) { await page.mouse.move(a.x + (90 * i) / 14, a.y + (60 * i) / 14); await page.waitForTimeout(16); }
+    await page.waitForTimeout(400);
+    const mid = await kgBox(tid), kmid = await kgBox(kid);
+    assert.ok(Math.hypot(mid.x - a.x - 90, mid.y - a.y - 60) < 20, 'dragged node pinned under the pointer');
+    assert.ok(Math.hypot(kmid.x - k0.x, kmid.y - k0.y) > 8, 'a contained knowledge point followed while dragging');
+  } finally { await page.mouse.up(); } // a failed check must not leave the button down for the next steps
   await awayFromGraph(); await graphStill();
   const a1 = await kgBox(tid);
   assert.ok(Math.hypot(a1.x - a.x - 90, a1.y - a.y - 60) < 40, 'released node keeps (about) its new place');
@@ -1565,6 +1572,41 @@ await step('resume: an open question is shown in the workbench and returned by t
   if (await btn.count()) await btn.click();
   await page.waitForSelector('[data-testid=resume-question]');
   assert.match(await page.textContent('[data-testid=resume-question]'), /间隔重复的核心机制/);
+});
+
+await step('graph: selecting an extension node sticks (扩展节点, candidate relations, 聚焦 / 学习路径; no 测这个点, no mastery); a knowledge point has one add-to-chat', async () => {
+  const st = await readState(); const kp = Object.values(st.concepts).find((c) => c.courseId === cid && c.status !== 'archived');
+  const gen = await tools.tutor_graph_generate.execute({ courseId: cid, nodes: [{ title: 'e2e 扩展示意图', description: 'e2e', ref: 'x1' }],
+    relations: [{ from: '$x1', to: kp.id, type: 'prerequisite', note: 'e2e' }] });
+  const extId = gen.addedNodes?.[0];
+  assert.ok(extId, 'extension node created');
+  await tab('graph');
+  await eventually(async () => assert.equal(await kgNode(extId).count(), 1), 6000);
+  assert.equal(await kgNode(extId).getAttribute('data-kind'), 'extension');
+  await page.fill('[data-testid=graph-search]', 'e2e 扩展');
+  await page.keyboard.press('Enter');
+  await page.fill('[data-testid=graph-search]', '');
+  await awayFromGraph();
+  // before the fix the selection snapped back to the first knowledge point
+  await eventually(async () => assert.equal(await page.getAttribute('[data-testid=graph-side]', 'data-kind'), 'extension'));
+  await page.waitForTimeout(400);
+  assert.equal(await page.getAttribute('[data-testid=graph-side]', 'data-kind'), 'extension', 'still the extension after a re-render');
+  assert.match(await page.textContent('[data-testid=graph-detail] b'), /e2e 扩展示意图/);
+  assert.match(await page.textContent('[data-testid=graph-detail-kind]'), /扩展节点（尚未升格为知识点）/);
+  assert.equal(await page.locator('[data-testid=graph-quiz]').count(), 0, 'no 测这个点 on an extension');
+  assert.doesNotMatch(await page.textContent('[data-testid=graph-detail]'), /理解状态：|知识点 ·/, 'no mastery');
+  assert.equal(await page.locator('[data-testid=graph-rel-row]').count(), 1, 'its candidate relation');
+  assert.equal(await page.locator('[data-testid=graph-side-focus]').count(), 1);
+  assert.equal(await page.locator('[data-testid=graph-side-path]').count(), 1);
+  assert.equal(await page.locator(`${G} .kg-node.sel[data-node-id="${extId}"]`).count(), 1, 'ringed in the graph');
+  // clicking the relation's other end selects that knowledge point: 测这个点 and one primary add-to-chat
+  await page.click('[data-testid=graph-rel-row] .linkbtn');
+  await eventually(async () => assert.equal(await page.getAttribute('[data-testid=graph-side]', 'data-kind'), 'concept'));
+  assert.equal(await page.locator('[data-testid=graph-quiz]').count(), 1);
+  assert.equal(await page.locator('[data-testid=add-to-chat-graph-concept]').count(), 1);
+  assert.equal((await page.textContent('[data-testid=add-to-chat-graph-concept]')).trim(), '添加知识点到对话');
+  assert.equal(await page.locator('[data-testid=graph-side] button.tbtn', { hasText: /^添加到对话$/ }).count(), 0, 'no second 「添加到对话」 button');
+  await page.screenshot({ path: join(shots, '08d-graph-extension-selected.png') });
 });
 
 await step('no page errors', async () => { assert.deepEqual(pageErrors, []); });

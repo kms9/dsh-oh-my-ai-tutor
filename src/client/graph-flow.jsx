@@ -19,19 +19,24 @@
 //   - Layout helpers live in ./coa/graphLayout.mjs (hierarchical = dagre left → right; force = upstream's packed
 //     layoutForceGraph with a shorter link distance and the canvas aspect ratio, so a course fits the column).
 //   - No attribute (datatype-property) ring, standalone-class toggle, Controls panel or fullscreen button: the
-//     workbench already has 放大 / 整个工作台 / 还原 and a readable-zoom fit (never below 0.8 unless asked).
+//     workbench already has 放大 / 整个工作台 / 还原 and its own fit (automatic fits ≥ 0.8 so text stays readable, 「适配」 ≥ 0.3 so every node is on screen).
 //   - Simulation ticks only update view state (positions); nothing in this file writes application data.
 //   (2026-11-12) Extension nodes get their own registered node type (they used to fall back to React Flow's empty
 //     default box); a `local` view (focus on one node / learning path, built by ./graph-focus.mjs) replaces the
 //     whole-course graph with a dagre top → bottom layout, folded topic groups and dotted skipped links; the two-node
 //     path is a directed 前置 learning path (no undirected fallback) with the target and weak points marked.
+//   (2026-11-12, later) Clicking a topic selects it too (the workbench keeps a graph selection of its own, so extension
+//     and topic nodes stay selected); long labels get a slightly larger circle and a smaller font (sizeOfNode); local
+//     views (all edges are candidate 前置) label an edge only while it is lit (hover), the whole-course view labels one
+//     edge per (target, type); 「适配」 may zoom out to FIT_MIN_ZOOM so every node is on screen, reserves the floating
+//     side panel's width and keeps nodes out from under the in-graph key / minimap.
 // Licensed under the Apache License, Version 2.0 (see THIRD_PARTY_NOTICES.md).
 import React, { createContext, forwardRef, useCallback, useContext, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { ReactFlow, ReactFlowProvider, Background, BackgroundVariant, MiniMap, Panel, BaseEdge, EdgeLabelRenderer, MarkerType, Handle, Position,
   applyNodeChanges, useInternalNode, useReactFlow, useStore } from '@xyflow/react';
 import { buildGraph, visibleGraph, neighbours, searchNodes, NODE_KINDS } from './graph-model.mjs';
 import { learningPath, weakIds } from './graph-focus.mjs';
-import { NODE_SIZE, FORCE_LINK_DISTANCE, sizeOfKind, layoutGraph, parallelEdgeCurves } from './coa/graphLayout.mjs';
+import { NODE_SIZE, FORCE_LINK_DISTANCE, sizeOfNode, labelWeight, LONG_LABEL, VERY_LONG_LABEL, layoutGraph, parallelEdgeCurves } from './coa/graphLayout.mjs';
 import { projectEdgeLabel } from './coa/labelProjection.mjs';
 import { createLiveForceSimulation } from './coa/liveForceSimulation.mjs';
 import { fitViewport, unionBounds, RELATION_LABEL } from './flow-layout.mjs';
@@ -45,7 +50,12 @@ const ARROW_SIZE = 14;
 const ARROW_GAP = 3;
 const RELATION = '#64748b';
 const CANDIDATE = '#b8860b';
-const MIN_READABLE_ZOOM = 0.8;
+/** Automatic fits (new layout / resize) stay readable; the 「适配」 button may go down to FIT_MIN_ZOOM to show every node. */
+export const AUTO_FIT_MIN_ZOOM = 0.8;
+export const FIT_MIN_ZOOM = 0.3;
+const FIT_PAD = 24;
+/** Height of the bottom strip the in-graph key and the minimap cover (the force packing leaves it free). */
+const PANEL_STRIP = 110;
 /** Courses bigger than this start with every topic collapsed (lazy reveal by double-click). */
 export const LAZY_THRESHOLD = 60;
 
@@ -66,14 +76,17 @@ function KgNode({ data }) {
   const cls = [lit && !lit.has(n.id) ? 'dim' : '', hits?.has(n.id) ? 'hit' : '', n.id === sel ? 'sel' : '', ends.includes(n.id) ? 'end' : '',
     n.id === target ? 'target' : '', weak?.has(n.id) ? 'weak' : '', n.id === focusId ? 'focus' : ''].filter(Boolean).join(' ');
   const topic = n.kind === 'topic', fold = n.kind === 'fold';
-  const size = sizeOfKind(n.kind);
+  const size = sizeOfNode(n);
+  const w = labelWeight(fold ? n.title : n.label);
+  const len = w > VERY_LONG_LABEL ? ' vlong' : w > LONG_LABEL ? ' long' : '';
   // mastery ring only on knowledge points (extensions have no mastery; folds and topics are groups)
   const mastery = n.kind === 'concept' ? (n.mastery ?? '') : '';
   return (
     <div className={`kg-node kg-dot kg-${n.kind} ${mastery} ${cls}`} style={{ '--c': data.color, width: size, height: size }} data-node-id={n.id} data-kind={n.kind}
       data-collapsed={topic ? String(!!n.collapsed) : undefined} data-weak={weak?.has(n.id) ? 'true' : undefined} title={nodeTitle(n, local)}>
       <Handle type="target" position={Position.Top} isConnectable={false} className="kg-anchor" />
-      <div className="kg-label">{fold ? <>{n.title}<br /><small>{n.count} 个前置</small></> : n.label}</div>
+      {fold ? <div className={`kg-label kg-foldlabel${len}`}><span>{n.title}</span><small>{n.count} 个前置</small></div>
+        : <div className={`kg-label${len}`}>{n.label}</div>}
       {topic && n.count > 0 && <span className="kg-badge" data-testid="kg-badge">{n.collapsed ? `+${n.count}` : '−'}</span>}
       {fold && <span className="kg-badge" data-testid="kg-fold-badge">+{n.count}</span>}
       <Handle type="source" position={Position.Bottom} isConnectable={false} className="kg-anchor" />
@@ -116,7 +129,7 @@ function FloatingEdge({ id, source, target, data, markerEnd, style, label }) {
       <BaseEdge id={id} path={path} markerEnd={markerEnd} style={style} interactionWidth={14} />
       {label ? (
         <EdgeLabelRenderer>
-          <div className={`kg-elabel ${data?.cls ?? ''}`} style={{ transform: `translate(-50%, -50%) translate(${labelPoint.x}px, ${labelPoint.y}px)`, opacity: style?.opacity }}
+          <div className={`kg-elabel ${data?.cls ?? ''}`} title={data?.title} style={{ transform: `translate(-50%, -50%) translate(${labelPoint.x}px, ${labelPoint.y}px)`, opacity: style?.opacity }}
             onMouseEnter={() => setHoveredEdgeId(id)} onMouseLeave={() => setHoveredEdgeId(null)}>{label}</div>
         </EdgeLabelRenderer>
       ) : null}
@@ -142,7 +155,7 @@ function useLiveForceSimulation(initialNodes, edges, setNodes, { enabled, nodeSi
 }
 
 const GraphFlowInner = forwardRef(function GraphFlowInner({ view, topics, selectedId, onSelect, height, minimap = false, onFit, layout = 'force',
-  query = '', pathMode = false, collapsed, setCollapsed, onPath, local = null, onLocalClick, onUnfold }, ref) {
+  query = '', pathMode = false, collapsed, setCollapsed, onPath, local = null, onLocalClick, onUnfold, reserve }, ref) {
   const rf = useReactFlow();
   const wrapRef = useRef(null);
   // `local` (graph-focus.mjs): a focus view or a learning path replaces the whole-course graph; no topic collapse there
@@ -160,13 +173,16 @@ const GraphFlowInner = forwardRef(function GraphFlowInner({ view, topics, select
   const [size, setSize] = useState({ w: 0, h: 0 });
   // the packed layout is chosen for the canvas shape (bucketed so small resizes do not re-pack)
   const aspect = size.w && size.h ? `${Math.round(size.w / 80)}x${Math.round(size.h / 80)}` : '';
-  const homes = useMemo(() => layoutGraph(vis.nodes, structuralEdges, effLayout, { canvas: { w: size.w, h: size.h } }), [structure, aspect]); // eslint-disable-line react-hooks/exhaustive-deps
-  const sizeOfId = useCallback((id) => sizeOfKind(id.startsWith('topic:') ? 'topic' : id.startsWith('fold:') ? 'fold' : 'concept'), []);
+  // pack for the area the fit can really use: minus the floating side panel and the strip under the key / minimap
+  const homes = useMemo(() => layoutGraph(vis.nodes, structuralEdges, effLayout, { canvas: { w: Math.max(200, size.w - (reserve?.right ?? 0)), h: Math.max(200, size.h - PANEL_STRIP) } }), [structure, aspect]); // eslint-disable-line react-hooks/exhaustive-deps
+  const sizeById = useRef(new Map());
+  sizeById.current = new Map(graph.nodes.map((n) => [n.id, sizeOfNode(n)]));
+  const sizeOfId = useCallback((id) => sizeById.current.get(id) ?? NODE_SIZE.concept, []);
   // Every graph node stays in the controlled list; collapsed knowledge points are `hidden` at their topic's place.
   const initialNodes = useMemo(() => graph.nodes.map((g0) => {
     const n = shown.get(g0.id) ?? g0, hidden = !shown.has(g0.id);
     const p = homes.get(n.id) ?? homes.get(`topic:${n.topicId}`) ?? { x: 0, y: 0 };
-    const size = sizeOfKind(n.kind);
+    const size = sizeOfNode(n);
     // Declared handles (centre anchors): React Flow then has handle bounds without measuring the DOM, so edges never
     // drop out while nodes are re-measured after a container change (seen in DSH after 放大 → 整个工作台).
     return { id: n.id, type: n.kind, hidden, position: p, width: size, height: size, zIndex: 2, data: { n, color: colorAt(tIndex.get(n.topicId)) },
@@ -208,6 +224,9 @@ const GraphFlowInner = forwardRef(function GraphFlowInner({ view, topics, select
   // sticky one-hop highlight only after a click in the graph (a selection coming from the sidebar just rings the node)
   const [clickFocus, setClickFocus] = useState(null);
   const [pathEnds, setPathEnds] = useState([]);
+  // a click highlight from the whole-course view must not carry into a focus / learning-path view (it would dim the
+  // local graph and label every edge of that node)
+  useEffect(() => { setClickFocus(null); }, [local?.kind, local?.focusId, local?.target]);
   useEffect(() => { if (!pathMode || local) setPathEnds([]); }, [pathMode, local]);
   // directed learning path along 前置 between the two picked nodes (graph-focus.mjs); never an undirected fallback
   const path = useMemo(() => (!local && pathEnds.length === 2 ? learningPath(fullGraph, pathEnds[0], pathEnds[1]) : null), [local, pathEnds, fullGraph]);
@@ -241,6 +260,18 @@ const GraphFlowInner = forwardRef(function GraphFlowInner({ view, topics, select
 
   const showEdgeLabels = useStore((s) => s.transform[2] >= EDGE_LABEL_MIN_ZOOM);
   const curves = useMemo(() => { const m = new Map(); const cs = parallelEdgeCurves(vis.edges); vis.edges.forEach((e, i) => m.set(e.id, cs[i])); return m; }, [vis.edges]);
+  // Label clutter: in a local view every arrow is a candidate 前置 (the legend says so), so an edge is labelled only
+  // while it is lit (hover); the whole-course view labels one edge per (target, type), lit edges always.
+  const labelled = useMemo(() => {
+    if (local) return new Set();
+    const seen = new Set(), out = new Set();
+    for (const e of vis.edges) {
+      if (e.kind !== 'relation') continue;
+      const k = `${e.target}|${e.label}|${e.status}`;
+      if (!seen.has(k)) { seen.add(k); out.add(e.id); }
+    }
+    return out;
+  }, [vis.edges, local]);
   const edges = useMemo(() => {
     const out = vis.edges.map((e) => {
       const hot = hotEdges?.has(e.id), dim = hotEdges && !hot;
@@ -260,16 +291,17 @@ const GraphFlowInner = forwardRef(function GraphFlowInner({ view, topics, select
       const candidate = e.status === 'candidate', stroke = candidate ? CANDIDATE : RELATION;
       const text = `${RELATION_LABEL[e.label] ?? e.label}${candidate ? ' · 候选' : ''}${e.members.length > 1 ? ` ×${e.members.length}` : ''}`;
       return { id: e.id, source: e.source, target: e.target, type: 'floating', zIndex: hot ? 1 : 0,
-        className: `kg-rel${dim ? ' dim' : ''}${hot ? ' hot' : ''}${e.aggregated ? ' agg' : ''}`, label: showEdgeLabels || hot ? text : undefined,
+        className: `kg-rel${dim ? ' dim' : ''}${hot ? ' hot' : ''}${e.aggregated ? ' agg' : ''}`, label: hot || (showEdgeLabels && labelled.has(e.id)) ? text : undefined,
         style: { stroke, strokeWidth: hot ? 2.8 : 1.8, strokeDasharray: candidate ? '6 4' : undefined, opacity: dim ? 0.12 : 1 },
         markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: ARROW_SIZE, height: ARROW_SIZE, markerUnits: 'userSpaceOnUse', strokeWidth: 1.5 },
-        data: { curve: curves.get(e.id) ?? 0, cls: dim ? 'dim' : hot ? 'hot' : '' } };
+        data: { curve: curves.get(e.id) ?? 0, cls: `${dim ? 'dim' : hot ? 'hot' : ''}${candidate ? ' cand' : ''}`, title: `${text}${candidate ? '（候选关系，未验证）' : ''}` } };
     });
     for (const e of graph.edges) if (!shown.has(e.source) || !shown.has(e.target)) out.push({ id: `hidden:${e.id}`, source: e.source, target: e.target, type: 'floating', hidden: true, data: {} });
     return out;
-  }, [vis.edges, graph.edges, shown, hotEdges && [...hotEdges].join(','), showEdgeLabels, curves, tIndex]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [vis.edges, graph.edges, shown, hotEdges && [...hotEdges].join(','), showEdgeLabels, curves, tIndex, labelled]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ─── readable fit (our workbench rule): never below 0.8 unless asked; keep the selection in view when it overflows ───
+  // ─── fit: automatic fits stay readable (≥ AUTO_FIT_MIN_ZOOM; keep the selection in view when it overflows); the 「适配」
+  // button shows every node (≥ FIT_MIN_ZOOM). `reserve.right` = width of the side panel floating over the canvas. ───
   useEffect(() => {
     const el = wrapRef.current; if (!el || typeof ResizeObserver === 'undefined') return undefined;
     const ro = new ResizeObserver(([en]) => setSize({ w: Math.round(en.contentRect.width), h: Math.round(en.contentRect.height) }));
@@ -278,19 +310,38 @@ const GraphFlowInner = forwardRef(function GraphFlowInner({ view, topics, select
   const focusRef = useRef(sel); focusRef.current = sel;
   const homesRef = useRef(simNodes); homesRef.current = simNodes;
   const [fitState, setFitState] = useState({ overflow: false, zoom: 1 });
-  const fit = useCallback(({ live = true } = {}) => {
+  const reserveRight = reserve?.right ?? 0;
+  const fit = useCallback(({ live = true, all = false } = {}) => {
     // after a structure change fit the FINAL layout (upstream: do not wait for the settle animation); otherwise fit
     // what is on screen (a dragged node may have left its packed home)
     const ns = live ? liveRef.current.filter((n) => !n.hidden) : homesRef.current;
     const b = unionBounds(ns.map((n) => ({ x: n.position.x, y: n.position.y, width: n.width, height: n.height })));
     if (!b || !size.w || !size.h) return;
-    const v = fitViewport(b, size.w, size.h, { minZoom: MIN_READABLE_ZOOM, maxZoom: 1.2 });
+    // selection / focus rings and the hover scale reach ~8 px past a circle: grow the bounds a little
+    const g = 8, bb = { x: b.x - g, y: b.y - g, width: b.width + 2 * g, height: b.height + 2 * g };
+    const w = Math.max(160, size.w - reserveRight);
+    const opts = { minZoom: all ? FIT_MIN_ZOOM : AUTO_FIT_MIN_ZOOM, maxZoom: 1.2, pad: FIT_PAD };
+    let h = size.h, v = fitViewport(bb, w, h, opts);
+    // the in-graph key (bottom-left) and the minimap (bottom-right) sit over the canvas: when a node would land under
+    // one of them, fit again into the height above them
+    const wr = wrapRef.current?.getBoundingClientRect();
+    const panels = [...(wrapRef.current?.querySelectorAll('.react-flow__panel.bottom') ?? [])].map((el) => {
+      const r = el.getBoundingClientRect(); return { x0: r.left - (wr?.left ?? 0), x1: r.right - (wr?.left ?? 0), y0: r.top - (wr?.top ?? 0) };
+    });
+    const under = panels.some((p) => ns.some((n) => {
+      const x0 = n.position.x * v.zoom + v.x, y1 = (n.position.y + n.height) * v.zoom + v.y, x1 = x0 + n.width * v.zoom;
+      return x1 > p.x0 && x0 < p.x1 && y1 > p.y0 - 4;
+    }));
+    if (under) {
+      h = Math.max(160, Math.min(...panels.map((p) => p.y0)) - 6);
+      v = fitViewport(bb, w, h, opts);
+    }
     const f = v.overflow && ns.find((n) => n.id === focusRef.current);
-    if (f) rf.setViewport({ x: size.w / 2 - (f.position.x + f.width / 2) * v.zoom, y: size.h / 2 - (f.position.y + f.height / 2) * v.zoom, zoom: v.zoom });
+    if (f) rf.setViewport({ x: w / 2 - (f.position.x + f.width / 2) * v.zoom, y: h / 2 - (f.position.y + f.height / 2) * v.zoom, zoom: v.zoom });
     else rf.setViewport({ x: v.x, y: v.y, zoom: v.zoom });
     setFitState({ overflow: v.overflow, zoom: v.zoom });
     onFit?.({ overflow: v.overflow, zoom: v.zoom });
-  }, [rf, size.w, size.h, onFit]);
+  }, [rf, size.w, size.h, onFit, reserveRight]);
   const fitRef = useRef(fit); fitRef.current = fit;
   const userMovedRef = useRef(false);
   const fittedKey = useRef('');
@@ -309,7 +360,7 @@ const GraphFlowInner = forwardRef(function GraphFlowInner({ view, topics, select
     const n = liveRef.current.find((x) => x.id === id && !x.hidden); if (!n) return;
     rf.setCenter(n.position.x + n.width / 2, n.position.y + n.height / 2, { zoom: Math.max(rf.getViewport().zoom, 1), duration: 200 });
   }, [rf]);
-  useImperativeHandle(ref, () => ({ fit: () => fit(), centreOn, zoomBy(f) { const v = rf.getViewport(); rf.setViewport({ ...v, zoom: Math.min(1.8, Math.max(0.3, v.zoom * f)) }, { duration: 120 }); } }), [fit, centreOn, rf]);
+  useImperativeHandle(ref, () => ({ fit: () => fit({ all: true }), centreOn, zoomBy(f) { const v = rf.getViewport(); rf.setViewport({ ...v, zoom: Math.min(1.8, Math.max(0.3, v.zoom * f)) }, { duration: 120 }); } }), [fit, centreOn, rf]);
 
   // ─── interaction ───
   const toggleTopic = (topicId) => setCollapsed((s) => { const next = new Set(s); if (next.has(topicId)) next.delete(topicId); else next.add(topicId); return next; });
@@ -318,7 +369,7 @@ const GraphFlowInner = forwardRef(function GraphFlowInner({ view, topics, select
     if (local) { if (n.kind === 'fold') onUnfold?.(); else onLocalClick?.(n.id); return; }
     if (pathMode) { setPathEnds((p) => (p.length >= 2 ? [n.id] : p.includes(n.id) ? p : [...p, n.id])); return; }
     setClickFocus(n.id);
-    if (n.kind !== 'topic') onSelect?.(n.id);
+    onSelect?.(n.id); // topics too: the workbench keeps its own graph selection (topic / extension / knowledge point)
   };
   const onNodeDoubleClick = (_e, node) => {
     const n = node.data.n;
@@ -362,14 +413,14 @@ function GraphLegend({ local, path }) {
   const line = (cls, text, k) => <div key={k}><span className={`kg-lg-line ${cls}`} />{text}</div>;
   let rows;
   if (local?.kind === 'focus') {
-    rows = [dot('focus', '聚焦节点', 'f'), dot('', '知识点', 'c'), dot('ext', '扩展节点', 'e'), line('cand', '前置（候选，金色虚线）', 'p'),
+    rows = [dot('focus', '聚焦节点', 'f'), dot('', '知识点', 'c'), dot('ext', '扩展节点', 'e'), line('cand', '金色虚线箭头 = 候选「前置」（悬停看标签）', 'p'),
       local.folds?.length ? dot('fold', '折叠：主题 · N个', 'fo') : null];
   } else if (local?.kind === 'path') {
-    rows = [dot('target', '目标', 't'), dot('weak', '薄弱点（未展示掌握）', 'w'), line('cand', '前置（候选）', 'p'),
+    rows = [dot('target', '目标', 't'), dot('weak', '薄弱点（未展示掌握）', 'w'), line('cand', '金色虚线箭头 = 候选「前置」', 'p'),
       local.omitted ? line('skip', '点线 = 省略了中间环节', 's') : null];
   } else {
     rows = [dot('big', '主题（类别）· 双击收起', 't'), dot('', '知识点（实例）', 'c'), dot('ext', '扩展节点（虚线圆）', 'e'),
-      line('contains', '包含（主题色虚线）', 'in'), line('rel', '关系', 'r'), line('cand', '候选关系（金色虚线）', 'cand'),
+      line('contains', '主题色虚线 = 主题包含知识点', 'in'), line('rel', '关系', 'r'), line('cand', '金色虚线 = 候选关系', 'cand'),
       path ? dot('target', '目标', 'pt') : null, path ? dot('weak', '薄弱点', 'pw') : null];
   }
   return (

@@ -241,7 +241,14 @@
 .omt .kg-topic{background:color-mix(in srgb,var(--c) 26%,#fff);border:3px solid var(--c);font-size:11.5px;font-weight:750}
 .omt .kg-concept{background:color-mix(in srgb,var(--c) 9%,#fff);border:2px solid color-mix(in srgb,var(--c) 75%,#fff)}
 .omt .kg-concept.developing{box-shadow:0 0 0 2px #fff,0 0 0 4px #e3a63b}.omt .kg-concept.demonstrated{box-shadow:0 0 0 2px #fff,0 0 0 4px #47a36a}
-.omt .kg-label{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word;pointer-events:none}
+.omt .kg-label{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;word-break:normal;overflow-wrap:anywhere;line-break:strict;pointer-events:none}
+/* long labels: the circle grows a step (sizeOfNode) and the text gets tighter, so 3–4 lines fit; full title on hover */
+.omt .kg-label.long{font-size:10.5px;line-height:1.15}
+.omt .kg-label.vlong{font-size:10px;line-height:1.12;-webkit-line-clamp:4}
+.omt .kg-topic .kg-label.long,.omt .kg-topic .kg-label.vlong{font-size:10.5px;-webkit-line-clamp:4}
+.omt .kg-label.kg-foldlabel{display:flex;flex-direction:column;align-items:center;gap:2px}
+.omt .kg-foldlabel>span{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;font-size:10px;line-height:1.15}
+.omt .kg-foldlabel>small{font-size:9.5px;white-space:nowrap}
 .omt .kg-badge{position:absolute;bottom:-4px;right:-4px;min-width:18px;height:18px;padding:0 3px;box-sizing:border-box;border-radius:9px;background:var(--c);color:#fff;font:700 11px/14px system-ui,sans-serif;border:2px solid #fff}
 .omt .kg-topic[data-collapsed=true]{border-style:dashed}
 .omt .react-flow__node:hover .kg-node{transform:scale(1.08);box-shadow:0 0 0 4px rgba(255,255,255,.55),0 6px 16px rgba(15,23,42,.35);z-index:1}
@@ -254,6 +261,7 @@
 .omt .kg-elabel{position:absolute;pointer-events:auto;cursor:default;background:#fff;color:#0f172a;border:1px solid #cbd5e1;border-radius:4px;padding:2px 7px;
   box-shadow:0 1px 3px rgba(15,23,42,.3);font:500 11px/1.3 system-ui,sans-serif;white-space:nowrap;transition:opacity 150ms ease-out}
 .omt .kg-elabel.hot{border-color:#b8860b;font-weight:650}
+.omt .kg-elabel.cand{border-style:dashed;border-color:#d9b25a;color:#6b4a00}
 .omt .kg .react-flow__handle.kg-anchor{opacity:0;pointer-events:none;width:1px;height:1px;min-width:0;min-height:0;border:0;top:50%}
 .omt .kg-legend{background:rgba(255,255,255,.94);border:1px solid #e5e7eb;border-radius:6px;padding:4px 8px;font:10.5px/1.2 system-ui,sans-serif;color:#0f172a;display:flex;flex-wrap:wrap;gap:2px 10px;max-width:260px}
 .omt .kg-legend>div{display:flex;align-items:center;gap:6px;margin:2px 0}
@@ -292,10 +300,27 @@
 .omt .kgside .tbtn.kgquiz{background:#fff4e5;border-color:#f0a43c;color:#8a4b00;font-weight:650;padding:4px 12px}
 .omt .kgside .tbtn.kgquiz:hover{background:#ffe8c7}
 .omt .kgpathlist ol{margin:4px 0 6px;padding-left:20px}
-.omt .kgpathlist li{margin:2px 0}
+.omt .kgpathlist{margin-top:10px;border-top:1px solid #eef1f5;padding-top:6px}
+.omt .kgpathlist li{margin:3px 0;line-height:1.35}
+.omt .kgpathlist li .linkbtn{vertical-align:top;text-align:left;margin:0;padding:0 2px;line-height:1.35}
 .omt .kgpathlist li.weak .linkbtn{color:#b4302a}
 .omt .kgpathlist li.target .linkbtn{font-weight:700}
-.omt .kgtag{border-radius:4px;padding:0 4px;margin-left:2px}
+.omt .kgtag{display:inline-block;white-space:nowrap;border-radius:4px;padding:0 5px;font-size:10.5px;line-height:1.6}
+.omt .kgtag.ext{background:#f1f5f9;color:#475569;border:1px dashed #94a3b8}
+.omt .kgpathlist li .kgtags{display:flex;flex-wrap:wrap;gap:3px;margin:1px 0 2px 4px}
+/* side panel: compact relation list, kind line, one primary add-to-chat */
+.omt .kgside .kgside-title{display:block;font-size:13px;line-height:1.35}
+.omt .kgside .kgkind{margin:2px 0 6px;color:#64748b}.omt .kgside .kgkind.extension{color:#7a4f00}
+.omt .kgside .kplinks{display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin:4px 0}
+.omt .kgside .kgchat .linkbtn{font-size:11px;color:#5d6c82}
+.omt .kgrels{margin-top:8px;border-top:1px solid #eef1f5;padding-top:6px}
+.omt .kgrels-head{color:#334155;font-weight:600;margin-bottom:2px}.omt .kgrels-head .muted{font-weight:400;font-size:10.5px}
+.omt .kgrels ul{list-style:none;margin:0;padding:0}
+.omt .kgrels li{display:flex;align-items:baseline;gap:4px;padding:2px 0;border-bottom:1px dashed #f1f3f7;min-width:0}
+.omt .kgrels li .linkbtn{flex:1 1 auto;min-width:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;text-align:left;margin:0;line-height:1.35}
+.omt .kgreltype{flex:none;font-size:10.5px;color:#7a4f00;background:#fff7e6;border:1px dashed #e0b35a;border-radius:4px;padding:0 4px;white-space:nowrap}
+.omt .kgdir{flex:none;color:#94a3b8;font-size:11px}
+.omt .kgmore{font-size:11px;margin-top:2px}
 .omt .kgtag.target{background:#fff1dc;color:#9a5500}.omt .kgtag.weak{background:#fde4e1;color:#a3291f}
 /* 数据 tab (record tables, knowledge point detail) and 日历 tab (to-dos, reviews, calendar); Glide Data Grid / FullCalendar are lazy chunks */
 .omt .linkbtn{border:0;background:none;padding:2px 4px;margin:0 4px 0 0;font:inherit;font-size:12px;color:#3346b8;cursor:pointer;border-radius:4px;text-decoration:underline;text-underline-offset:2px}
