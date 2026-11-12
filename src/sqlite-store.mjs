@@ -221,13 +221,18 @@ const ENTITY = {
 };
 const STATE_KEYS = Object.keys(ENTITY);
 
+/** Consistent snapshot of an open database into a new file (VACUUM INTO), mode 0600. The target must not already exist. */
+export function copyDb(db, target) {
+  if (existsSync(target)) throw new Error(`database copy destination already exists: ${target}`);
+  db.exec(`VACUUM INTO '${String(target).replaceAll("'", "''")}'`);
+  chmodSync(target, 0o600);
+  return target;
+}
 /** Consistent copy of a database before a migration: `<db>.bak-v<from>-<time>`, mode 0600 (never wider than the db). */
 export function backupDb(db, path, from, at = new Date().toISOString()) {
   const target = `${path}.bak-v${from}-${String(at).replace(/[:.]/g, '-')}`;
   if (existsSync(target)) return target;
-  db.exec(`VACUUM INTO '${target.replaceAll("'", "''")}'`);
-  chmodSync(target, 0o600);
-  return target;
+  return copyDb(db, target);
 }
 function conflict(message, extra = {}) { return Object.assign(new Error(message), { code: 'conflict', ...extra }); }
 

@@ -45,7 +45,7 @@ flowchart TB
 | `AssessmentEvidence` | `id,conceptId,lessonId,question,response,score,hints,rubric,origin,time` | 保存真实答案与实际提示；可追溯、不可猜测 |
 | `LearnerConceptState` | `learnerId,conceptId,status,modelVersion,evidenceIds` | 进度状态与知识掌握状态分离 |
 | `LearningNote` | `id,lessonId,conceptIds,body,author,sourceRefs,version` | 用户笔记与 AI 生成内容分开 |
-| `SourceRef` | `id,documentId,revision,locator,quote,verified` | 原文/页码/时间戳能回溯；不可凭模型假造 |
+| `SourceRef` | `{sourceId,locator}`（旧自由文本仍可读） | 必须指向已登记 Source；locator 尽量带页码/时间；点击打开 URI |
 | `CanvasBinding` | `courseId,boardId,owningSessionId,sceneRevision,conceptElementIds,relationElementIds` | 逻辑 ID ≠ 元素 ID；不能静默覆盖用户布局 |
 | `ReviewItem` | `id,conceptId,questionId,scheduler,dueAt,reviewHistory` | 一条复习流仅有一个权威调度器 |
 
@@ -56,18 +56,20 @@ flowchart TD
   G[goal_draft] --> C[course_draft]
   C -->|学习者批准 Syllabus| A[course_active]
   A --> P[lesson_plan_pending]
-  P -->|学习者批准 Lesson Plan| T[teaching_part]
+  P -->|学习者批准，或在其要求下由 AI 代批 Lesson Plan| T[teaching_part]
   T -->|保存内容并确认推进| T
   T -->|最后 Part| R[review_pending]
   R -->|真实回答/明确跳过| S[summary_pending]
-  S -->|笔记确认/明确跳过| E[lesson_complete]
+  S -->|笔记确认/明确跳过| F[feedback_pending]
+  F -->|反馈且要求改大纲| D[plan_adjustment_pending]
+  F -->|反馈或跳过、不改大纲| E[lesson_complete]
+  D -->|改大纲并批准（可 AI 代批）后继续| E
+  D -->|明确跳过调整| T
   E -->|课程未完成| P
-  T -->|要求显著调整| D[plan_adjustment_pending]
-  D -->|批准变更| T
-  D -->|拒绝变更| T
+  T -->|中途要求调整大纲| D
 ```
 
-原型具备 `plan_pending → teaching → review_pending → summary_pending → complete` 的数据状态，但**未建立真实用户身份绑定的审批令牌**。目标实现中 `approve` 接口必须接收由 DSH UI 用户操作产生、绑定 entity+revision 的 `decisionId`，不能由 Agent 自行生成。
+原型（及当前实现）的阶段为 `plan_pending → teaching → review_pending → summary_pending → feedback_pending → complete`，课中/课后调整走 `plan_adjustment_pending`。批准是绑定 entity+revision 的 CAS 动作，默认由学习者在工作台发起；学习者说「交给你」「跳过批准」或打开「交给 AI 批准」时，AI 可以代为调用同一 `approve` 动作并记录 actor 与依据，但**不能**在写入大纲时自动生效，也不能在未经请求时自行批准。
 
 ## 5. 视觉模型：四层不可混淆
 
@@ -120,7 +122,9 @@ flowchart TD
 
 ## 9. 真实开发中需要增加的系统能力
 
-- `ctx.storageDomain`/SQLite、领域事务、按实体版本 CAS；P0 prototype JSON 只承诺进程内顺序写。
+- SQLite 领域库 + 按实体版本 CAS。物理文件按工作区隔离，仍落在 `$DSH_HOME`（路线 B）：`$DSH_HOME/oh-my-ai-tutor/<workspace-key>/tutor.db`。锚点是会话不可变的 `SessionHeader.cwd`，禁止 `process.cwd()` 或后来 `cd` 后的目录。没有工作区时回退 `$DSH_HOME/oh-my-ai-tutor/tutor.db`。可配置 `dbPath`。现有全局库在首次打开某工作区时显式复制（先 0600 备份，不移动原文件）。工作区改名用 git 远程 / 包名指纹认领。JSON 回退库走同一套分桶，但不提供 FSRS / 待办。
+- 工作区目录只放教材等素材，不把主库写成项目内的 `.oh-my-ai-tutor`。同一工作区的 web / headless 读同一份库；打开工作区 A 打不开 B 的进度。
+
 - UserQuestion 审批令牌、用户实际回复验证和敏感写入防护。
 - 多个 Source Provider 的 chunk/page/timecode 定位与引用证据质量检查。
 - 模型 Worker 的版本化 Prompt、schema-constrained 输出、失败重试和中断恢复。

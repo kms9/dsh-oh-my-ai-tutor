@@ -10,7 +10,8 @@
 | ADR-006 | LookatStudy 参考交互与算法，不直接复用独立 `state.json` | 原状态与我们的实体 ID 不一致，BKT 未经领域校准 | 可独立调用其算法，保留版本和验证样本 |
 | ADR-007 | 优先完成 P0 单用户本地闭环 | 验证真实用户学习过程优先于多 Agent 和复杂基础设施 | 在真实使用出现共享/协作需求后推进 P1 |
 | ADR-008 | 覆盖、理解证据和掌握状态独立 | 完成 Lesson 不能推断掌握；跳过 Review 仍未验证 | 不变更，属于教育测量原则 |
-| ADR-009 | User approval gate 必须是不可由模型伪造的持久业务决策 | Lesson、Syllabus 修改必须可审计 | P0 后续实现，当前 Prompt 约束不满足硬门禁 |
+| ADR-009 | 大纲/课时计划的批准是带 CAS 的持久业务决策，默认由学习者在工作台完成 | 修改必须可审计，模型不得伪造一次「已批准」 | 已实现：修订号 CAS + 记录 actor。AI 仅在学习者说「交给你」「跳过批准」或工作台打开「交给 AI 批准」时可以代批，仍要走同一 approve 动作，禁止写入即自动生效 |
+| ADR-011 | 学习状态按工作区隔离，文件仍在 `$DSH_HOME/oh-my-ai-tutor/<workspace-key>/tutor.db`（路线 B） | 打开工作区 A 不应看到 B 的进度；项目目录搬家不应默默丢库；主库不进 git、不放在工作区 `.oh-my-ai-tutor` | 会话锚点必须是不可变的 `SessionHeader.cwd`，禁止 `process.cwd()` / 后来的 `cd`。无工作区回退全局 `tutor.db`。保留 `dbPath`。现有全局库首次打开某工作区时显式复制（先 0600 备份），不移动。工作区改名用 git/包名指纹认领（旧路径仍在则不自动合并） |
 | ADR-010 | 来源必须指向原始资料并注明是否核验 | 课程大纲和 AI 解释不可冒充学术证据 | 不变更，属于可信度约束 |
 
 完整设计与阶段门禁：[`ARCHITECTURE.md`](ARCHITECTURE.md)、[`ADAPTERS.md`](ADAPTERS.md)、[`ROADMAP.md`](ROADMAP.md)。
