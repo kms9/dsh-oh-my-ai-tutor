@@ -6,6 +6,9 @@ import { DataView } from './data-view.jsx';
 import { CalendarView } from './calendar-view.jsx';
 import { refView } from '../links.mjs';
 import { AddToChatButton } from './AddToChat.jsx';
+import { buildGraph } from './graph-model.mjs';
+import { focusGraph, learningPathTo, FOCUS_DEPTHS, DEFAULT_DEPTH, FOLD_AT } from './graph-focus.mjs';
+import { RELATION_LABEL } from './flow-layout.mjs';
 
 // heavy views load on first use (DSH: package-local chunks lib/client.flow.js and lib/client.mindmap.js)
 const BoardFlow = lazyComponent('flow', 'BoardFlow');
@@ -845,17 +848,17 @@ function ZoomButtons({ zoom, setZoom, prefix, what }) {
   );
 }
 
-const GRAPH_HINT = '悬停或点击：高亮一跳邻居；双击主题：收起 / 展开它的知识点；双击知识点：展开它关系所在的主题；拖动节点时力导向会带动邻居（只改这次的摆放，不保存）。';
+const GRAPH_HINT = '悬停或点击：高亮一跳邻居；双击主题：收起 / 展开它的知识点；双击知识点：展开它关系所在的主题；拖动节点时力导向会带动邻居（只改这次的摆放，不保存）。选中节点后可「聚焦」看它的前置。';
 const GRAPH_LAZY = 60; // same as LAZY_THRESHOLD in graph-flow.jsx: bigger courses start collapsed
+const DEPTH_KEY = 'omt.graph.focusDepth';
+const DEPTH_LABEL = { 1: '1层', 2: '2层', 3: '3层', all: '全部' };
+function readDepth() {
+  try { const v = globalThis.sessionStorage?.getItem(DEPTH_KEY); return FOCUS_DEPTHS.map(String).includes(v) ? (v === 'all' ? 'all' : Number(v)) : DEFAULT_DEPTH; } catch { return DEFAULT_DEPTH; }
+}
 function GraphView({ view, topics, selected, onSelect, conceptById, relations, zoom, setZoom, fill, rootRef, wide, nav, boardElements = [], focus, onAddToChat }) {
   const graphNode = view.nodes.find((n) => n.id === selected || n.conceptId === selected || n.refersTo === selected);
   const c = (graphNode?.conceptId && conceptById.get(graphNode.conceptId)) ?? conceptById.get(selected) ?? null;
   const selectedGraphId = graphNode?.id ?? null;
-  const related = relations.filter((r) => {
-    const fromC = r.fromConceptId ?? view.nodes.find((n) => n.id === r.from)?.conceptId;
-    const toC = r.toConceptId ?? view.nodes.find((n) => n.id === r.to)?.conceptId;
-    return r.from === selectedGraphId || r.to === selectedGraphId || (c && (fromC === c.id || toC === c.id));
-  });
   const selectNode = (id) => {
     if (!id) { onSelect(null); return; }
     const n = view.nodes.find((x) => x.id === id);
@@ -873,7 +876,24 @@ function GraphView({ view, topics, selected, onSelect, conceptById, relations, z
   const [pathMode, setPathMode] = useState(false);
   const [pathInfo, setPathInfo] = useState(null);
   const [collapsed, setCollapsed] = useState(() => (view.nodes.length > GRAPH_LAZY ? new Set(topics.map((t) => t.id)) : new Set()));
-  const height = useFillHeight(wrapRef, rootRef, fill, 460, zoom === 'off' ? 150 : 0);
+  // local views (graph-focus.mjs): focus on one node (前置 only, N levels up, 1 down) or the learning path to one target
+  const [focusId, setFocusId] = useState(null);
+  const [depth, setDepthState] = useState(readDepth);
+  const [unfold, setUnfold] = useState(false);
+  const [pathTarget, setPathTarget] = useState(null);
+  const setDepth = (d) => { setDepthState(d); setUnfold(false); try { globalThis.sessionStorage?.setItem(DEPTH_KEY, String(d)); } catch { /* private mode */ } };
+  const fullGraph = useMemo(() => buildGraph(view, topics), [view, topics]);
+  const local = useMemo(() => {
+    if (focusId) return focusGraph(fullGraph, focusId, { up: depth, down: 1, unfold });
+    if (pathTarget) return learningPathTo(fullGraph, pathTarget);
+    return null;
+  }, [fullGraph, focusId, depth, unfold, pathTarget]);
+  useEffect(() => { if ((focusId || pathTarget) && !local) { setFocusId(null); setPathTarget(null); } }, [local]); // eslint-disable-line react-hooks/exhaustive-deps
+  const startFocus = (id) => { if (!id) return; setPathMode(false); setPathInfo(null); setPathTarget(null); setUnfold(false); setFocusId(id); };
+  const startPathTo = (id) => { if (!id) return; setPathMode(false); setPathInfo(null); setFocusId(null); setPathTarget(id); };
+  const exitLocal = () => { setFocusId(null); setPathTarget(null); setUnfold(false); };
+  const onLocalClick = (id) => { selectNode(id); if (focusId && id !== focusId) { setUnfold(false); setFocusId(id); } };
+  const height = useFillHeight(wrapRef, rootRef, fill, 460, zoom === 'off' && !wide ? 150 : 0);
   const hits = query.trim() ? view.nodes.filter((n) => n.label.toLowerCase().includes(query.trim().toLowerCase())).length
     + topics.filter((t) => t.title.toLowerCase().includes(query.trim().toLowerCase())).length : 0;
   const allCollapsed = topics.length > 0 && topics.every((t) => collapsed.has(t.id));
@@ -882,6 +902,21 @@ function GraphView({ view, topics, selected, onSelect, conceptById, relations, z
     const n = view.nodes.find((x) => x.label.toLowerCase().includes(q));
     if (n) { setCollapsed((s) => { const next = new Set(s); next.delete(n.topicId); return next; }); selectNode(n.id); setTimeout(() => flowRef.current?.centreOn(n.id), 80); }
   };
+  const labelOf = (id) => fullGraph.nodes.find((n) => n.id === id)?.label ?? id;
+  const relCount = local ? local.graph.edges.filter((e) => e.kind !== 'skip').length : 0;
+  let status;
+  if (local?.kind === 'focus') {
+    status = <span data-testid="graph-focus-status">「{labelOf(local.focusId)}」的局部图 {local.graph.nodes.length} 个节点、{relCount} 条前置。向上 {DEPTH_LABEL[local.up]}，向下 1 层。
+      {local.foldedCount ? `较远的 ${local.foldedCount} 个前置按主题折叠。` : ''}{local.ancestorCount === 0 && local.dependentCount === 0 ? '它还没有任何前置关系。' : ''}只沿候选「前置」关系，不是已验证的知识。</span>;
+  } else if (local?.kind === 'path') {
+    status = <span className="kgpath" data-testid="graph-path-status">到「{labelOf(local.target)}」的学习路径：{local.nodes.length - 1 ? `${local.nodes.length - 1} 个前置` : '它没有前置'}{local.omitted ? `（另省略 ${local.omitted} 个中间环节）` : ''}，{local.weak.size} 个薄弱点。按学习顺序见右侧列表。</span>;
+  } else if (pathInfo?.path) {
+    status = <span className="kgpath">学习路径（{pathInfo.path.edges.length} 步，沿前置）：{pathInfo.labels.join(' → ')}{pathInfo.path.reversed ? '（按学习顺序，从你后点的节点开始）' : ''}</span>;
+  } else if (pathInfo?.ends?.length === 2) {
+    status = `「${pathInfo.endLabels?.[0] ?? ''}」和「${pathInfo.endLabels?.[1] ?? ''}」之间没有沿「前置」方向的路径（两个方向都试过；不按无方向的连线算）。`;
+  } else if (pathMode) {
+    status = pathInfo?.ends?.length === 1 ? '已选一个节点，再点另一个；会找沿「前置」箭头方向的学习路径。' : '依次点两个节点，找沿「前置」箭头方向的学习路径（先学 → 后学）。';
+  } else status = fitInfo.overflow ? '图谱比画布大：拖动空白处或滚轮平移，或点右上角「放大」。' : GRAPH_HINT;
   return (
     <div data-testid="graph-view">
       <div className="title2"><span>语义知识图谱 <span className="small">{view.nodes.length} 个节点 · {topics.length} 个主题 · {view.edges.length} 条关系</span></span>
@@ -890,33 +925,95 @@ function GraphView({ view, topics, selected, onSelect, conceptById, relations, z
           <ZoomButtons zoom={zoom} setZoom={setZoom} prefix="graph" what="图谱" />
         </span>
       </div>
-      <div className="tools rfbar kgbar" data-testid="graph-toolbar">
-        <input className="kgsearch" type="search" placeholder="搜索知识点 / 主题" value={query} data-testid="graph-search"
-          onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') findFirst(); if (e.key === 'Escape') setQuery(''); }} />
-        {query.trim() ? <span className="small" data-testid="graph-hits">{hits} 个匹配</span> : null}
-        <span className="seg" role="group" aria-label="布局">
-          <button className={`tbtn ${layout === 'force' ? 'on' : ''}`} data-testid="graph-layout-force" onClick={() => setLayout('force')} title="d3-force 力导向布局">力导向</button>
-          <button className={`tbtn ${layout === 'hierarchical' ? 'on' : ''}`} data-testid="graph-layout-hierarchical" onClick={() => setLayout('hierarchical')} title="dagre 层级布局（主题 → 知识点，左 → 右）">层级</button>
-        </span>
-        <button className="tbtn" data-testid="graph-collapse-all" onClick={() => setCollapsed(allCollapsed ? new Set() : new Set(topics.map((t) => t.id)))}>{allCollapsed ? '全部展开' : '全部收起'}</button>
-        <button className={`tbtn ${pathMode ? 'on' : ''}`} data-testid="graph-path" onClick={() => { setPathMode((v) => !v); setPathInfo(null); }} title="依次点两个节点，高亮它们之间的最短路径">{pathMode ? '路径：点两个节点' : '路径'}</button>
+      {local ? (
+        <div className="tools rfbar kgbar" data-testid="graph-toolbar">
+          <button className="tbtn" data-testid="graph-exit-local" onClick={exitLocal} title="回到整门课的知识图谱">← 返回全图</button>
+          {local.kind === 'focus' && (
+            <span className="seg" role="group" aria-label="向上层数" data-testid="graph-depth">
+              <span className="small kgseglabel">向上</span>
+              {FOCUS_DEPTHS.map((d) => (
+                <button key={d} className={`tbtn ${local.up === d ? 'on' : ''}`} data-testid={`graph-depth-${d}`} onClick={() => setDepth(d)} title={d === 'all' ? '显示全部前置' : `显示 ${d} 层前置`}>{DEPTH_LABEL[d]}</button>
+              ))}
+            </span>
+          )}
+          {local.kind === 'focus' && local.foldedCount > 0 && (
+            <button className="tbtn" data-testid="graph-unfold" onClick={() => setUnfold(true)}>共 {local.ancestorCount} 个前置，点此展开全部</button>
+          )}
+          {local.kind === 'focus' && unfold && local.ancestorCount > FOLD_AT && (
+            <button className="tbtn" data-testid="graph-refold" onClick={() => setUnfold(false)}>按主题折叠</button>
+          )}
+          {local.kind === 'focus' && <button className="tbtn" data-testid="graph-path-to-focus" onClick={() => startPathTo(local.focusId)} title="按学习顺序列出它的全部前置，标出薄弱点">到这里的学习路径</button>}
+          {local.kind === 'path' && <button className="tbtn" data-testid="graph-focus-target" onClick={() => startFocus(local.target)}>聚焦目标</button>}
+        </div>
+      ) : (
+        <div className="tools rfbar kgbar" data-testid="graph-toolbar">
+          <input className="kgsearch" type="search" placeholder="搜索知识点 / 主题" value={query} data-testid="graph-search"
+            onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') findFirst(); if (e.key === 'Escape') setQuery(''); }} />
+          {query.trim() ? <span className="small" data-testid="graph-hits">{hits} 个匹配</span> : null}
+          <span className="seg" role="group" aria-label="布局">
+            <button className={`tbtn ${layout === 'force' ? 'on' : ''}`} data-testid="graph-layout-force" onClick={() => setLayout('force')} title="d3-force 力导向布局">力导向</button>
+            <button className={`tbtn ${layout === 'hierarchical' ? 'on' : ''}`} data-testid="graph-layout-hierarchical" onClick={() => setLayout('hierarchical')} title="dagre 层级布局（主题 → 知识点，左 → 右）">层级</button>
+          </span>
+          <button className="tbtn" data-testid="graph-collapse-all" onClick={() => setCollapsed(allCollapsed ? new Set() : new Set(topics.map((t) => t.id)))}>{allCollapsed ? '全部展开' : '全部收起'}</button>
+          <button className="tbtn" data-testid="graph-focus" disabled={!selectedGraphId} onClick={() => startFocus(selectedGraphId)}
+            title={selectedGraphId ? '只看选中节点和它的前置（沿「前置」关系向上，向下 1 层）' : '先点选一个节点'}>聚焦</button>
+          <button className={`tbtn ${pathMode ? 'on' : ''}`} data-testid="graph-path" onClick={() => { setPathMode((v) => !v); setPathInfo(null); }} title="依次点两个节点，找沿「前置」方向的学习路径">{pathMode ? '路径：点两个节点' : '路径'}</button>
+        </div>
+      )}
+      <div className="small rf-hint" data-testid="graph-status" title={GRAPH_HINT}>{status}</div>
+      {/* 整个工作台: the panel floats over the canvas (collapsible) so the graph keeps the full width; otherwise a column
+          beside the graph when the right column is wide, or below it */}
+      <div className={`kgsplit${zoom === 'full' ? ' kgsplit-overlay' : wide ? ' kgsplit-side' : ''}`}>
+        <div className="rfhost" ref={wrapRef}>
+          <GraphFlow ref={flowRef} view={view} topics={topics} selectedId={selectedGraphId} onSelect={selectNode} height={height} minimap={wide && !local}
+            layout={layout} query={local ? '' : query} pathMode={pathMode} collapsed={collapsed} setCollapsed={setCollapsed} onPath={setPathInfo}
+            local={local} onLocalClick={onLocalClick} onUnfold={() => setUnfold(true)}
+            onFit={(f) => setFitInfo((x) => (x.overflow === f.overflow ? x : f))} />
+        </div>
+        <GraphSidePanel graphNode={graphNode} c={c} view={view} conceptById={conceptById} relations={relations} nav={nav} boardElements={boardElements}
+          onAddToChat={onAddToChat} local={local} pathInfo={pathInfo} fullGraph={fullGraph} height={zoom === 'full' ? height - 16 : wide ? height : undefined} overlay={zoom === 'full'}
+          onFocus={startFocus} onPathTo={startPathTo} focusId={focusId} onSelectNode={selectNode} />
       </div>
-      <div className="small rf-hint" data-testid="graph-status" title={GRAPH_HINT}>
-        {pathInfo?.path ? <span className="kgpath">最短路径（{pathInfo.path.edges.length} 步）：{pathInfo.labels.join(' → ')}</span>
-          : pathInfo?.ends?.length === 2 ? '这两个节点之间没有路径（中间的主题可能被收起，或确实没有关系）。'
-          : pathMode ? (pathInfo?.ends?.length === 1 ? '已选起点，再点终点。' : '先点起点，再点终点。')
-          : fitInfo.overflow ? '图谱比画布大：拖动空白处或滚轮平移，或点右上角「放大」。' : GRAPH_HINT}
-      </div>
-      <div className="rfhost" ref={wrapRef}>
-        <GraphFlow ref={flowRef} view={view} topics={topics} selectedId={selectedGraphId} onSelect={selectNode} height={height} minimap={wide}
-          layout={layout} query={query} pathMode={pathMode} collapsed={collapsed} setCollapsed={setCollapsed} onPath={setPathInfo}
-          onFit={(f) => setFitInfo((x) => (x.overflow === f.overflow ? x : f))} />
-      </div>
-      {(c || graphNode) && (
-        <div className="card" data-testid="graph-detail">
+      <p className="legend">圆点颜色 = 课程主题（大圆是主题，小圆是知识点，外圈颜色是理解状态；虚线圆是扩展节点，没有理解状态）；主题色虚线箭头 = 主题包含知识点（来自大纲）；<b style={{ color: '#9a6b16' }}>金色虚线箭头</b> = 候选语义关系，标签是关系类型。收起主题后，它的知识点的关系会接到主题圆上（×n 表示合并了几条）。「聚焦」和「学习路径」只沿候选「前置」关系走：橙色外圈是目标，红色是薄弱点（还没展示掌握的知识点），点线表示省略了中间环节。</p>
+    </div>
+  );
+}
+
+/** Persistent detail panel (right of the graph when wide, below it otherwise). */
+function GraphSidePanel({ graphNode, c, view, conceptById, relations, nav, boardElements, onAddToChat, local, pathInfo, fullGraph, height, overlay, onFocus, onPathTo, focusId, onSelectNode }) {
+  const [hidden, setHidden] = useState(false);
+  const selectedGraphId = graphNode?.id ?? null;
+  if (overlay && hidden) return <button className="tbtn kgside-open" data-testid="graph-side-open" onClick={() => setHidden(false)}>详情 ‹</button>;
+  const titleOf = (id) => view.nodes.find((n) => n.id === id)?.label ?? conceptById.get(id)?.title ?? id;
+  // the graph view's own edges (every relation, endpoints are graph node ids); model.relations only keeps the ones whose
+  // ends are raw knowledge-point ids, so graph-node relations were missing from this list
+  const related = [...new Map([...view.edges, ...relations].map((r) => [r.id, r])).values()].filter((r) => {
+    const fromC = r.fromConceptId ?? view.nodes.find((n) => n.id === r.from)?.conceptId;
+    const toC = r.toConceptId ?? view.nodes.find((n) => n.id === r.to)?.conceptId;
+    return r.from === selectedGraphId || r.to === selectedGraphId || (c && (fromC === c.id || toC === c.id));
+  });
+  const relText = (r) => `${titleOf(r.from)} —${RELATION_LABEL[r.type] ?? r.type}→ ${titleOf(r.to)}`;
+  const nodeOf = (id) => fullGraph.nodes.find((n) => n.id === id);
+  const pathIds = local?.kind === 'path' ? local.nodes : pathInfo?.path ? pathInfo.path.nodes : null;
+  const pathWeak = local?.kind === 'path' ? local.weak : new Set(pathInfo?.weak ?? []);
+  const pathTarget = local?.kind === 'path' ? local.target : pathInfo?.path?.to;
+  return (
+    <aside className="card kgside" data-testid="graph-side" style={height ? { maxHeight: height } : undefined}>
+      {overlay && <button className="tbtn kgside-hide" data-testid="graph-side-hide" onClick={() => setHidden(true)} title="收起详情栏（只在「整个工作台」时浮在图上）">收起 ›</button>}
+      {(c || graphNode) ? (
+        <div data-testid="graph-detail">
           <b>{c?.title ?? graphNode?.label}</b>
           <p className="kmeta">{c ? `知识点 ID: ${c.id}` : '扩展节点（尚未升格为知识点）'}</p>
+          {c && (
+            <p className="kplinks">
+              <button className="tbtn primary kgquiz" data-testid="graph-quiz"
+                title="在输入框放入「测这个点」请求（不发送）；发送后导师就这个知识点出一道题，等你作答再评分"
+                onClick={async () => { await onAddToChat?.({ kind: 'quiz', id: c.id, title: c.title }); }} disabled={!onAddToChat}>测这个点</button>
+            </p>
+          )}
           <p className="kplinks">
+            {selectedGraphId && selectedGraphId !== focusId && <button className="tbtn" data-testid="graph-side-focus" onClick={() => onFocus(selectedGraphId)}>聚焦</button>}
+            {selectedGraphId && <button className="tbtn" data-testid="graph-side-path" onClick={() => onPathTo(selectedGraphId)}>学习路径</button>}
             {graphNode && <AddToChatButton resource={{ kind: 'graphNode', id: graphNode.id, title: graphNode.label ?? c?.title }} onAddToChat={onAddToChat} testId="add-to-chat-graph" />}
             {c && <AddToChatButton resource={{ kind: 'concept', id: c.id, title: c.title }} onAddToChat={onAddToChat} testId="add-to-chat-graph-concept" />}
           </p>
@@ -930,18 +1027,39 @@ function GraphView({ view, topics, selected, onSelect, conceptById, relations, z
               </p>
             );
           })()}
-          <p className="small">理解状态：{c ? `${MASTERY_LABEL[c.mastery]}（${c.mastery}）。` : '扩展节点没有掌握状态。'}{related.length ? `相关候选关系：${related.map((r) => `${conceptById.get(r.from)?.title ?? r.from} —${r.type}→ ${conceptById.get(r.to)?.title ?? r.to}`).join('；')}。` : '暂无候选关系。'}这里只展示候选关系，不把图形箭头误认为已验证知识。</p>
+          <p className="small">理解状态：{c ? `${MASTERY_LABEL[c.mastery]}（${c.mastery}）。` : '扩展节点没有掌握状态。'}</p>
+          <p className="small">{related.length ? `相关候选关系：${related.map(relText).join('；')}。` : '暂无候选关系。'}这里只展示候选关系，不把图形箭头误认为已验证知识。</p>
           {related.length > 0 && (
             <div className="kplinks">
               {related.map((r) => (
-                <AddToChatButton key={r.id} resource={{ kind: 'relation', id: r.id, title: `${conceptById.get(r.from)?.title ?? r.from} —${r.type}→ ${conceptById.get(r.to)?.title ?? r.to}` }} onAddToChat={onAddToChat} testId="add-to-chat-relation" />
+                <AddToChatButton key={r.id} resource={{ kind: 'relation', id: r.id, title: relText(r) }} onAddToChat={onAddToChat} testId="add-to-chat-relation" />
               ))}
             </div>
           )}
         </div>
+      ) : (
+        <p className="small muted" data-testid="graph-side-empty">点选图上的一个节点，这里会显示它的详情、候选关系和「测这个点」。</p>
       )}
-      <p className="legend">圆点颜色 = 课程主题（大圆是主题，小圆是知识点，外圈颜色是理解状态）；细线箭头 = 主题包含知识点（来自大纲）；<b style={{ color: '#9a6b16' }}>金色虚线箭头</b> = 候选语义关系，标签是关系类型。收起主题后，它的知识点的关系会接到主题圆上（×n 表示合并了几条）。</p>
-    </div>
+      {pathIds && pathIds.length > 0 && (
+        <div className="kgpathlist" data-testid="graph-path-list">
+          <b className="small">学习顺序（沿候选「前置」）</b>
+          <ol>
+            {pathIds.map((id) => {
+              const n = nodeOf(id);
+              return (
+                <li key={id} className={`${id === pathTarget ? 'target' : ''}${pathWeak.has(id) ? ' weak' : ''}`} data-node-id={id}>
+                  <button className="linkbtn" onClick={() => onSelectNode(id)}>{n?.label ?? id}</button>
+                  {id === pathTarget ? <span className="small kgtag target">目标</span> : null}
+                  {pathWeak.has(id) ? <span className="small kgtag weak">薄弱 · {MASTERY_LABEL[n?.mastery] ?? '未验证'}</span> : n?.kind === 'extension' ? <span className="small muted"> 扩展</span> : null}
+                </li>
+              );
+            })}
+          </ol>
+          {local?.omitted ? <p className="small muted">为了清楚，省略了 {local.omitted} 个中间环节（图上用点线连接）。</p> : null}
+          <p className="small muted">不把这些箭头当成已验证知识；薄弱点按现有理解状态标出（未验证或发展中）。</p>
+        </div>
+      )}
+    </aside>
   );
 }
 

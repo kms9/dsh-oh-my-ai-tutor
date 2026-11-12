@@ -10,7 +10,7 @@ export const SOURCE_NAME = '学习资源';
 /** Kinds that can be referenced in the composer and (except where noted) jumped to from a chat link. */
 export const RESOURCE_KINDS = Object.freeze([
   'concept', 'mindmapNode', 'graphNode', 'relation', 'topic', 'outline',
-  'card', 'note', 'lesson', 'todo', 'review',
+  'card', 'note', 'lesson', 'todo', 'review', 'quiz',
 ]);
 
 export const RESOURCE_LABEL = Object.freeze({
@@ -25,6 +25,7 @@ export const RESOURCE_LABEL = Object.freeze({
   lesson: '课时',
   todo: '待办',
   review: '复习卡片',
+  quiz: '测这个点',
 });
 
 export const RESOURCE_SECTION = Object.freeze({
@@ -39,6 +40,7 @@ export const RESOURCE_SECTION = Object.freeze({
   lesson: '课时',
   todo: '待办',
   review: '复习卡片',
+  quiz: '知识点',
 });
 
 const ID_RE = /^[A-Za-z0-9_-]{1,160}$/;
@@ -56,6 +58,7 @@ export const RESOURCE_HINTS = Object.freeze({
   lesson: '用 lesson.updatePlan 改计划（仅 plan_pending）；用 lesson.partWrite 写讲解。批准计划须学习者同意或明确委托。',
   todo: '用 tutor_todo op:"update"，须带这条待办的 id 和 baseRevision。',
   review: '掌握与复习只针对知识点。仅在学习者于本对话真实回忆或作答后用 tutor_review_rate（须 baseRevision 和 evidence）。不要替学习者评分。',
+  quiz: '学习者在知识图谱上点了「测这个点」，请求就这个知识点做一次测验：在相关课时里用 tutor_write lesson.ask 出一道题（带这个 conceptId 和题型；客观题出题时就写入 answerKey），一次只出一题，题目和答案都不要提前透露。等学习者真实作答后再用 assessment.record 记录（客观题由系统按冻结答案判分）。不要替学习者作答，不要编造分数或掌握状态；答对一题也不等于已掌握。',
 });
 
 /** Opaque source-owned ref: `kind:courseId:id`. */
@@ -221,7 +224,7 @@ export function resourceSnapshot(state, ref, extras = {}) {
   const hint = RESOURCE_HINTS[kind];
   const base = { kind, id, courseId, hint };
 
-  if (kind === 'concept') {
+  if (kind === 'concept' || kind === 'quiz') {
     const c = state.concepts?.[id];
     if (!c || c.courseId !== courseId) throw missing(kind, id);
     const topic = topicOfConcept(course, id);
@@ -231,6 +234,7 @@ export function resourceSnapshot(state, ref, extras = {}) {
       ...base, title: c.title, status: c.status, mastery: c.mastery, description: c.description ?? '',
       topicId: c.topicId ?? topic?.id ?? null, topicTitle: topic?.title ?? null,
       mindmapNodeIds: mm.map((n) => n.id), graphNodeId: gn?.id ?? null,
+      ...(kind === 'quiz' ? { request: '测这个点：请就这个知识点出一道题，等我作答', conceptId: id } : {}),
     };
   }
   if (kind === 'mindmapNode') {

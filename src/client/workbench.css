@@ -259,6 +259,44 @@
 .omt .kg-legend>div{display:flex;align-items:center;gap:6px;margin:2px 0}
 .omt .kg-lg-dot{width:9px;height:9px;border-radius:50%;border:2px solid #6273dd;background:#eef0fb;display:inline-block}.omt .kg-lg-dot.big{width:11px;height:11px;border-width:3px;background:#cfd6f6}
 .omt .kg-lg-line{width:18px;height:0;border-top:2px solid #64748b;display:inline-block}.omt .kg-lg-line.contains{border-top:2px dashed #6273dd}.omt .kg-lg-line.cand{border-top:2px dashed #b8860b}
+/* Extension nodes (graph nodes that are not knowledge points): dashed outline, no mastery ring. Folded topic groups
+   (focus view): rounded "stack" card. Learning path: target = orange ring, weak point = red fill. Our own styles. */
+.omt .kg-extension{background:#fff;border:2px dashed color-mix(in srgb,var(--c) 70%,#fff);color:#334155;font-weight:550}
+.omt .kg-fold{border-radius:14px;background:repeating-linear-gradient(135deg,#f8fafc 0 6px,#eef2f7 6px 12px);border:2px dashed color-mix(in srgb,var(--c) 60%,#94a3b8);
+  box-shadow:3px 3px 0 -1px #fff,4px 4px 0 0 #cbd5e1;cursor:pointer;font-size:10.5px;color:#334155}
+.omt .kg-fold small{font-weight:500;color:#64748b}
+.omt .kg .react-flow__node-extension,.omt .kg .react-flow__node-fold{cursor:pointer}
+.omt .kg-node.focus{box-shadow:0 0 0 3px #fff,0 0 0 7px #4256c4}
+.omt .kg-node.weak{background:#fde4e1;border-color:#d0453a;border-style:solid}
+.omt .kg-node.target{box-shadow:0 0 0 3px #fff,0 0 0 7px #f08c00}
+.omt .kg-lg-dot.ext{border-style:dashed;background:#fff}
+.omt .kg-lg-dot.fold{border-radius:3px;border-style:dashed;border-color:#94a3b8;background:#eef2f7}
+.omt .kg-lg-dot.focus{box-shadow:0 0 0 2px #4256c4;border-color:#fff}
+.omt .kg-lg-dot.target{border-color:#f08c00;background:#fff}
+.omt .kg-lg-dot.weak{border-color:#d0453a;background:#fde4e1}
+.omt .kg-lg-line.skip{border-top:2px dotted #b8860b}
+.omt .kg-lg-note{flex-basis:100%;color:#7a4f00;font-size:10px}
+.omt .kgbar .seg .kgseglabel{align-self:center;margin-right:4px}
+.omt .kgbar .seg .kgseglabel+.tbtn{border-radius:6px 0 0 6px}
+.omt .kgbar .seg .kgseglabel~.tbtn:not(:last-child):not(.kgseglabel+.tbtn){border-radius:0;border-left:0}
+/* Graph + persistent detail panel: side by side when the column is wide, stacked otherwise */
+.omt .kgsplit{display:flex;flex-direction:column;gap:8px}
+.omt .kgsplit.kgsplit-side{flex-direction:row;align-items:flex-start}
+.omt .kgsplit.kgsplit-side>.rfhost{flex:1 1 auto;min-width:0}
+.omt .kgsplit.kgsplit-side>.kgside{flex:0 0 250px;overflow:auto;box-sizing:border-box;margin:0}
+.omt .kgside{font-size:12px}
+.omt .kgsplit.kgsplit-overlay{position:relative}
+.omt .kgsplit.kgsplit-overlay>.kgside{position:absolute;top:8px;right:8px;width:250px;overflow:auto;box-sizing:border-box;margin:0;z-index:6;box-shadow:0 4px 16px rgba(15,23,42,.16)}
+.omt .kgsplit.kgsplit-overlay>.kgside-open{position:absolute;top:8px;right:8px;z-index:6}
+.omt .kgside .kgside-hide{float:right;margin:-2px -2px 4px 6px}
+.omt .kgside .tbtn.kgquiz{background:#fff4e5;border-color:#f0a43c;color:#8a4b00;font-weight:650;padding:4px 12px}
+.omt .kgside .tbtn.kgquiz:hover{background:#ffe8c7}
+.omt .kgpathlist ol{margin:4px 0 6px;padding-left:20px}
+.omt .kgpathlist li{margin:2px 0}
+.omt .kgpathlist li.weak .linkbtn{color:#b4302a}
+.omt .kgpathlist li.target .linkbtn{font-weight:700}
+.omt .kgtag{border-radius:4px;padding:0 4px;margin-left:2px}
+.omt .kgtag.target{background:#fff1dc;color:#9a5500}.omt .kgtag.weak{background:#fde4e1;color:#a3291f}
 /* 数据 tab (record tables, knowledge point detail) and 日历 tab (to-dos, reviews, calendar); Glide Data Grid / FullCalendar are lazy chunks */
 .omt .linkbtn{border:0;background:none;padding:2px 4px;margin:0 4px 0 0;font:inherit;font-size:12px;color:#3346b8;cursor:pointer;border-radius:4px;text-decoration:underline;text-underline-offset:2px}
 .omt .linkbtn:hover{background:#eef1fc}

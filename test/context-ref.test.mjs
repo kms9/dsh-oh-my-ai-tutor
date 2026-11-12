@@ -99,6 +99,7 @@ test('serializeResource includes kind, id, content and a write/expand hint for e
     ['card', ctx.card.id, ['极限的定义', 'tutor_board_patch', 'boardRevision']],
     ['note', ctx.note.id, ['课堂笔记', '极限是逼近', 'note.update']],
     ['lesson', ctx.lesson.id, ['第一课', 'lesson.partWrite', 'planRevision']],
+    ['quiz', ctx.sub.conceptId, ['极限的定义', 'mastery', '测这个点', 'lesson.ask', 'answerKey', '不要编造分数']],
   ];
   for (const [kind, id, needles] of cases) {
     const ref = encodeRef({ kind, courseId: cid, id });
@@ -114,6 +115,19 @@ test('serializeResource includes kind, id, content and a write/expand hint for e
     assert.match(text, new RegExp(`courseId=${cid}`));
     for (const n of needles) assert.ok(text.includes(n), `${kind} should mention ${n}\n${text}`);
   }
+});
+
+test('「测这个点」: a quiz reference is a knowledge point plus a quiz request; chip label 测这个点·title; no catalog entry', () => {
+  const ctx = seed();
+  const insert = makeReferenceInsert({ kind: 'quiz', courseId: ctx.course.id, id: ctx.sub.conceptId, title: '极限的定义' });
+  assert.equal(insert.label, '测这个点·极限的定义');
+  assert.equal(insert.ref, `quiz:${ctx.course.id}:${ctx.sub.conceptId}`);
+  const snap = resourceSnapshot(ctx.state, insert.ref);
+  assert.equal(snap.conceptId, ctx.sub.conceptId);
+  assert.ok(snap.mastery);
+  assert.ok(snap.hint.includes('不要替学习者作答'));
+  assert.equal(catalogFromState(ctx.state, ctx.course.id).filter((i) => i.kind === 'quiz').length, 0, 'only the graph button creates it');
+  assert.throws(() => resourceSnapshot(ctx.state, encodeRef({ kind: 'quiz', courseId: ctx.course.id, id: 'no-such' })), /学习资源不存在/);
 });
 
 test('serialize fails clearly when the object is gone; note.update changes the next snapshot', () => {

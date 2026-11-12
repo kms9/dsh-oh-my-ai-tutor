@@ -9,12 +9,14 @@
 //   (topic vs knowledge point); 'hierarchical' is dagre left → right (ranksep 100, nodesep 40, multigraph) instead of
 //   top → bottom so a course fits a tall sidebar column; the force call passes linkDistance 110 / componentGap 60 and
 //   the packing aspect that best fits the canvas (several are tried) instead of upstream's 330 / 175 / 2.4 for the same reason.
+//   (2026-11-12) extra 'tb' layout = dagre top → bottom for the local focus / learning-path views (prerequisites above);
+//   node sizes for extension and folded-group nodes.
 // Licensed under the Apache License, Version 2.0 (see THIRD_PARTY_NOTICES.md).
 import Dagre from '@dagrejs/dagre';
 import { layoutForceGraph } from './layout.mjs';
 
 /** Rendered node diameters (px), shared with the layouts so spacing matches. */
-export const NODE_SIZE = { topic: 80, concept: 66 };
+export const NODE_SIZE = { topic: 80, concept: 66, extension: 62, fold: 78 };
 /** Preferred edge length for the packed force layout and the live simulation (upstream: 330). */
 export const FORCE_LINK_DISTANCE = 110;
 export const sizeOfKind = (k) => NODE_SIZE[k] ?? NODE_SIZE.concept;
@@ -28,7 +30,7 @@ export function radialPositions(count) {
     return { x: radius * Math.cos(angle), y: radius * Math.sin(angle) };
   });
 }
-/** Top-left React Flow positions for the visible nodes. `layout`: 'force' | 'hierarchical'. */
+/** Top-left React Flow positions for the visible nodes. `layout`: 'force' | 'hierarchical' (left → right) | 'tb' (top → bottom). */
 export function layoutGraph(nodes, edges, layout, { aspect = 1.6, canvas } = {}) {
   if (layout === 'force') {
     const pack = (a) => layoutForceGraph(nodes.map((n) => n.id), edges, { nodeSize: NODE_SIZE.topic, linkDistance: FORCE_LINK_DISTANCE, componentGap: 60, aspect: a });
@@ -55,7 +57,7 @@ export function layoutGraph(nodes, edges, layout, { aspect = 1.6, canvas } = {})
     return new Map(nodes.map((n, i) => [n.id, ps[i]]));
   }
   const g = new Dagre.graphlib.Graph({ multigraph: true }).setDefaultEdgeLabel(() => ({}));
-  g.setGraph({ rankdir: 'LR', ranksep: 100, nodesep: 40 });
+  g.setGraph(layout === 'tb' ? { rankdir: 'TB', ranksep: 70, nodesep: 36 } : { rankdir: 'LR', ranksep: 100, nodesep: 40 });
   for (const n of nodes) g.setNode(n.id, { width: sizeOfKind(n.kind) + 40, height: sizeOfKind(n.kind) });
   for (const e of edges) g.setEdge(e.source, e.target, {}, e.id);
   Dagre.layout(g);

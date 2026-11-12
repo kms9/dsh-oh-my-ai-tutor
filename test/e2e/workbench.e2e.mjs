@@ -176,18 +176,26 @@ await step('graph: search highlights matches; double-click a topic collapses it 
   await awayFromGraph(); await graphStill();
 });
 
-await step('graph: path between two nodes is highlighted; dagre (层级) ↔ force layout switch', async () => {
-  const st = await readState(); const r0 = Object.values(st.relations)[0];
+await step('graph: directed 前置 learning path between two nodes (target + weak marked); no undirected fallback; dagre (层级) ↔ force layout switch', async () => {
+  const st = await readState(); const r0 = Object.values(st.relations).find((r) => r.type === 'prerequisite');
   const fromC = relEnds(st, r0).fromC;
-  const sib = Object.values(st.concepts).find((c) => c.topicId === st.concepts[fromC].topicId && c.id !== fromC);
+  const sib = Object.values(st.concepts).find((c) => c.topicId === st.concepts[fromC].topicId && c.id !== fromC && gnOf(c.id) !== r0.to);
   await page.click('[data-testid=graph-path]');
+  // a sibling is only connected through the topic (no 前置 direction): reported as no path, not an undirected one
   await kgNode(gnOf(sib.id)).click();
   await kgNode(r0.to).click();
   await awayFromGraph();
-  await eventually(async () => assert.match(await page.textContent('[data-testid=graph-status]'), /最短路径（\d+ 步）/));
+  await eventually(async () => assert.match(await page.textContent('[data-testid=graph-status]'), /没有沿「前置」方向的路径/));
+  // picked target first: still a path in learning order
+  await kgNode(r0.to).click();
+  await kgNode(r0.from).click();
+  await awayFromGraph();
+  await eventually(async () => assert.match(await page.textContent('[data-testid=graph-status]'), /学习路径（1 步，沿前置）/));
   assert.equal(await page.getAttribute(G, 'data-mode'), 'path');
   assert.equal(await page.locator(`${G} .kg-node.end`).count(), 2);
-  assert.ok(await page.locator(`${G} .react-flow__edge.hot`).count() >= 2, 'path edges lit');
+  assert.equal(await page.locator(`${G} .kg-node.target[data-node-id="${r0.to}"]`).count(), 1, 'target ringed');
+  assert.ok(await page.locator(`${G} .react-flow__edge.hot`).count() >= 1, 'path edge lit');
+  assert.equal(await page.locator('[data-testid=graph-path-list] li').count(), 2);
   await page.screenshot({ path: join(shots, '01e-graph-path.png') });
   await page.click('[data-testid=graph-path]');
   await page.click('[data-testid=graph-layout-hierarchical]');
@@ -201,6 +209,46 @@ await step('graph: path between two nodes is highlighted; dagre (层级) ↔ for
   await page.screenshot({ path: join(shots, '01f-graph-dagre.png') });
   await page.click('[data-testid=graph-layout-force]');
   await eventually(async () => assert.equal(await page.getAttribute(G, 'data-layout'), 'force'));
+  await graphStill();
+});
+
+await step('graph: focus on a node (前置 only, depth 1 / 2 / 3 / 全部), learning path to it, 「测这个点」 puts a quiz chip in the composer', async () => {
+  const st = await readState(); const r0 = Object.values(st.relations).find((r) => r.type === 'prerequisite');
+  await kgNode(r0.to).click();
+  await page.click('[data-testid=graph-focus]');
+  await eventually(async () => assert.equal(await page.getAttribute(G, 'data-local'), 'focus'));
+  await eventually(async () => assert.match(await page.textContent('[data-testid=graph-status]'), /局部图 2 个节点、1 条前置。向上 2层，向下 1 层。/));
+  assert.equal(await page.getAttribute(G, 'data-layout'), 'tb');
+  assert.equal(await page.locator(`${G} .kg-node`).count(), 2);
+  assert.equal(await page.locator(`${G} .kg-node.focus[data-node-id="${r0.to}"]`).count(), 1);
+  const a = await kgBox(r0.from), b = await kgBox(r0.to);
+  assert.ok(a.y < b.y, 'prerequisite above the focused node');
+  assert.match(await page.textContent(`${G} .kg-elabel`), /前置 · 候选/);
+  assert.match(await page.textContent('[data-testid=graph-legend]'), /不把这些箭头当成已验证知识/);
+  await page.click('[data-testid=graph-depth-all]');
+  await eventually(async () => assert.match(await page.textContent('[data-testid=graph-status]'), /向上 全部/));
+  assert.equal(await page.evaluate(() => sessionStorage.getItem('omt.graph.focusDepth')), 'all');
+  await page.screenshot({ path: join(shots, '01g-graph-focus.png') });
+  // retarget by clicking the prerequisite
+  await kgNode(r0.from).click();
+  await eventually(async () => assert.equal(await page.locator(`${G} .kg-node.focus[data-node-id="${r0.from}"]`).count(), 1));
+  await page.click('[data-testid=graph-depth-2]');
+  await page.click('[data-testid=graph-exit-local]');
+  await eventually(async () => assert.equal(await page.getAttribute(G, 'data-local'), null));
+  await eventually(async () => assert.ok(await page.locator(`${G} .kg-topic`).count() > 0, 'whole-course graph back'));
+  // learning path to one target from the side panel
+  await kgNode(r0.to).click();
+  await page.click('[data-testid=graph-side-path]');
+  await eventually(async () => assert.equal(await page.getAttribute(G, 'data-local'), 'path'));
+  assert.equal(await page.locator(`${G} .kg-node.target[data-node-id="${r0.to}"]`).count(), 1);
+  assert.equal(await page.locator('[data-testid=graph-path-list] li').count(), 2);
+  await page.screenshot({ path: join(shots, '01h-graph-learning-path.png') });
+  await page.click('[data-testid=graph-exit-local]');
+  // 测这个点 (knowledge points only)
+  await page.evaluate(() => { window.__tutorAdded.length = 0; });
+  await page.click('[data-testid=graph-quiz]');
+  await eventually(async () => assert.equal(await page.evaluate(() => window.__tutorAdded.at(-1)?.kind), 'quiz'));
+  assert.equal(await page.evaluate(() => window.__tutorAdded.at(-1)?.id), relEnds(st, r0).toC);
   await graphStill();
 });
 
@@ -232,10 +280,11 @@ await step('graph: enlarge to the whole workbench shows every node', async () =>
     const r = await page.evaluate(() => {
       const c = document.querySelector('[data-testid=graph-flow]').getBoundingClientRect();
       const ns = [...document.querySelectorAll('[data-testid=graph-flow] .kg-node')].map((x) => x.getBoundingClientRect());
-      return { clipped: ns.filter((x) => x.left < c.left - 1 || x.right > c.right + 1 || x.top < c.top - 1 || x.bottom > c.bottom + 1).length, w: c.width };
+      return { clipped: ns.filter((x) => x.left < c.left - 1 || x.right > c.right + 1 || x.top < c.top - 1 || x.bottom > c.bottom + 1).length, w: c.width, h: c.height };
     });
+    // the detail panel floats over the canvas in 整个工作台, so the graph keeps the full width
     assert.ok(r.w > 1100, `whole workbench (${r.w}px)`);
-    assert.equal(r.clipped, 0, `${r.clipped} nodes clipped`);
+    assert.equal(r.clipped, 0, `${r.clipped} nodes clipped (graph ${Math.round(r.w)}×${Math.round(r.h)}, scale ${await page.getAttribute(G, 'data-scale')}, overflow ${await page.getAttribute(G, 'data-overflow')})`);
   });
   await page.screenshot({ path: join(shots, '01c-graph-enlarged.png') });
   await page.keyboard.press('Escape');

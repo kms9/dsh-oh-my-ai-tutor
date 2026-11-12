@@ -7,6 +7,13 @@
  *   simulation are the Apache-2.0 port in ./coa/ (see graph-flow.jsx).
  */
 
+/**
+ * Every node `kind` the graph views emit: topic (syllabus category), concept (knowledge point), extension (graph node
+ * that is not a knowledge point) and fold (focus view: farther prerequisites folded by topic). graph-flow.jsx
+ * registers one React Flow node type per entry — an unregistered kind renders as React Flow's empty default box.
+ */
+export const NODE_KINDS = Object.freeze(['topic', 'concept', 'extension', 'fold']);
+
 export function buildGraph(view, topics) {
   const nodes = [], edges = [];
   const topicOf = new Map();
