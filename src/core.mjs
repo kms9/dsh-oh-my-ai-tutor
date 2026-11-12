@@ -540,7 +540,17 @@ export function transition(original, action, input = {}, opts = {}) {
       course.syllabus.approval = { by: actor, at: now, ...(consent ? { consent } : {}), ...(actor === 'ai' && !payload.consent ? { delegated: true } : {}) };
       course.syllabus.lastApproved = { revision: course.syllabus.revision, at: now, by: actor, topics: clone(course.syllabus.topics) };
       if (actor === 'ai') autoSummary = `AI 代为批准大纲第 ${course.syllabus.revision} 版（依据：${consent.slice(0, 60)}）`;
-      result = { courseId: course.id, status: course.status, syllabusRevision: course.syllabus.revision, approvedBy: actor, ...(consent ? { consent } : {}) }; break;
+      // feedback → adjust → approve → continue: approving the adjusted outline resumes every lesson that waited for it
+      const resumed = [];
+      for (const l of Object.values(s.lessons)) {
+        if (l.courseId !== course.id || l.phase !== 'plan_adjustment_pending' || course.syllabus.revision <= (l.adjust?.fromSyllabusRevision ?? Infinity)) continue;
+        l.adjust = { ...l.adjust, doneAt: now, skipped: false, toSyllabusRevision: course.syllabus.revision, by: 'approval' };
+        l.phase = l.adjust.returnPhase;
+        if (l.phase === 'complete') l.status = 'complete';
+        l.updatedAt = now;
+        resumed.push({ lessonId: l.id, phase: l.phase });
+      }
+      result = { courseId: course.id, status: course.status, syllabusRevision: course.syllabus.revision, approvedBy: actor, ...(consent ? { consent } : {}), ...(resumed.length ? { resumedLessons: resumed } : {}) }; break;
     }
     case 'course.setApproval': {
       const course = requireId(s, 'courses', payload.courseId);
@@ -743,7 +753,13 @@ export function transition(original, action, input = {}, opts = {}) {
       // feedback → outline change → approval → continue (or the learner decided against the change: skipped)
       const lesson = requireId(s, 'lessons', payload.lessonId);
       const course = requireId(s, 'courses', lesson.courseId);
-      if (lesson.phase !== 'plan_adjustment_pending') throw new Error('No outline adjustment is pending for this lesson');
+      if (lesson.phase !== 'plan_adjustment_pending') {
+        // already resumed by the approval of the adjusted outline: only the next-lesson preview is still to record
+        if (!lesson.adjust?.doneAt) throw new Error('No outline adjustment is pending for this lesson');
+        const preview = optionalText(payload.nextPreview, 'nextPreview', 2000);
+        if (preview) { lesson.nextPreview = { text: preview, at: now }; touchLesson(lesson); }
+        result = { lessonId: lesson.id, phase: lesson.phase, status: lesson.status, adjust: lesson.adjust, nextPreview: lesson.nextPreview ?? null, alreadyResumed: true }; break;
+      }
       const skipped = payload.skipped === true;
       if (!skipped) {
         if (course.syllabus.revision <= lesson.adjust.fromSyllabusRevision) throw new Error('The outline has not been changed since the feedback; change it (tutor_outline_edit with a reason) or pass skipped:true if the learner decided against it');

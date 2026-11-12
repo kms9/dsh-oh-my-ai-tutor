@@ -172,8 +172,12 @@ export const MASTERY_LABEL = { unverified: '未验证', developing: '发展中',
 export const ACTION_LABEL = {
   'goal.create': '创建学习目标', 'source.register': '登记资料', 'course.create': '创建课程', 'course.linkSource': '关联资料',
   'course.plan': '写入大纲', 'course.editOutline': '编辑大纲', 'course.approve': '批准大纲', 'lesson.create': '创建课时计划',
-  'lesson.approve': '批准课时计划', 'lesson.partWrite': '写入讲解', 'lesson.cover': '完成一段讲解', 'assessment.record': '记录作答',
-  'lesson.reviewEnd': '结束复习', 'note.add': '添加笔记', 'lesson.finish': '结课', 'relation.propose': '提出候选关系',
+  'lesson.updatePlan': '修改课时计划', 'lesson.link': '关联课时知识点', 'lesson.approve': '批准课时计划',
+  'lesson.partWrite': '写入讲解', 'lesson.cover': '完成一段讲解', 'lesson.ask': '出题', 'lesson.hint': '给出提示',
+  'lesson.dropQuestion': '收回题目', 'lesson.checkpoint': '记下要点', 'assessment.record': '记录作答',
+  'lesson.reviewEnd': '结束复习', 'note.add': '添加笔记', 'note.link': '关联笔记知识点', 'lesson.finish': '结课',
+  'lesson.feedback': '课末反馈', 'lesson.adjustDone': '完成大纲调整', 'course.setApproval': '设置批准方式',
+  'relation.propose': '提出候选关系',
   'board.seed': '生成白板', 'board.patch': '编辑白板', 'todo.create': '添加待办', 'todo.update': '更新待办', 'review.rate': '复习评分',
 };
 export function relTime(iso, now = Date.now()) {

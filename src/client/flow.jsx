@@ -49,18 +49,21 @@ function BoardCardNode({ data, selected }) {
   const el = data.el;
   const editing = ctx.editing?.id === el.id;
   const note = el.type === 'note';
-  const ai = el.createdBy === 'ai';
-  const cls = ['rf-card', note ? `note ${ai ? 'note-ai' : 'note-me'}` : 'concept', selected ? 'sel' : '', el.stale ? 'stale' : '',
+  const courseNote = note && Boolean(el.noteId);
+  const ai = courseNote ? el.noteAuthor === 'ai' : el.createdBy === 'ai';
+  const cls = ['rf-card', note ? `note ${ai ? 'note-ai' : 'note-me'}${courseNote ? ' coursenote' : ''}` : 'concept', selected ? 'sel' : '', el.stale ? 'stale' : '',
     ctx.linkFrom === el.id ? 'linksrc' : '', ctx.fresh.has(el.id) ? 'fresh' : '', ctx.focusId === el.id ? 'focus' : '', el.mastery && el.mastery !== 'unverified' ? el.mastery : ''].filter(Boolean).join(' ');
   const custom = safeColor(el.color);
   return (
-    <div className={cls} data-element={el.id} data-type={el.type} data-concept={el.conceptId ?? ''} data-actor={el.createdBy ?? ''}
+    <div className={cls} data-element={el.id} data-type={el.type} data-concept={el.conceptId ?? ''} data-actor={el.createdBy ?? ''} data-note={el.noteId ?? ''}
       style={{ '--accent': data.color, ...(custom ? { background: custom } : {}) }}
-      title={note ? el.text : `${el.text} · ${MASTERY_LABEL[el.mastery] ?? ''}（双击改名，改的是课程大纲）`}>
+      title={courseNote ? `${el.text}（课程笔记，双击打开笔记）` : note ? el.text : `${el.text} · ${MASTERY_LABEL[el.mastery] ?? ''}（双击改名，改的是课程大纲）`}>
       <SideHandles connectable={ctx.editable && !editing} />
       {editing ? <CardEditor el={el} ctx={ctx} /> : <div className="rf-title">{el.text}</div>}
+      {courseNote && el.excerpt ? <div className="rf-excerpt">{el.excerpt}</div> : null}
       <div className="rf-foot">
-        {note ? <span className="rf-kind">{ai ? 'AI 便签' : '我的便签'}</span>
+        {courseNote ? <span className="rf-kind">{el.stale ? '笔记已不存在' : ai ? '课程笔记 · AI' : '课程笔记 · 我的'}</span>
+          : note ? <span className="rf-kind">{ai ? 'AI 便签' : '我的便签'}</span>
           : <span className={`rf-mastery ${el.mastery ?? ''}`}><i />{el.stale ? '已不在大纲' : MASTERY_LABEL[el.mastery] ?? '未验证'}</span>}
         <ActorBadge el={el} />
       </div>
@@ -91,7 +94,7 @@ const sig = (e) => `${e.updatedAt ?? ''}|${e.x}|${e.y}|${e.text ?? ''}|${e.label
  */
 const BoardFlowInner = forwardRef(function BoardFlowInner(props, ref) {
   const { elements, revision, topics, concepts, height, editable = true, linkMode = false, onLinkModeDone, onPatch, onRenameConcept,
-    syllabusRevision, onSelectConcept, onSelectionChange, onFit, minimap = false, focus = null } = props;
+    syllabusRevision, onSelectConcept, onSelectionChange, onFit, minimap = false, focus = null, onOpenNote } = props;
   const rf = useReactFlow();
   const wrapRef = useRef(null);
   const [nodes, setNodes] = useState([]);
@@ -236,9 +239,10 @@ const BoardFlowInner = forwardRef(function BoardFlowInner(props, ref) {
 
   const startEdit = useCallback((el) => {
     if (!editable) return;
+    if (el.type === 'note' && el.noteId) { onOpenNote?.(el.noteId); return; } // a course-note card shows the note; edit the note itself
     if (el.type === 'note') setEditing({ id: el.id, draft: el.text, rev: revRef.current });
     else if (el.type === 'concept' && !el.stale) setEditing({ id: el.id, draft: el.text, rev: syllabusRevision, concept: el.conceptId });
-  }, [editable, syllabusRevision, setEditing]);
+  }, [editable, syllabusRevision, setEditing, onOpenNote]);
   const commitEdit = useCallback(async (el, value) => {
     const ed = editingRef.current; if (!ed || ed.id !== el.id || ed.saving) return;
     const v = value.trim();

@@ -11,6 +11,7 @@ import { Workbench } from './Workbench.jsx';
 // The harness bundles the view chunks statically (DSH loads them on demand from lib/client.<name>.js).
 setChunkLoader((name) => ({ flow: flowChunk, mindmap: mindmapChunk, grid: gridChunk, calendar: calendarChunk })[name]);
 import { TutorToolCard } from './ToolCard.jsx';
+import { installTutorLinks, viewFor } from './link-intercept.mjs';
 
 /** Standalone harness (same component, same RPC envelope) for e2e tests and design comparison outside DSH. */
 const style = document.createElement('style');
@@ -31,4 +32,16 @@ window.__tutorApi = api;
 window.__TutorToolCard = TutorToolCard;
 window.__React = React;
 window.__createRoot = createRoot;
-createRoot(document.getElementById('root')).render(<Workbench api={api} initialView={params.get('view') ?? undefined} pollMs={Number(params.get('poll') ?? 1000)} />);
+// Same link interception as in DSH; the harness has one workbench, so "open the tab" = re-render it with a new navigation.
+const root = createRoot(document.getElementById('root'));
+let nav = { view: params.get('view') ?? undefined, focus: undefined, revision: 0 };
+window.__tutorOpened = [];
+const openWorkbench = (view, focus) => { nav = { view: view ?? nav.view, focus: focus ? { ...focus, nonce: Date.now() } : undefined, revision: nav.revision + 1 }; window.__tutorOpened.push({ view, focus }); render(); };
+window.__tutorOpenWorkbench = openWorkbench;
+window.__tutorExternal = [];
+const openExternal = (url) => { window.__tutorExternal.push(url); };
+function render() {
+  root.render(<Workbench api={api} initialView={nav.view} focus={nav.focus} navRevision={nav.revision} pollMs={Number(params.get('poll') ?? 1000)} openExternal={openExternal} />);
+}
+installTutorLinks((link) => openWorkbench(viewFor(link), link));
+render();

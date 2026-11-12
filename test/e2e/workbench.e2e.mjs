@@ -300,7 +300,7 @@ await step('outline: manual add + delete knowledge point, then learner approves'
 
 await step('approval gate: the AI cannot approve; a stale approve click is refused (review #1)', async () => {
   const c = await course();
-  await assert.rejects(tools.tutor_write.execute({ action: 'course.approve', payload_json: JSON.stringify({ courseId: cid, syllabusRevision: c.syllabus.revision }) }), /Only the learner/);
+  await assert.rejects(tools.tutor_write.execute({ action: 'course.approve', payload_json: JSON.stringify({ courseId: cid, syllabusRevision: c.syllabus.revision }) }), /learner asked|consent|交给你/i);
   const slow = await context.newPage();
   await slow.goto(`${url}?view=outline&poll=600000`);
   await slow.waitForSelector('[data-testid=approval-banner]');
@@ -1240,6 +1240,105 @@ await step('restart recovery: kill harness, restart, reload — all edits persis
   const actors = new Set(after.events.map((e) => e.actor).filter(Boolean));
   assert.ok(actors.has('ai') && actors.has('learner'));
   await page.screenshot({ path: join(shots, '10-after-restart-board.png') });
+});
+
+await step('approval: AI without consent is refused; with 「交给你」 it may approve; CAS still holds', async () => {
+  const o = await tools.tutor_visualize.execute({ courseId: cid, view: 'outline' });
+  await tools.tutor_outline_edit.execute({ reason: 'e2e：为验证 AI 批准做一次改名', courseId: cid, syllabusRevision: o.syllabusRevision, operations: [{ op: 'renameTopic', topicId: o.topics[0].id, title: o.topics[0].title + '†' }] });
+  const c = await course();
+  await assert.rejects(tools.tutor_write.execute({ action: 'course.approve', payload_json: JSON.stringify({ courseId: cid, syllabusRevision: c.syllabus.revision }) }), /learner asked|consent|交给你/i);
+  assert.equal((await course()).status, 'draft');
+  const rev = c.syllabus.revision;
+  await tools.tutor_outline_edit.execute({ reason: 'e2e：再改一次以制造冲突', courseId: cid, syllabusRevision: rev, operations: [{ op: 'renameTopic', topicId: o.topics[0].id, title: o.topics[0].title + '‡' }] });
+  await assert.rejects(tools.tutor_write.execute({ action: 'course.approve', payload_json: JSON.stringify({ courseId: cid, syllabusRevision: rev, consent: '交给你' }) }), /conflict|changed|revision/i);
+  const latest = (await course()).syllabus.revision;
+  await tools.tutor_write.execute({ action: 'course.approve', payload_json: JSON.stringify({ courseId: cid, syllabusRevision: latest, consent: '交给你' }) });
+  const done = await course();
+  assert.equal(done.status, 'active');
+  assert.equal(done.syllabus.approvedBy, 'ai');
+  await tab('outline');
+  await eventually(async () => assert.match(await page.textContent('[data-testid=approval-banner]'), /已批准/));
+  await page.screenshot({ path: join(shots, '18-ai-approve.png') });
+});
+
+await step('outline: the Chinese diff of a change is visible in the workbench', async () => {
+  await tab('outline');
+  const o = await tools.tutor_visualize.execute({ courseId: cid, view: 'outline' });
+  const title = o.topics[0].title;
+  await tools.tutor_outline_edit.execute({ reason: 'e2e：显示大纲 diff', courseId: cid, syllabusRevision: o.syllabusRevision, operations: [{ op: 'renameTopic', topicId: o.topics[0].id, title: title + '（diff）' }] });
+  await eventually(async () => {
+    const text = `${await page.textContent('[data-testid=approval-diff]').catch(() => '')}\n${await page.textContent('[data-testid=outline-changes]').catch(() => '')}`;
+    assert.match(text, /改名|diff|第 \d+/);
+  });
+  await page.waitForSelector('[data-testid=approve-outline]');
+  await page.click('[data-testid=approve-outline]');
+  await eventually(async () => {
+    if ((await course()).status !== 'active') {
+      const btn = page.locator('[data-testid=approve-outline]');
+      if (await btn.count()) await btn.click();
+    }
+    assert.equal((await course()).status, 'active');
+  }, 8000);
+});
+
+await step('notes: a lesson note can be placed on the board', async () => {
+  const st = await readState();
+  const lesson = Object.values(st.lessons)[0];
+  const kp = (await course()).syllabus.topics[0].subtopics[0].conceptId;
+  const out = await tools.tutor_write.execute({ action: 'note.add', payload_json: JSON.stringify({ lessonId: lesson.id, title: 'e2e 笔记上白板', content: '挂到知识点并放到白板', conceptIds: [kp] }) });
+  const note = out.result ?? out;
+  await page.reload();
+  await page.waitForSelector('[data-testid=tutor-workbench]');
+  await eventually(async () => assert.ok(await page.locator(`[data-note-id="${note.id}"]`).count()));
+  await page.click(`[data-note-id="${note.id}"] [data-testid=note-to-board]`);
+  await page.waitForSelector('[data-testid=board-view]');
+  await eventually(async () => assert.ok(await page.locator(`[data-note="${note.id}"]`).count()));
+  await page.screenshot({ path: join(shots, '19-note-on-board.png') });
+});
+
+await step('links: clicking a tutor.invalid href opens the knowledge point detail', async () => {
+  const kp = (await course()).syllabus.topics[0].subtopics[0];
+  const href = `https://tutor.invalid/concept/${kp.conceptId}?course=${cid}`;
+  await page.evaluate((href) => {
+    const a = document.createElement('a');
+    a.href = href; a.textContent = 'goto-kp'; a.dataset.testid = 'injected-tutor-link';
+    document.body.append(a);
+  }, href);
+  await page.click('[data-testid=injected-tutor-link]');
+  await page.waitForSelector('[data-testid=kp-detail]');
+  assert.match(await page.textContent('[data-testid=kp-detail-title]'), new RegExp(kp.title.slice(0, 4).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+});
+
+await step('feedback: finish → feedback_pending → skip completes the lesson', async () => {
+  const l = (await tools.tutor_write.execute({ action: 'lesson.create', payload_json: JSON.stringify({ courseId: cid, title: 'e2e 反馈课', parts: [{ title: 'p', objective: 'o' }] }) })).result;
+  await tools.tutor_write.execute({ action: 'lesson.approve', payload_json: JSON.stringify({ lessonId: l.id, planRevision: 1, consent: '交给你' }) });
+  await tools.tutor_write.execute({ action: 'lesson.partWrite', payload_json: JSON.stringify({ lessonId: l.id, partIndex: 0, body: 'b' }) });
+  await tools.tutor_write.execute({ action: 'lesson.cover', payload_json: JSON.stringify({ lessonId: l.id, partIndex: 0 }) });
+  await tools.tutor_write.execute({ action: 'lesson.reviewEnd', payload_json: JSON.stringify({ lessonId: l.id, skipped: true }) });
+  await tools.tutor_write.execute({ action: 'lesson.finish', payload_json: JSON.stringify({ lessonId: l.id, skipNotes: true }) });
+  assert.equal((await readState()).lessons[l.id].phase, 'feedback_pending');
+  await page.reload();
+  await page.waitForSelector('[data-testid=tutor-workbench]');
+  const btn = page.locator('button', { hasText: 'e2e 反馈课' });
+  if (await btn.count()) await btn.click();
+  await page.waitForSelector('[data-testid=feedback-banner]');
+  await page.click('[data-testid=feedback-skip]');
+  await eventually(async () => assert.equal((await readState()).lessons[l.id].phase, 'complete'));
+});
+
+await step('resume: an open question is shown in the workbench and returned by tutor_read', async () => {
+  const kp = (await course()).syllabus.topics[0].subtopics[0].conceptId;
+  const l = (await tools.tutor_write.execute({ action: 'lesson.create', payload_json: JSON.stringify({ courseId: cid, title: 'e2e 续学课', conceptIds: [kp], parts: [{ title: 'p', objective: 'o' }] }) })).result;
+  await tools.tutor_write.execute({ action: 'lesson.approve', payload_json: JSON.stringify({ lessonId: l.id, planRevision: 1, consent: '交给你' }) });
+  await tools.tutor_write.execute({ action: 'lesson.ask', payload_json: JSON.stringify({ lessonId: l.id, question: '间隔重复的核心机制是什么？', conceptId: kp }) });
+  const read = await tools.tutor_read.execute({ courseId: cid });
+  assert.equal(read.resume.pendingQuestion.question, '间隔重复的核心机制是什么？');
+  await page.reload();
+  await page.waitForSelector('[data-testid=tutor-workbench]');
+  const btn = page.locator('button', { hasText: 'e2e 续学课' });
+  if (await btn.count()) await btn.click();
+  await page.waitForSelector('[data-testid=resume-question]');
+  assert.match(await page.textContent('[data-testid=resume-question]'), /间隔重复的核心机制/);
 });
 
 await step('no page errors', async () => { assert.deepEqual(pageErrors, []); });

@@ -83,7 +83,9 @@ export function assignTopics(elements, topics, concepts = []) {
   for (const n of cards.filter((c) => c.type !== 'concept')) {
     const p = centre(n);
     let topic = null;
-    for (const a of arrows) {
+    // a course-note card belongs with the topic of the knowledge points it is attached to (data, not geometry)
+    for (const id of n.conceptIds ?? []) { if (byConcept.get(id)) { topic = byConcept.get(id); break; } }
+    if (!topic) for (const a of arrows) {
       const other = a.from === n.id ? a.to : a.to === n.id ? a.from : null;
       if (other && out.get(other)) { topic = out.get(other); break; }
     }

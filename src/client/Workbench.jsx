@@ -3,6 +3,7 @@ import { lazyComponent } from './chunks.jsx';
 import { arrangeOps } from '../board-layout.mjs';
 import { markdownToHtml, MASTERY_LABEL, ACTION_LABEL, relTime } from './layout.mjs';
 import { DataView } from './data-view.jsx';
+import { refView } from '../links.mjs';
 
 // heavy views load on first use (DSH: package-local chunks lib/client.flow.js and lib/client.mindmap.js)
 const BoardFlow = lazyComponent('flow', 'BoardFlow');
@@ -10,7 +11,8 @@ const GraphFlow = lazyComponent('flow', 'GraphFlow');
 const MindElixirMap = lazyComponent('mindmap', 'MindElixirMap');
 const ZOOM_TABS = ['mindmap', 'graph', 'board', 'data'];
 const TABS = [['outline', '课程大纲'], ['mindmap', '思维导图'], ['graph', '知识图谱'], ['board', '知识白板'], ['data', '数据']];
-const PHASES = [['plan_pending', '01 · 课时计划'], ['teaching', '02 · 分段讲解'], ['review_pending', '03 · Review'], ['summary_pending', '04 · 笔记']];
+const PHASES = [['plan_pending', '01 · 课时计划'], ['teaching', '02 · 分段讲解'], ['review_pending', '03 · Review'], ['summary_pending', '04 · 笔记'], ['feedback_pending', '05 · 反馈']];
+const PHASE_INDEX = { plan_adjustment_pending: 4, complete: 5 };
 const PART_STATUS = { not_started: '未开始', in_progress: '讲解中', covered: '已讲完' };
 
 function useWidthClass(ref) {
@@ -69,7 +71,7 @@ function InlineEdit({ value, onCommit, onCancel, testId }) {
  * The three-column learning workbench. All reads come from the tutor domain state through `api.call('workbench')`;
  * all learner edits go through `api.call('mutate')` (same transitions, gates and CAS the AI tools use).
  */
-export function Workbench({ api, visible = true, initialView, navRevision, pollMs = 1000, chrome = true }) {
+export function Workbench({ api, visible = true, initialView, navRevision, focus, pollMs = 1000, chrome = true, openExternal }) {
   const rootRef = useRef(null);
   const widthClass = useWidthClass(rootRef);
   const [rightRef, rightWidth] = useElementWidth();
@@ -96,7 +98,12 @@ export function Workbench({ api, visible = true, initialView, navRevision, pollM
   const [boardFocus, setBoardFocus] = useState(null);
   const [dataFocus, setDataFocus] = useState(null);
   const [outlineFocus, setOutlineFocus] = useState(null);
+  const [noteFocus, setNoteFocus] = useState(null);
+  const [lessonFocus, setLessonFocus] = useState(null);
   const nav = useMemo(() => ({
+    toLesson(id, part) { if (!id) return; setLessonId(id); setPartIndex(Number.isInteger(part) ? part : null); setLessonFocus({ id, nonce: Date.now() }); },
+    toNote(id) { if (!id) return; pendingFocus.current = { kind: 'note', id }; setFocusTick((n) => n + 1); }, // resolved against the model below
+    toTopic(topicId) { setTab('outline'); setOutlineFocus({ topicId, nonce: Date.now() }); },
     toCard(elementId, conceptId) { if (conceptId) setSelected(conceptId); if (!elementId) return; setTab('board'); setBoardFocus({ id: elementId, nonce: Date.now() }); },
     toDetail(conceptId) { if (!conceptId) return; setSelected(conceptId); setTab('data'); setDataFocus({ conceptId, nonce: Date.now() }); },
     toOutline(conceptId) { if (conceptId) setSelected(conceptId); setTab('outline'); setOutlineFocus({ conceptId, nonce: Date.now() }); },
@@ -111,6 +118,16 @@ export function Workbench({ api, visible = true, initialView, navRevision, pollM
   const [disconnected, setDisconnected] = useState(false);
 
   useEffect(() => { if (initialView && TABS.some(([k]) => k === initialView)) setTab(initialView); }, [initialView, navRevision]);
+  // A clicked tutor link (chat / tool card): { kind, id, courseId?, partIndex? }. Switch course first if needed, then
+  // jump once the model of that course is on screen.
+  const pendingFocus = useRef(null);
+  const [focusTick, setFocusTick] = useState(0);
+  useEffect(() => {
+    if (!focus?.kind || !focus?.id) return;
+    pendingFocus.current = { ...focus };
+    if (focus.courseId && focus.courseId !== courseRef.current) { setCourseId(focus.courseId); setLessonId(null); setPartIndex(null); }
+    setFocusTick((n) => n + 1);
+  }, [focus?.kind, focus?.id, focus?.courseId, focus?.partIndex, focus?.nonce, navRevision]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const reload = useCallback(async () => {
     const seq = ++seqRef.current;
@@ -195,6 +212,42 @@ export function Workbench({ api, visible = true, initialView, navRevision, pollM
     } finally { setBusy(false); }
   }, [api, reload]);
 
+  useEffect(() => {
+    const f = pendingFocus.current;
+    if (!f || !model) return;
+    if (f.courseId && model.course?.id !== f.courseId) {
+      if (!model.courses?.some((c) => c.id === f.courseId)) { pendingFocus.current = null; flash('链接指向的课程已不存在。', true); }
+      return; // the reload of that course is on its way
+    }
+    pendingFocus.current = null;
+    const m = model;
+    if (!m.course) return;
+    if (f.kind === 'concept') {
+      if (m.concepts.some((c) => c.id === f.id)) nav.toDetail(f.id); else flash('这个知识点已不在当前大纲里（删除只是退役，作答记录仍保留）。', true);
+    } else if (f.kind === 'card') {
+      const el = m.views.board.elements.find((e) => e.id === f.id);
+      nav.toCard(f.id, el?.conceptId);
+    } else if (f.kind === 'note') {
+      const n = m.notes.find((x) => x.id === f.id);
+      if (!n) flash('这条笔记不在当前课程里。', true);
+      else { if (n.lessonId) { setLessonId(n.lessonId); setPartIndex(null); } setNoteFocus({ id: f.id, nonce: Date.now() }); }
+    } else if (f.kind === 'lesson') {
+      if (m.lessons.some((l) => l.id === f.id)) nav.toLesson(f.id, f.partIndex); else flash('这节课不在当前课程里。', true);
+    } else if (f.kind === 'topic') {
+      nav.toTopic(f.id);
+    } else if (f.kind === 'outline') setTab('outline');
+  }, [model, focusTick]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const id = noteFocus?.id ?? (lessonFocus ? '__lesson' : null);
+    if (!id) return undefined;
+    const t = setTimeout(() => {
+      const el = noteFocus ? rootRef.current?.querySelector(`[data-note-id="${CSS.escape(noteFocus.id)}"]`) : rootRef.current?.querySelector('[data-testid=lesson-title]');
+      el?.scrollIntoView({ block: 'center' });
+    }, 80);
+    const clear = setTimeout(() => { setNoteFocus(null); setLessonFocus(null); }, 2600);
+    return () => { clearTimeout(t); clearTimeout(clear); };
+  }, [noteFocus?.nonce, lessonFocus?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
+
   if (error && !model) return <div className="omt" ref={rootRef}><div className="empty" style={{ padding: 28 }}>无法读取学习状态：{error}</div></div>;
   if (!model) return <div className="omt" ref={rootRef}><div className="empty" style={{ padding: 28 }}>正在读取学习状态…</div></div>;
   if (!model.course) return (
@@ -213,7 +266,15 @@ export function Workbench({ api, visible = true, initialView, navRevision, pollM
   const lessonNo = lesson ? lessons.indexOf(lesson) + 1 : 0;
   const pIndex = lesson ? Math.min(lesson.parts.length - 1, partIndex ?? lesson.activePartIndex ?? 0) : 0;
   const part = lesson?.parts[pIndex];
-  const phaseIdx = lesson ? (lesson.phase === 'complete' ? 4 : PHASES.findIndex(([k]) => k === lesson.phase)) : -1;
+  const phaseIdx = lesson ? (PHASE_INDEX[lesson.phase] ?? PHASES.findIndex(([k]) => k === lesson.phase)) : -1;
+  const sourcesState = { sources: Object.fromEntries((model.sources ?? []).map((x) => [x.id, x])) };
+  const lessonNotes = lesson ? model.notes.filter((n) => n.lessonId === lesson.id).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))) : [];
+  const noteCardOf = new Map(views.board.elements.filter((e) => e.type === 'note' && e.noteId).map((e) => [e.noteId, e.id]));
+  const resume = model.resume && lesson && model.resume.lessonId === lesson.id ? model.resume : null;
+  const putNoteOnBoard = async (n) => {
+    const ok = await mutate('board.patch', { courseId: course.id, baseRevision: views.board.boardRevision, operations: [{ op: 'add', type: 'note', noteId: n.id, arrows: true }] }, `把笔记「${n.title}」放到白板`, '笔记已放到白板（挂在它的知识点旁边）');
+    if (ok) setTab('board');
+  };
   const lessonAssessments = lesson ? model.assessments.filter((a) => a.lessonId === lesson.id).sort((a, b) => String(a.recordedAt).localeCompare(String(b.recordedAt))) : [];
   const selectedConcept = conceptById.get(selected) ?? concepts[0];
 
@@ -228,6 +289,9 @@ export function Workbench({ api, visible = true, initialView, navRevision, pollM
                 {model.courses.map((c) => <option key={c.id} value={c.id}>{c.title}</option>)}
               </select>
             )}
+            {model.workspace?.kind === 'workspace' && <span className="chip src" data-testid="workspace-chip" title={model.workspace.path}>{model.workspace.path?.split('/').filter(Boolean).at(-1) ?? '工作区'}{model.workspace.fromGlobal ? ' · 已从全局库迁入' : ''}{model.workspace.adoptedFrom ? ' · 已识别改名' : ''}{model.workspace.ambiguous ? ' · 多个工作区，显示最近会话' : ''}</span>}
+            {model.workspace?.kind === 'global' && <span className="chip" data-testid="workspace-chip" title="没有打开工作区，使用全局学习库">全局库</span>}
+            {model.workspace?.kind === 'configured' && <span className="chip" data-testid="workspace-chip">指定库</span>}
             {disconnected
               ? <span className="chip warn" data-testid="sync-chip" title={error}>已断开 · 显示第 {model.revision} 版</span>
               : <span className="chip src" data-testid="sync-chip">实时 · 第 {model.revision} 版</span>}
@@ -267,7 +331,8 @@ export function Workbench({ api, visible = true, initialView, navRevision, pollM
           {lesson ? (
             <>
               <div className="eyebrow">LESSON {String(lessonNo).padStart(2, '0')} / {course.title}</div>
-              <h1 className="h" data-testid="lesson-title">{lesson.title}</h1>
+              <h1 className={`h lessonhead${lessonFocus?.id === lesson.id ? ' linkflash' : ''}`} data-testid="lesson-title" data-lesson-id={lesson.id}>{lesson.title}</h1>
+              <LessonLinks lesson={lesson} topics={topics} conceptById={conceptById} nav={nav} />
               <div className="lead">目标：{goal?.expectedOutcome ?? lesson.parts.map((p) => p.objective).join('；')}</div>
               {lessons.length > 1 && (
                 <div className="parts" style={{ marginBottom: 8 }}>
@@ -276,8 +341,11 @@ export function Workbench({ api, visible = true, initialView, navRevision, pollM
               )}
               <div className="stepper" data-testid="stepper">
                 {PHASES.map(([k, label], i) => <span key={k} className={`step ${i === phaseIdx ? 'active' : i < phaseIdx ? 'done' : ''}`}>{label}</span>)}
+                {lesson.phase === 'plan_adjustment_pending' && <span className="step active" data-testid="step-adjust">↻ 调整大纲</span>}
                 {lesson.phase === 'complete' && <span className="step active">✓ 已结课</span>}
               </div>
+              {resume && <ResumeBox resume={resume} />}
+              <FlowBanner lesson={lesson} course={course} busy={busy} mutate={mutate} setTab={setTab} />
               <section className="lesson">
                 <div className="lessonbar">
                   <b>{part?.title ?? '课时计划'}</b>
@@ -290,9 +358,11 @@ export function Workbench({ api, visible = true, initialView, navRevision, pollM
                   {part?.body
                     ? <div data-testid="lesson-body" dangerouslySetInnerHTML={{ __html: markdownToHtml(part.body) }} />
                     : <div data-testid="lesson-body"><h4>{part?.title}</h4><p>{part?.objective}</p><p className="small">这一段的讲解还没有写入。在对话里让 AI 开讲后，会自动出现在这里。</p></div>}
+                  <SourceRefs refs={part?.sourceRefs} state={sourcesState} openExternal={openExternal} testId="part-refs" />
                   {lesson.phase === 'plan_pending' && (
-                    <div className="banner"><span>课时计划等待你确认（{lesson.parts.length} 段）。</span>
-                      <button className="action" disabled={busy} onClick={() => mutate('lesson.approve', { lessonId: lesson.id }, '学习者批准课时计划', '已批准课时计划')}>批准课时计划</button></div>
+                    <div className="banner" data-testid="lesson-plan-banner"><span>课时计划第 {lesson.planRevision ?? 1} 版等待你确认（{lesson.parts.length} 段）。
+                      <span className="sub2">{course.approvalMode === 'delegated' ? '你已把批准交给 AI：AI 会代你批准，这里也可以自己批。' : '也可以在对话里对 AI 说「交给你」，让 AI 代你批准。'}</span></span>
+                      <button className="action" disabled={busy} data-testid="approve-lesson" onClick={() => mutate('lesson.approve', { lessonId: lesson.id, planRevision: lesson.planRevision ?? 1 }, '学习者批准课时计划', '已批准课时计划')}>批准课时计划</button></div>
                   )}
                   <div className="q" data-testid="review-box">
                     <label>{lessonAssessments.length ? `Review：已记录 ${lessonAssessments.length} 道题的真实作答` : 'Review：讲完所有段落后，AI 会在对话里一次出一道题'}</label>
@@ -304,8 +374,29 @@ export function Workbench({ api, visible = true, initialView, navRevision, pollM
                         <div className="small">反馈：{a.feedback}</div>
                       </div>
                     ))}
-                    <NoteBox busy={busy} onSave={(text) => mutate('note.add', { lessonId: lesson.id, title: `我的笔记 · ${part?.title ?? lesson.title}`.slice(0, 160), content: text }, '学习者写笔记', '笔记已保存到课程状态')} />
+                    <NoteBox busy={busy} concepts={concepts} lessonConceptIds={lesson.conceptIds ?? []} selectedId={selectedConcept?.id}
+                      onSave={(text, conceptId) => mutate('note.add', { lessonId: lesson.id, title: `我的笔记 · ${part?.title ?? lesson.title}`.slice(0, 160), content: text, ...(conceptId ? { conceptIds: [conceptId] } : {}) }, '学习者写笔记', '笔记已保存到课程状态')} />
                   </div>
+                  {lessonNotes.length > 0 && (
+                    <div className="notes" data-testid="lesson-notes">
+                      <label className="small">本课笔记（{lessonNotes.length}）</label>
+                      {lessonNotes.map((n) => (
+                        <div key={n.id} className={`noteitem${noteFocus?.id === n.id ? ' linkflash' : ''}`} data-note-id={n.id} data-testid="note-item">
+                          <div className="ntitle">{n.author === 'learner' ? '我' : 'AI'} · {n.title}</div>
+                          <div className="ntext">{n.content}</div>
+                          <div className="chips">
+                            {(n.conceptIds ?? []).map((id) => conceptById.get(id)
+                              ? <button key={id} className="chip-link" data-testid="note-concept" onClick={() => nav.toDetail(id)}>知识点：{conceptById.get(id).title}</button>
+                              : <span key={id} className="chip-text">（已退役的知识点）</span>)}
+                            {noteCardOf.has(n.id)
+                              ? <button className="chip-link" data-testid="note-go-card" onClick={() => nav.toCard(noteCardOf.get(n.id), n.conceptIds?.[0])}>▦ 白板上的卡片 ›</button>
+                              : <button className="chip-link" disabled={busy} data-testid="note-to-board" onClick={() => putNoteOnBoard(n)}>▦ 放到白板</button>}
+                          </div>
+                          <SourceRefs refs={n.sourceRefs} state={sourcesState} openExternal={openExternal} />
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </section>
             </>
@@ -326,11 +417,13 @@ export function Workbench({ api, visible = true, initialView, navRevision, pollM
           </nav>
           {/* zero-height sticky toast: saving/conflict notices never shift the layout under the pointer */}
           <div className="noticebar">{notice && <div className={`notice ${notice.err ? 'err' : ''}`} data-testid="notice" role="status">{notice.text}</div>}</div>
-          {(tab === 'outline' || tab === 'mindmap') && <ApprovalBanner course={course} busy={busy} onApprove={() => mutate('course.approve', { courseId: course.id, syllabusRevision }, `学习者批准大纲第 ${syllabusRevision} 版`, '大纲已批准')} />}
-          {tab === 'outline' && <OutlineView topics={topics} busy={busy} edit={outlineEdit} syllabusRevision={syllabusRevision} selected={selectedConcept?.id} onSelect={setSelected} focus={outlineFocus} nav={nav} />}
+          {(tab === 'outline' || tab === 'mindmap') && <ApprovalBanner course={course} busy={busy} since={model.outlineSinceApproved}
+            onApprove={() => mutate('course.approve', { courseId: course.id, syllabusRevision }, `学习者批准大纲第 ${syllabusRevision} 版`, '大纲已批准')}
+            onMode={(mode) => mutate('course.setApproval', { courseId: course.id, mode }, mode === 'delegated' ? '学习者把批准交给 AI' : '学习者收回批准', mode === 'delegated' ? '已交给 AI 批准：之后大纲和课时计划由 AI 代你批准（随时可收回）' : '已恢复为由你批准')} />}
+          {tab === 'outline' && <OutlineView changes={course.syllabusChanges ?? []} topics={topics} busy={busy} edit={outlineEdit} syllabusRevision={syllabusRevision} selected={selectedConcept?.id} onSelect={setSelected} focus={outlineFocus} nav={nav} />}
           {tab === 'mindmap' && <MindmapView view={views.mindmap} topics={topics} busy={busy} edit={outlineEdit} syllabusRevision={syllabusRevision} selected={selectedConcept?.id} onSelectConcept={setSelected} flash={flash} wide={rightWidth >= 640} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} />}
           {tab === 'graph' && <GraphView view={views.graph} topics={topics} selected={selectedConcept?.id} onSelect={setSelected} conceptById={conceptById} relations={model.relations} nav={nav} boardElements={views.board.elements} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} wide={rightWidth >= 760} />}
-          {tab === 'board' && <BoardView view={views.board} course={course} topics={topics} concepts={concepts} busy={busy} mutate={mutate} outlineEdit={outlineEdit} syllabusRevision={syllabusRevision} onSelectConcept={setSelected} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} wide={rightWidth >= 760} focus={boardFocus} nav={nav} />}
+          {tab === 'board' && <BoardView onOpenNote={(id) => { const n = model.notes.find((x) => x.id === id); if (n?.lessonId) { setLessonId(n.lessonId); setPartIndex(null); } setNoteFocus({ id, nonce: Date.now() }); }} view={views.board} course={course} topics={topics} concepts={concepts} busy={busy} mutate={mutate} outlineEdit={outlineEdit} syllabusRevision={syllabusRevision} onSelectConcept={setSelected} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} wide={rightWidth >= 760} focus={boardFocus} nav={nav} />}
           {tab === 'data' && <DataPane api={api} course={course} revision={model.revision} topics={topics} selected={selectedConcept?.id} onSelectConcept={setSelected} nav={nav}
             todoWrite={todoWrite} reviewRate={reviewRate} busy={busy} focus={dataFocus} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} />}
           <Activity events={model.events} />
@@ -346,35 +439,166 @@ function DataPane({ zoom, setZoom, fill, rootRef, ...props }) {
   return <div ref={wrapRef}><DataView {...props} height={height} zoomButtons={<ZoomButtons zoom={zoom} setZoom={setZoom} prefix="data" what="数据表" />} /></div>;
 }
 
-function NoteBox({ busy, onSave }) {
+function NoteBox({ busy, onSave, concepts, lessonConceptIds, selectedId }) {
   const [text, setText] = useState('');
+  const preferred = lessonConceptIds[0] ?? '';
+  const [conceptId, setConceptId] = useState(preferred);
+  useEffect(() => { setConceptId(preferred); }, [preferred]);
+  const order = [...lessonConceptIds.map((id) => concepts.find((c) => c.id === id)).filter(Boolean), ...concepts.filter((c) => !lessonConceptIds.includes(c.id))];
   return (
     <>
       <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="写下你的判断、疑问或复习计划…（保存为你的课程笔记）" data-testid="note-input" />
-      <button className="action" disabled={busy || !text.trim()} onClick={async () => { if (await onSave(text.trim())) setText(''); }}>保存为我的笔记</button>
-      <div className="kmeta" style={{ marginTop: 8 }}>作答请在对话中进行，AI 只记录你真实给出的回答；这里的笔记会写入同一份课程状态。</div>
+      <div className="notesel">挂到知识点：
+        <select value={conceptId} onChange={(e) => setConceptId(e.target.value)} data-testid="note-concept-select" aria-label="笔记挂到哪个知识点">
+          <option value="">（不挂知识点）</option>
+          {order.map((c) => <option key={c.id} value={c.id}>{c.title}{lessonConceptIds.includes(c.id) ? '（本课）' : ''}{c.id === selectedId && !lessonConceptIds.includes(c.id) ? '（当前选中）' : ''}</option>)}
+        </select>
+      </div>
+      <button className="action" disabled={busy || !text.trim()} onClick={async () => { if (await onSave(text.trim(), conceptId || null)) setText(''); }}>保存为我的笔记</button>
+      <div className="kmeta" style={{ marginTop: 8 }}>作答请在对话中进行，AI 只记录你真实给出的回答；这里的笔记会写入同一份课程状态，并出现在知识点详情里。</div>
     </>
   );
 }
 
-function ApprovalBanner({ course, busy, onApprove }) {
-  if (course.status === 'active') return <div className="banner ok" data-testid="approval-banner"><span>大纲第 {course.syllabus.revision} 版已批准{course.syllabus.approvedBy === 'learner' ? '（由你确认）' : ''}。任何修改都会让大纲回到待确认。</span></div>;
+/** Topic + knowledge points this lesson teaches (stored ids; links into the workbench). */
+function LessonLinks({ lesson, topics, conceptById, nav }) {
+  const topic = topics.find((t) => t.id === lesson.topicId);
+  const ids = lesson.conceptIds ?? [];
+  if (!topic && !ids.length) return null;
   return (
-    <div className="banner" data-testid="approval-banner">
-      <span>大纲第 {course.syllabus.revision} 版待你确认：修改后需要重新批准，AI 才能继续开新课。</span>
-      <button className="action" disabled={busy} onClick={onApprove} data-testid="approve-outline">批准大纲</button>
+    <div className="chips" data-testid="lesson-links">
+      {topic && <button className="chip-link" data-testid="lesson-topic" onClick={() => nav.toTopic(topic.id)}>主题：{topic.title}</button>}
+      {ids.map((id) => {
+        const c = conceptById.get(id);
+        return c ? <button key={id} className="chip-link" data-testid="lesson-concept" data-concept={id} onClick={() => nav.toDetail(id)}>知识点：{c.title}</button>
+          : <span key={id} className="chip-text">（已退役的知识点）</span>;
+      })}
     </div>
   );
 }
 
-function OutlineView({ topics, busy, edit, syllabusRevision, selected, onSelect, focus, nav }) {
+/** Where we stopped: the open question (word for word), answers and hints so far, the recap. */
+function ResumeBox({ resume }) {
+  const q = resume.pendingQuestion;
+  if (!q && !resume.recap) return null;
+  return (
+    <div className="resume" data-testid="resume">
+      {q && <div data-testid="resume-question"><b>待你回答：</b>{q.question}<span className="small">（已答 {q.attempts} 次{q.hintCount ? ` · 已给 ${q.hintCount} 次提示` : ''}）</span></div>}
+      {resume.recap && <div className="small" data-testid="resume-recap"><b>上次要点：</b>{resume.recap.text}</div>}
+      <div className="small muted">新对话里 AI 会先请你回忆上次的要点，再接着这道题往下讲。</div>
+    </div>
+  );
+}
+
+/** End-of-lesson feedback → (optional) outline adjustment → approval → continue. */
+function FlowBanner({ lesson, course, busy, mutate, setTab }) {
+  const [text, setText] = useState('');
+  const [adjust, setAdjust] = useState(false);
+  if (lesson.phase === 'feedback_pending') {
+    return (
+      <div className="banner stack feedback" data-testid="feedback-banner">
+        <span>这节课讲完了。说说感受：哪里难、哪里想多练、节奏怎么样？<span className="sub2">也可以直接在对话里说。想调整后面的课，勾选下面这项，AI 会改大纲，改动要经过批准才生效。</span></span>
+        <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="例如：配方法太快了，想先多练几道顶点式" data-testid="feedback-input" />
+        <label className="small"><input type="checkbox" checked={adjust} onChange={(e) => setAdjust(e.target.checked)} data-testid="feedback-adjust" /> 根据我的反馈调整后面的大纲</label>
+        <span>
+          <button className="action" disabled={busy || !text.trim()} data-testid="feedback-submit"
+            onClick={async () => { if (await mutate('lesson.feedback', { lessonId: lesson.id, feedback: text.trim(), adjustOutline: adjust }, '学习者提交课末反馈', adjust ? '已记录反馈：请在对话里让 AI 按反馈调整大纲' : '已记录反馈，本课结束')) { setText(''); setAdjust(false); } }}>提交反馈</button>
+          <button className="tbtn" disabled={busy} data-testid="feedback-skip" onClick={() => mutate('lesson.feedback', { lessonId: lesson.id, skipped: true }, '学习者跳过课末反馈', '已跳过反馈，本课结束')}>这次不反馈</button>
+        </span>
+      </div>
+    );
+  }
+  if (lesson.phase === 'plan_adjustment_pending') {
+    const changed = course.syllabus.revision > (lesson.adjust?.fromSyllabusRevision ?? Infinity);
+    return (
+      <div className="banner" data-testid="adjust-banner">
+        <span>{changed ? `大纲已按你的反馈改到第 ${course.syllabus.revision} 版，等待批准。` : '正在按你的反馈调整大纲：AI 改完后，改动会列在「课程大纲」里。'}
+          <span className="sub2">批准后自动继续{lesson.adjust?.returnPhase === 'teaching' ? '讲这节课' : '下一课'}。{course.approvalMode === 'delegated' ? '你已把批准交给 AI。' : '也可以对 AI 说「交给你」让它代你批准。'}</span></span>
+        <button className="tbtn" onClick={() => setTab('outline')} data-testid="adjust-go-outline">看大纲改动 ›</button>
+      </div>
+    );
+  }
+  if (lesson.phase === 'complete' && (lesson.feedback || lesson.nextPreview)) {
+    return (
+      <div className="banner ok" data-testid="lesson-done-banner">
+        <span>{lesson.feedback?.text ? `你的反馈：${lesson.feedback.text}` : lesson.feedback?.skipped ? '本课没有反馈。' : ''}
+          {lesson.nextPreview && <span className="sub2" data-testid="next-preview">下一课预告：{lesson.nextPreview.text}</span>}</span>
+      </div>
+    );
+  }
+  return null;
+}
+
+/** Clickable source references: http(s) → the URI at the locator; legacy free text stays text. */
+function SourceRefs({ refs, state, openExternal, testId }) {
+  if (!refs?.length) return null;
+  const views = refs.map((r) => (r && r.label !== undefined && r.markdown !== undefined ? r : refView(state, r)));
+  return (
+    <div className="chips" data-testid={testId ?? 'source-refs'}>
+      <span className="chip-text">出处：</span>
+      {views.map((v, i) => v.href && /^https?:/i.test(v.href)
+        ? <a key={i} className="chip-link ext" href={v.href} target="_blank" rel="noopener noreferrer" data-testid="source-link"
+            onClick={(e) => { if (openExternal && e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey) { e.preventDefault(); openExternal(v.href); } }}>{v.label}</a>
+        : <span key={i} className="chip-text" title={v.legacy ? '旧格式的出处（自由文本，不能跳转）' : v.href ? `工作区文件：${v.href}` : '这个资料没有可打开的地址'}>{v.label}</span>)}
+    </div>
+  );
+}
+
+const WHO = { learner: '你', ai: 'AI' };
+function ApprovalBanner({ course, busy, onApprove, onMode, since }) {
+  const ap = course.syllabus.approval;
+  const delegated = course.approvalMode === 'delegated';
+  const modeBtn = <button className="tbtn" disabled={busy} data-testid="approval-mode" onClick={() => onMode(delegated ? 'learner' : 'delegated')}
+    title={delegated ? '收回：之后由你自己批准' : '之后大纲和课时计划都由 AI 代你批准（仍然逐次记录、可随时收回）'}>{delegated ? '收回批准权' : '交给 AI 批准'}</button>;
+  if (course.status === 'active') {
+    return (
+      <div className="banner ok" data-testid="approval-banner">
+        <span>大纲第 {course.syllabus.revision} 版已批准{ap?.by === 'ai' ? `（AI 代你批准${ap.consent ? `，依据：「${ap.consent}」` : ''}）` : ap?.by === 'learner' || course.syllabus.approvedBy === 'learner' ? '（由你确认）' : ''}。任何修改都会让大纲回到待确认。
+          {delegated && <span className="sub2">已交给 AI 批准：AI 会代你批准之后的大纲和课时计划。</span>}</span>
+        {modeBtn}
+      </div>
+    );
+  }
+  const lines = since?.lines ?? [];
+  return (
+    <div className="banner stack" data-testid="approval-banner">
+      <span>大纲第 {course.syllabus.revision} 版待你确认：修改后需要重新批准，AI 才能继续开新课。{delegated ? '你已把批准交给 AI，AI 也可以代你批准。' : '你可以自己批，也可以对 AI 说「交给你」。'}</span>
+      {since && lines.length > 0 && (
+        <div data-testid="approval-diff"><span className="small">相比已批准的第 {since.approvedRevision} 版：</span>
+          <ul className="diff">{lines.map((l, i) => <li key={i}>{l}</li>)}</ul>
+        </div>
+      )}
+      <span><button className="action" disabled={busy} onClick={onApprove} data-testid="approve-outline">批准大纲</button> {modeBtn}</span>
+    </div>
+  );
+}
+
+/** Outline change history (diff + reason + who), newest first. */
+function ChangeLog({ changes }) {
+  if (!changes.length) return null;
+  const list = changes.slice().reverse().slice(0, 10);
+  return (
+    <details className="changelog" data-testid="outline-changes" open={list.length <= 3}>
+      <summary>修改记录（{changes.length}）</summary>
+      {list.map((c, i) => (
+        <div className="chg" key={`${c.toRevision}-${i}`} data-testid="outline-change">
+          <div className="small"><b>第 {c.fromRevision} → {c.toRevision} 版</b> · {WHO[c.actor] ?? c.actor} · {relTime(c.at)}{c.reason ? ` · 原因：${c.reason}` : ''}</div>
+          <ul className="diff">{(c.lines?.length ? c.lines : ['（只改了说明或顺序）']).map((l, j) => <li key={j}>{l}</li>)}</ul>
+        </div>
+      ))}
+    </details>
+  );
+}
+
+function OutlineView({ topics, busy, edit, syllabusRevision, selected, onSelect, focus, nav, changes = [] }) {
   const treeRef = useRef(null);
   const [flashId, setFlashId] = useState(null);
   useEffect(() => {
-    if (!focus?.conceptId) return undefined;
-    const row = treeRef.current?.querySelector(`[data-concept-id="${CSS.escape(focus.conceptId)}"]`);
+    const fid = focus?.conceptId ?? focus?.topicId;
+    if (!fid) return undefined;
+    const row = treeRef.current?.querySelector(focus.conceptId ? `[data-concept-id="${CSS.escape(fid)}"]` : `[data-topic-id="${CSS.escape(fid)}"]`);
     row?.scrollIntoView({ block: 'center' });
-    setFlashId(focus.conceptId);
+    setFlashId(fid);
     const t = setTimeout(() => setFlashId(null), 2600);
     return () => clearTimeout(t);
   }, [focus?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -422,7 +646,7 @@ function OutlineView({ topics, busy, edit, syllabusRevision, selected, onSelect,
           onClick={() => edit([{ op: 'addTopic', title: '新主题', subtopics: [{ title: '新知识点' }] }], '添加主题')}>＋ 主题</button></span>
       </div>
       {topics.map((t, i) => (
-        <div className="card" key={t.id} data-topic-id={t.id}
+        <div className={`card${flashId === t.id ? ' linkflash' : ''}`} key={t.id} data-topic-id={t.id}
           draggable={editing == null} onDragStart={(e) => { if (e.target !== e.currentTarget) return; setDrag({ kind: 'topic', id: t.id, title: t.title, index: i, rev: syllabusRevision }); }}
           onDragEnd={() => { setDrag(null); setOver(null); }}
           onDragOver={(e) => { if (drag) { e.preventDefault(); } }}
@@ -463,6 +687,7 @@ function OutlineView({ topics, busy, edit, syllabusRevision, selected, onSelect,
           ))}
         </div>
       ))}
+      <ChangeLog changes={changes} />
       <p className="legend">双击标题可改名，拖到一行的上半部分放在它前面、下半部分放在它后面；修改会写入同一份课程状态，AI 用 tutor_outline_edit 编辑的也是这份大纲。</p>
     </div>
   );
@@ -632,7 +857,7 @@ function GraphView({ view, topics, selected, onSelect, conceptById, relations, z
 }
 
 const BOARD_HINT = '拖动卡片移动；从卡片边上的圆点拖到另一张卡片连线；双击卡片编辑（知识点卡片改名会改课程大纲）；双击空白处加便签；选中后按 Delete 删除；拖动空白处平移，Ctrl+滚轮缩放。';
-function BoardView({ view, course, topics, concepts, busy, mutate, outlineEdit, syllabusRevision, onSelectConcept, zoom, setZoom, fill, rootRef, wide, focus, nav }) {
+function BoardView({ view, course, topics, concepts, busy, mutate, outlineEdit, syllabusRevision, onSelectConcept, zoom, setZoom, fill, rootRef, wide, focus, nav, onOpenNote }) {
   const [selection, setSelection] = useState([]);
   const [focusNote, setFocusNote] = useState(null);
   const [linkMode, setLinkMode] = useState(false);
@@ -701,7 +926,7 @@ function BoardView({ view, course, topics, concepts, busy, mutate, outlineEdit, 
       )}
       <div className="rfhost" ref={wrapRef}>
         {els.length ? (
-          <BoardFlow ref={flowRef} focus={focus} elements={els} revision={view.boardRevision} topics={topics} concepts={concepts} height={height} editable
+          <BoardFlow ref={flowRef} onOpenNote={onOpenNote} focus={focus} elements={els} revision={view.boardRevision} topics={topics} concepts={concepts} height={height} editable
             linkMode={linkMode} onLinkModeDone={() => setLinkMode(false)} onPatch={patch} onRenameConcept={renameConcept} syllabusRevision={syllabusRevision}
             onSelectConcept={onSelectConcept} onSelectionChange={setSelection} minimap={wide} onFit={(f) => setFitInfo((x) => (x.overflow === f.overflow ? x : f))} />
         ) : (

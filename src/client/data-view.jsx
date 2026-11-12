@@ -261,6 +261,24 @@ function ConceptDrawer({ detail, topics, nav, busy, onRate, onClose, onNewTodo }
             <div className="small">你的回答：{a.student_answer}</div><div className="small">反馈：{a.feedback}</div></div>
         )) : <div className="small muted">还没有作答。</div>}
       </div>
+      <div className="kpsec" data-testid="kp-lessons"><span className="small">讲到它的课时</span>
+        {(detail.lessons ?? []).length ? detail.lessons.map((l) => (
+          <div key={l.lesson_id} className="small"><button className="linkbtn" data-testid="kp-go-lesson" data-lesson={l.lesson_id} onClick={() => nav.toLesson?.(l.lesson_id)}>{l.title} ›</button>
+            <span className="muted"> · {l.via === 'plan' ? '课时计划' : '有作答（旧课时）'}{l.status === 'complete' ? ' · 已结课' : ''}</span></div>
+        )) : <div className="small muted">还没有课时讲它。</div>}
+      </div>
+      <div className="kpsec" data-testid="kp-notes"><span className="small">挂在它上面的笔记</span>
+        {(detail.notes ?? []).length ? detail.notes.map((n) => {
+          const card = (detail.note_cards ?? []).find((c) => c.note_id === n.note_id);
+          return (
+            <div key={n.note_id} className="small">
+              <button className="linkbtn" data-testid="kp-go-note" data-note={n.note_id} onClick={() => nav.toNote?.(n.note_id)}>{n.author === 'learner' ? '我的笔记' : 'AI 笔记'}：{n.title} ›</button>
+              {card && <button className="linkbtn" data-testid="kp-go-note-card" data-element={card.element_id} onClick={() => nav.toCard(card.element_id, detail.concept_id)}>▦ 白板上的笔记卡片 ›</button>}
+              {n.excerpt && <div className="muted">{n.excerpt}</div>}
+            </div>
+          );
+        }) : <div className="small muted">还没有笔记挂在这个知识点上。</div>}
+      </div>
       {detail.todos.length > 0 && (
         <div className="kpsec"><span className="small">相关待办</span>
           {detail.todos.map((t) => <div key={t.id} className="small">{STATUS[t.status]} · {t.title}{t.due_at ? ` · 到期 ${fmtLocal(t.due_at)}` : ''}</div>)}
