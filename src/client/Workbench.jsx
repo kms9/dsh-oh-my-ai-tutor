@@ -3,6 +3,7 @@ import { lazyComponent } from './chunks.jsx';
 import { arrangeOps } from '../board-layout.mjs';
 import { markdownToHtml, MASTERY_LABEL, ACTION_LABEL, relTime } from './layout.mjs';
 import { DataView } from './data-view.jsx';
+import { CalendarView } from './calendar-view.jsx';
 import { refView } from '../links.mjs';
 import { AddToChatButton } from './AddToChat.jsx';
 
@@ -10,8 +11,8 @@ import { AddToChatButton } from './AddToChat.jsx';
 const BoardFlow = lazyComponent('flow', 'BoardFlow');
 const GraphFlow = lazyComponent('flow', 'GraphFlow');
 const MindElixirMap = lazyComponent('mindmap', 'MindElixirMap');
-const ZOOM_TABS = ['mindmap', 'graph', 'board', 'data'];
-const TABS = [['outline', '课程大纲'], ['mindmap', '思维导图'], ['graph', '知识图谱'], ['board', '知识白板'], ['data', '数据']];
+const ZOOM_TABS = ['mindmap', 'graph', 'board', 'data', 'calendar'];
+const TABS = [['outline', '课程大纲'], ['mindmap', '思维导图'], ['graph', '知识图谱'], ['board', '知识白板'], ['data', '数据'], ['calendar', '日历']];
 const PHASES = [['plan_pending', '01 · 课时计划'], ['teaching', '02 · 分段讲解'], ['review_pending', '03 · Review'], ['summary_pending', '04 · 笔记'], ['feedback_pending', '05 · 反馈']];
 const PHASE_INDEX = { plan_adjustment_pending: 4, complete: 5 };
 const PART_STATUS = { not_started: '未开始', in_progress: '讲解中', covered: '已讲完' };
@@ -98,6 +99,7 @@ export function Workbench({ api, visible = true, initialView, navRevision, focus
   // cross-view links: { id|conceptId, nonce } — a new nonce re-runs the jump even for the same target
   const [boardFocus, setBoardFocus] = useState(null);
   const [dataFocus, setDataFocus] = useState(null);
+  const [calendarFocus, setCalendarFocus] = useState(null);
   const [outlineFocus, setOutlineFocus] = useState(null);
   const [noteFocus, setNoteFocus] = useState(null);
   const [lessonFocus, setLessonFocus] = useState(null);
@@ -111,6 +113,8 @@ export function Workbench({ api, visible = true, initialView, navRevision, focus
     toDetail(conceptId) { if (!conceptId) return; setSelected(conceptId); setTab('data'); setDataFocus({ conceptId, nonce: Date.now() }); },
     toOutline(conceptId) { if (conceptId) setSelected(conceptId); setTab('outline'); setOutlineFocus({ conceptId, nonce: Date.now() }); },
     toGraph(conceptId) { if (conceptId) setSelected(conceptId); setTab('graph'); },
+    /** 日历 (记忆提醒): { todoId } | { reviewId } | { newTodoFor: conceptId } */
+    toCalendar(target = {}) { if (target.newTodoFor) setSelected(target.newTodoFor); setTab('calendar'); setCalendarFocus({ ...target, nonce: Date.now() }); },
   }), []);
   const revRef = useRef(-1);
   const courseRef = useRef(null);
@@ -247,8 +251,8 @@ export function Workbench({ api, visible = true, initialView, navRevision, focus
       setTab('graph');
       setSelected(rel?.from ?? rel?.fromConceptId ?? null);
       setGraphFocus({ id: rel?.from, relationId: f.id, nonce: Date.now() });
-    } else if (f.kind === 'todo') { setTab('data'); setDataFocus({ todoId: f.id, nonce: Date.now() }); }
-    else if (f.kind === 'review') { setTab('data'); setDataFocus({ reviewId: f.id, nonce: Date.now() }); }
+    } else if (f.kind === 'todo') nav.toCalendar({ todoId: f.id });
+    else if (f.kind === 'review') nav.toCalendar({ reviewId: f.id });
   }, [model, focusTick]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const id = noteFocus?.id ?? (lessonFocus ? '__lesson' : null);
@@ -449,7 +453,9 @@ export function Workbench({ api, visible = true, initialView, navRevision, focus
           {tab === 'graph' && <GraphView view={views.graph} topics={topics} selected={selectedConcept?.id} onSelect={setSelected} conceptById={conceptById} relations={model.relations} nav={nav} boardElements={views.board.elements} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} wide={rightWidth >= 760} focus={graphFocus} onAddToChat={addToChat} />}
           {tab === 'board' && <BoardView onOpenNote={(id) => { const n = model.notes.find((x) => x.id === id); if (n?.lessonId) { setLessonId(n.lessonId); setPartIndex(null); } setNoteFocus({ id, nonce: Date.now() }); }} view={views.board} course={course} topics={topics} concepts={concepts} busy={busy} mutate={mutate} outlineEdit={outlineEdit} syllabusRevision={syllabusRevision} onSelectConcept={setSelected} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} wide={rightWidth >= 760} focus={boardFocus} nav={nav} onAddToChat={addToChat} />}
           {tab === 'data' && <DataPane api={api} course={course} revision={model.revision} topics={topics} selected={selectedConcept?.id} onSelectConcept={setSelected} nav={nav}
-            todoWrite={todoWrite} reviewRate={reviewRate} busy={busy} focus={dataFocus} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} onAddToChat={addToChat} />}
+            reviewRate={reviewRate} busy={busy} focus={dataFocus} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} onAddToChat={addToChat} />}
+          {tab === 'calendar' && <CalendarPane api={api} course={course} revision={model.revision} onSelectConcept={setSelected} nav={nav}
+            todoWrite={todoWrite} reviewRate={reviewRate} busy={busy} focus={calendarFocus} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} onAddToChat={addToChat} />}
           <Activity events={model.events} />
         </section>
       </div>
@@ -461,6 +467,12 @@ function DataPane({ zoom, setZoom, fill, rootRef, onAddToChat, ...props }) {
   const wrapRef = useRef(null);
   const height = useFillHeight(wrapRef, rootRef, fill, 460, 40);
   return <div ref={wrapRef}><DataView {...props} height={height} onAddToChat={onAddToChat} zoomButtons={<ZoomButtons zoom={zoom} setZoom={setZoom} prefix="data" what="数据表" />} /></div>;
+}
+
+function CalendarPane({ zoom, setZoom, fill, rootRef, onAddToChat, ...props }) {
+  const wrapRef = useRef(null);
+  const height = useFillHeight(wrapRef, rootRef, fill, 460, 40);
+  return <div ref={wrapRef}><CalendarView {...props} height={height} onAddToChat={onAddToChat} zoomButtons={<ZoomButtons zoom={zoom} setZoom={setZoom} prefix="calendar" what="日历" />} /></div>;
 }
 
 function NoteBox({ busy, onSave, concepts, lessonConceptIds, selectedId }) {

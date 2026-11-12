@@ -139,8 +139,8 @@ test('jump-link kinds cover mind-map nodes, graph nodes, relations, todos and re
   assert.equal(viewFor({ kind: 'mindmapNode' }), 'mindmap');
   assert.equal(viewFor({ kind: 'graphNode' }), 'graph');
   assert.equal(viewFor({ kind: 'relation' }), 'graph');
-  assert.equal(viewFor({ kind: 'todo' }), 'data');
-  assert.equal(viewFor({ kind: 'review' }), 'data');
+  assert.equal(viewFor({ kind: 'todo' }), 'calendar');
+  assert.equal(viewFor({ kind: 'review' }), 'calendar');
   const ctx = seed();
   const links = linksFor(ctx.state, ctx.course.id, {
     mindmapNodeIds: [ctx.mindNodeId],

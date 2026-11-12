@@ -3,19 +3,19 @@ import { lazyComponent } from './chunks.jsx';
 import { MASTERY_LABEL } from './layout.mjs';
 import { AddToChatButton } from './AddToChat.jsx';
 
-// heavy parts load on first use: lib/client.grid.js (Glide Data Grid), lib/client.calendar.js (FullCalendar)
+// heavy part loads on first use: lib/client.grid.js (Glide Data Grid)
 const DataGrid = lazyComponent('grid', 'DataGrid', 200);
-const TodoCalendar = lazyComponent('calendar', 'TodoCalendar', 420);
 
-export const DATA_TABS = [['kp', '知识点'], ['questions', '题目'], ['attempts', '作答'], ['todos', '待办'], ['reviews', '复习'], ['calendar', '日历']];
+/** 数据 tab sub-views: saved learning records only (row data from SQLite). To-dos / review reminders / calendar live in 日历. */
+export const DATA_TABS = [['kp', '知识点'], ['questions', '题目'], ['attempts', '作答'], ['lessons', '课时'], ['reviewLogs', '复习记录']];
 /** FSRS grades with short Chinese labels (Again / Hard / Good / Easy). */
 export const RATING = [[1, '忘了'], [2, '吃力'], [3, '想起来了'], [4, '轻松']];
-const REVIEW_STATE = { new: '未开始', learning: '学习中', review: '复习中', relearning: '重新学习' };
+export const REVIEW_STATE = { new: '未开始', learning: '学习中', review: '复习中', relearning: '重新学习' };
 /** "11月14日" in the learner's zone; null → 未排期 */
 export function fmtDay(iso) { if (!iso) return null; const d = new Date(iso); return Number.isNaN(d.getTime()) ? null : `${d.getMonth() + 1}月${d.getDate()}日`; }
-const inDays = (days) => (days <= 0 ? '今天' : days === 1 ? '明天' : `${days} 天后`);
-const QUERY = { kp: 'knowledgePoints', questions: 'questions', attempts: 'attempts', todos: 'todos', calendar: 'todos', reviews: 'reviews' };
-const STATUS = { open: '未完成', done: '已完成', dropped: '已放弃' };
+export const inDays = (days) => (days <= 0 ? '今天' : days === 1 ? '明天' : `${days} 天后`);
+const QUERY = { kp: 'knowledgePoints', questions: 'questions', attempts: 'attempts', lessons: 'lessons', reviewLogs: 'reviewLogs' };
+export const STATUS = { open: '未完成', done: '已完成', dropped: '已放弃' };
 const pad = (n) => String(n).padStart(2, '0');
 /** local wall-clock display of an ISO instant (the learner's time zone) */
 export function fmtLocal(iso, withDate = true) {
@@ -36,14 +36,25 @@ export function localInputToIso(v) {
   const off = -d.getTimezoneOffset(); const sign = off >= 0 ? '+' : '-'; const a = Math.abs(off);
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:00${sign}${pad(Math.floor(a / 60))}:${pad(a % 60)}`;
 }
-const defaultDue = () => { const d = new Date(); d.setHours(d.getHours() + 2, 0, 0, 0); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:00`; };
+export const defaultDue = () => { const d = new Date(); d.setHours(d.getHours() + 2, 0, 0, 0); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:00`; };
+
+const PHASE = { plan_pending: '课时计划', teaching: '讲解中', review_pending: '复习题', summary_pending: '写笔记', feedback_pending: '课末反馈', plan_adjustment_pending: '调整大纲', complete: '已结课' };
+const EMPTY = {
+  kp: '这门课还没有知识点。批准课程大纲后，大纲里的知识点会出现在这里。',
+  questions: '还没有题目记录。上课做题后，每道题会保存为一行。',
+  attempts: '还没有作答记录。在课时里回答问题后，你的回答、得分和反馈会保存为一行。',
+  lessons: '还没有课时。在对话里让 AI 开始第一节课。',
+  reviewLogs: '还没有复习记录。作答或在「日历」里给复习卡评分后，每次评分会保存为一行。',
+};
 
 /**
- * 数据 tab: tables over the SQLite read models (never a client-side copy), a knowledge point detail drawer that links to
- * the board card / outline / graph, to-dos with due dates, 今天到期 and a calendar.
- * `focus` = { conceptId, nonce } opens the drawer for that knowledge point (from the board or the graph).
+ * 数据 tab: saved learning records (行式数据) straight from the SQLite read models — never a client-side copy:
+ * knowledge points, questions, attempts, lessons and the review log. A knowledge point detail drawer links to the
+ * board card / outline / graph and shows the row's review state and attempts.
+ * To-dos, review reminders and the calendar are the separate 日历 tab (CalendarView), not here.
+ * `focus` = { conceptId, nonce } opens the drawer for that knowledge point (from the board, the graph or a chat link).
  */
-export function DataView({ api, course, revision, topics, selected, onSelectConcept, nav, todoWrite, reviewRate, busy, height, zoomButtons, focus, onAddToChat }) {
+export function DataView({ api, course, revision, topics, selected, onSelectConcept, nav, reviewRate, busy, height, zoomButtons, focus, onAddToChat }) {
   const [sub, setSub] = useState('kp');
   const [data, setData] = useState({});
   const [err, setErr] = useState('');
@@ -51,22 +62,15 @@ export function DataView({ api, course, revision, topics, selected, onSelectConc
   const [mastery, setMastery] = useState('');
   const [detailId, setDetailId] = useState(null);
   const [detail, setDetail] = useState(null);
-  const [picked, setPicked] = useState(null); // to-do id picked in calendar / today list
-  const want = sub === 'calendar' ? ['todos', 'reviews'] : sub === 'todos' ? ['todos', 'kp', 'reviews'] : sub === 'reviews' ? ['reviews'] : [sub];
-  const load = useCallback(async (keys) => {
+  const load = useCallback(async (key) => {
     try {
-      const out = {};
-      await Promise.all(keys.map(async (k) => { out[k] = await api.call('data', { query: QUERY[k], params: { courseId: course.id } }); }));
-      setData((d) => ({ ...d, ...out })); setErr('');
+      const rows = await api.call('data', { query: QUERY[key], params: { courseId: course.id } });
+      setData((d) => ({ ...d, [key]: rows })); setErr('');
     } catch (e) { setErr(e.message); }
   }, [api, course.id]);
   // reload whenever the shared revision changes (AI or another window wrote) or the sub-tab changes
-  useEffect(() => { load([...new Set([...want, 'todos', 'reviews'])]); }, [load, revision, sub]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (focus?.conceptId) { setDetailId(focus.conceptId); setSub((s) => (s === 'calendar' ? 'kp' : s)); }
-    if (focus?.todoId) { setPicked(focus.todoId); setSub('todos'); }
-    if (focus?.reviewId) { setSub('reviews'); }
-  }, [focus?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { load(sub); }, [load, revision, sub]);
+  useEffect(() => { if (focus?.conceptId) setDetailId(focus.conceptId); }, [focus?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!detailId) { setDetail(null); return undefined; }
     let alive = true;
@@ -79,24 +83,23 @@ export function DataView({ api, course, revision, topics, selected, onSelectConc
   const onAction = useCallback((action, row) => {
     if (action === 'card') nav.toCard(row.board_cards[0], row.concept_id);
     else if (action === 'detail') openDetail(row.concept_id);
-    else if (action === 'toggle') todoWrite('update', { id: row.id, baseRevision: row.revision, status: row.status === 'done' ? 'open' : 'done' });
+    else if (action === 'lesson') nav.toLesson?.(row.lesson_id);
     else if (action === 'chat-concept') onAddToChat?.({ kind: 'concept', id: row.concept_id, title: row.title ?? row.concept_title, courseId: course.id });
-    else if (action === 'chat-todo') onAddToChat?.({ kind: 'todo', id: row.id, title: row.title, courseId: course.id });
-    else if (action === 'chat-review') onAddToChat?.({ kind: 'review', id: row.id, title: row.concept_title, courseId: course.id });
-  }, [nav, openDetail, todoWrite, onAddToChat, course.id]);
+    else if (action === 'chat-lesson') onAddToChat?.({ kind: 'lesson', id: row.lesson_id, title: row.title, courseId: course.id });
+  }, [nav, openDetail, onAddToChat, course.id]);
 
   const q = query.trim().toLowerCase();
   const match = (...xs) => !q || xs.some((x) => String(x ?? '').toLowerCase().includes(q));
-  const kpRows = (data.kp ?? []).filter((r) => match(r.title, r.topic_title, r.description) && (!mastery || r.mastery === mastery));
-  const todos = data.todos ?? [];
-  const [dayStart, dayEnd] = localDayBounds();
-  const now = Date.now();
-  const dueToday = todos.filter((t) => t.status === 'open' && t.due_at && Date.parse(t.due_at) >= dayStart && Date.parse(t.due_at) < dayEnd);
-  const overdue = todos.filter((t) => t.status === 'open' && t.due_at && Date.parse(t.due_at) < dayStart);
-  const reviews = data.reviews ?? [];
-  // reviews due by the end of today (overdue included); 'new' cards are not scheduled yet
-  const reviewsDue = reviews.filter((r) => r.due_at && Date.parse(r.due_at) < dayEnd);
-  const rate = (r, rating) => reviewRate({ conceptId: r.concept_id, rating, baseRevision: r.revision });
+  const loaded = data[sub] !== undefined;
+  const rowsOf = {
+    kp: () => (data.kp ?? []).filter((r) => match(r.title, r.topic_title, r.description) && (!mastery || r.mastery === mastery)),
+    questions: () => (data.questions ?? []).filter((r) => match(r.question, r.concept_title, r.lesson_title)),
+    attempts: () => (data.attempts ?? []).filter((r) => match(r.question, r.student_answer, r.concept_title, r.feedback)),
+    lessons: () => (data.lessons ?? []).filter((r) => match(r.title, r.pending_question, r.feedback)),
+    reviewLogs: () => (data.reviewLogs ?? []).filter((r) => match(r.concept_title)),
+  };
+  const rows = rowsOf[sub]();
+  const filtered = Boolean(q || (sub === 'kp' && mastery));
 
   const kpCols = useMemo(() => [
     { id: 'title', title: '知识点', width: 132, value: (r) => r.title },
@@ -112,16 +115,6 @@ export function DataView({ api, course, revision, topics, selected, onSelectConc
     { id: 'relations', title: '关系', width: 58, value: (r) => r.relations },
     { id: 'todos', title: '待办', width: 58, value: (r) => r.open_todos },
     { id: 'review', title: '下次复习', width: 92, value: (r) => (r.next_review_at ? fmtDay(r.next_review_at) : '未排期'), sortValue: (r) => r.next_review_at ?? '9999' },
-  ], []);
-  const rCols = useMemo(() => [
-    { id: 'kp', title: '知识点', width: 150, link: (r) => ({ label: `${r.concept_title} ›`, action: 'detail' }) },
-    { id: 'due', title: '下次复习', width: 92, value: (r) => (r.due_at ? fmtDay(r.due_at) : '未排期'), sortValue: (r) => r.due_at ?? '9999' },
-    { id: 'state', title: '状态', width: 76, value: (r) => REVIEW_STATE[r.state] ?? r.state },
-    { id: 'last', title: '上次复习', width: 104, value: (r) => fmtLocal(r.last_review_at), sortValue: (r) => r.last_review_at },
-    { id: 'reps', title: '复习次数', width: 70, value: (r) => r.reps },
-    { id: 'lapses', title: '遗忘', width: 52, value: (r) => r.lapses },
-    { id: 'stab', title: '记忆稳定性（天）', width: 112, value: (r) => (r.stability == null ? null : Math.round(r.stability * 10) / 10) },
-    { id: 'chat', title: '对话', width: 90, link: () => ({ label: '添加到对话', action: 'chat-review' }) },
   ], []);
   const qCols = useMemo(() => [
     { id: 'question', title: '题目', width: 220, value: (r) => r.question },
@@ -141,24 +134,38 @@ export function DataView({ api, course, revision, topics, selected, onSelectConc
     { id: 'transfer', title: '迁移题', width: 60, value: (r) => (r.transfer ? '是' : '否') },
     { id: 'feedback', title: '反馈', width: 200, kind: 'muted', value: (r) => r.feedback },
   ], []);
-  const tCols = useMemo(() => [
-    { id: 'title', title: '待办', width: 170, value: (r) => r.title },
-    { id: 'status', title: '状态', width: 96, sortValue: (r) => r.status, link: (r) => ({ label: r.status === 'done' ? '✓ 已完成（撤销）' : r.status === 'dropped' ? '已放弃' : '○ 标为完成', action: r.status === 'dropped' ? null : 'toggle' }) },
-    { id: 'due', title: '到期', width: 110, value: (r) => fmtLocal(r.due_at), sortValue: (r) => r.due_at },
-    { id: 'kp', title: '知识点', width: 116, link: (r) => (r.concept_id ? { label: `${r.concept_title ?? '知识点'} ›`, action: 'detail' } : null), empty: () => '—' },
-    { id: 'by', title: '创建', width: 54, value: (r) => (r.created_by === 'learner' ? '你' : 'AI') },
-    { id: 'chat', title: '对话', width: 90, link: () => ({ label: '添加到对话', action: 'chat-todo' }) },
+  const lCols = useMemo(() => [
+    { id: 'title', title: '课时', width: 170, link: (r) => ({ label: `${r.title} ›`, action: 'lesson' }), sortValue: (r) => r.created_at },
+    { id: 'phase', title: '阶段', width: 84, value: (r) => (r.status === 'complete' ? '已结课' : PHASE[r.phase] ?? r.phase) },
+    { id: 'parts', title: '段数', width: 52, value: (r) => r.parts },
+    { id: 'pending', title: '待你回答', width: 180, value: (r) => r.pending_question },
+    { id: 'feedback', title: '课末反馈', width: 160, kind: 'muted', value: (r) => r.feedback },
+    { id: 'created', title: '开始时间', width: 104, value: (r) => fmtLocal(r.created_at), sortValue: (r) => r.created_at },
+    { id: 'updated', title: '最近更新', width: 104, value: (r) => fmtLocal(r.updated_at), sortValue: (r) => r.updated_at },
+    { id: 'chat', title: '对话', width: 90, link: () => ({ label: '添加到对话', action: 'chat-lesson' }) },
   ], []);
+  const logCols = useMemo(() => [
+    { id: 'at', title: '时间', width: 104, value: (r) => fmtLocal(r.reviewed_at), sortValue: (r) => r.reviewed_at },
+    { id: 'kp', title: '知识点', width: 130, link: (r) => (r.concept_id ? { label: `${r.concept_title ?? '知识点'} ›`, action: 'detail' } : null) },
+    { id: 'rating', title: '评分', width: 76, value: (r) => RATING.find(([v]) => v === r.rating)?.[1] ?? r.rating },
+    { id: 'actor', title: '评分人', width: 62, value: (r) => ACTOR[r.actor] ?? r.actor },
+    { id: 'from', title: '来源', width: 70, value: (r) => (r.assessment_id ? '来自作答' : '手动评分') },
+    { id: 'before', title: '之前状态', width: 76, value: (r) => REVIEW_STATE[r.state_before] ?? r.state_before },
+    { id: 'next', title: '下次复习', width: 92, value: (r) => fmtDay(r.next_due) ?? '—', sortValue: (r) => r.next_due },
+    { id: 'days', title: '间隔（天）', width: 76, value: (r) => r.scheduled_days },
+  ], []);
+  const COLS = { kp: kpCols, questions: qCols, attempts: aCols, lessons: lCols, reviewLogs: logCols };
+  const KEY = { kp: (r) => r.concept_id, questions: (r) => r.assessment_id, attempts: (r) => r.assessment_id, lessons: (r) => r.lesson_id, reviewLogs: (r) => r.id };
 
   const gridH = Math.max(220, (height ?? 460) - (detailId ? 300 : 0));
   return (
     <div data-testid="data-view">
-      <div className="title2"><span>数据 <span className="small">· SQLite · 第 {revision} 版</span></span>
+      <div className="title2"><span>数据 · 学习记录 <span className="small">· SQLite 行式数据 · 第 {revision} 版</span></span>
         <span className="tools">{zoomButtons}</span>
       </div>
       <div className="tools rfbar" data-testid="data-subtabs">
-        {DATA_TABS.map(([k, label]) => <button key={k} className={`tbtn ${sub === k ? 'on' : ''}`} data-sub={k} onClick={() => setSub(k)}>{label}{k === 'todos' && dueToday.length ? `（今天 ${dueToday.length}）` : ''}{k === 'reviews' && reviewsDue.length ? `（到期 ${reviewsDue.length}）` : ''}</button>)}
-        {sub !== 'calendar' && <input className="kgsearch" type="search" placeholder="筛选…" value={query} onChange={(e) => setQuery(e.target.value)} data-testid="data-search" />}
+        {DATA_TABS.map(([k, label]) => <button key={k} className={`tbtn ${sub === k ? 'on' : ''}`} data-sub={k} onClick={() => setSub(k)}>{label}{data[k] ? <span className="muted">（{data[k].length}）</span> : null}</button>)}
+        <input className="kgsearch" type="search" placeholder="筛选…" value={query} onChange={(e) => setQuery(e.target.value)} data-testid="data-search" />
         {sub === 'kp' && (
           <select className="dsel" value={mastery} onChange={(e) => setMastery(e.target.value)} data-testid="data-mastery" aria-label="按掌握度筛选">
             <option value="">全部掌握度</option>{Object.entries(MASTERY_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
@@ -166,78 +173,13 @@ export function DataView({ api, course, revision, topics, selected, onSelectConc
         )}
       </div>
       {err && <div className="banner warn"><span>读取数据失败：{err}</span></div>}
-      {(sub === 'todos' || sub === 'calendar' || sub === 'reviews') && <DueToday dueToday={dueToday} overdue={overdue} reviewsDue={reviewsDue} dayStart={dayStart} busy={busy} onRate={rate} picked={picked} onPick={setPicked} onToggle={(t) => onAction('toggle', t)} onDetail={openDetail} onAddToChat={onAddToChat} courseId={course.id} />}
-      {sub === 'kp' && <DataGrid testId="grid-kp" columns={kpCols} rows={kpRows} rowKey={(r) => r.concept_id} onAction={onAction} height={gridH} highlightKey={detailId ?? selected} />}
-      {sub === 'questions' && <DataGrid testId="grid-questions" columns={qCols} rows={(data.questions ?? []).filter((r) => match(r.question, r.concept_title, r.lesson_title))} rowKey={(r) => r.assessment_id} onAction={onAction} height={gridH} />}
-      {sub === 'attempts' && <DataGrid testId="grid-attempts" columns={aCols} rows={(data.attempts ?? []).filter((r) => match(r.question, r.student_answer, r.concept_title, r.feedback))} rowKey={(r) => r.assessment_id} onAction={onAction} height={gridH} />}
-      {sub === 'todos' && (
-        <>
-          <TodoForm busy={busy} kps={data.kp ?? []} defaultConcept={detailId ?? ''} onCreate={(input) => todoWrite('create', { courseId: course.id, ...input })} />
-          <DataGrid testId="grid-todos" columns={tCols} rows={todos.filter((r) => match(r.title, r.concept_title))} rowKey={(r) => r.id} onAction={onAction} height={gridH} highlightKey={picked} />
-        </>
-      )}
-      {sub === 'reviews' && <DataGrid testId="grid-reviews" columns={rCols} rows={reviews.filter((r) => match(r.concept_title, r.topic_title))} rowKey={(r) => r.concept_id} onAction={onAction} height={gridH} highlightKey={detailId ?? selected} />}
-      {sub === 'calendar' && (
-        <TodoCalendar todos={todos} reviews={reviews} onSelectReview={(r) => openDetail(r.concept_id)} height={Math.max(420, (height ?? 460) - 60)} now={now} onSelect={(t) => { setPicked(t.id); if (t.concept_id) onSelectConcept(t.concept_id); }}
-          onMove={(t, iso) => todoWrite('update', { id: t.id, baseRevision: t.revision, dueAt: iso })} />
-      )}
-      {detailId && <ConceptDrawer detail={detail} topics={topics} nav={nav} busy={busy} onRate={(rating) => detail?.review && reviewRate({ conceptId: detail.concept_id, rating, baseRevision: detail.review.card.revision })} onClose={() => setDetailId(null)} onNewTodo={() => setSub('todos')} onAddToChat={onAddToChat} courseId={course.id} />}
-      <div className="status">表格直接查 SQLite（tutor.db）。点蓝色链接：「白板卡片」跳到知识白板并高亮那张卡片，「详情」打开知识点详情；点表头排序。待办到期时间按你电脑的时区显示。</div>
+      {!loaded && !err
+        ? <div className="empty" data-testid="data-loading" style={{ padding: 18 }}>正在读取学习记录…</div>
+        : <DataGrid key={sub} testId={`grid-${sub === 'reviewLogs' ? 'review-logs' : sub}`} columns={COLS[sub]} rows={rows} rowKey={KEY[sub]} onAction={onAction} height={gridH}
+            highlightKey={sub === 'kp' ? detailId ?? selected : null} emptyText={filtered ? '没有符合条件的行。' : EMPTY[sub]} />}
+      {detailId && <ConceptDrawer detail={detail} topics={topics} nav={nav} busy={busy} onRate={(rating) => detail?.review && reviewRate({ conceptId: detail.concept_id, rating, baseRevision: detail.review.card.revision })} onClose={() => setDetailId(null)} onNewTodo={() => nav.toCalendar?.({ newTodoFor: detail?.concept_id })} onAddToChat={onAddToChat} courseId={course.id} />}
+      <div className="status">这里是保存下来的学习记录（直接查 SQLite 里的 tutor.db，每行一条）：知识点、题目、作答、课时和复习记录。点蓝色链接：「白板卡片」跳到知识白板并高亮那张卡片，「详情」打开知识点详情；点表头排序。待办和复习提醒在「日历」标签页。</div>
     </div>
-  );
-}
-
-function DueToday({ dueToday, overdue, reviewsDue, dayStart, busy, onRate, picked, onPick, onToggle, onDetail, onAddToChat, courseId }) {
-  const n = dueToday.length + reviewsDue.length;
-  return (
-    <div className="card duetoday" data-testid="due-today">
-      <b>今天到期</b> <span className="small">{n ? `待办 ${dueToday.length} 项 · 复习 ${reviewsDue.length} 个知识点` : '今天没有到期的待办或复习'}{overdue.length ? ` · 待办已过期 ${overdue.length} 项` : ''}</span>
-      {reviewsDue.map((r) => {
-        const late = Date.parse(r.due_at) < dayStart;
-        return (
-          <div key={r.id} className={`dueitem review ${late ? 'late' : ''}`} data-review-id={r.id} data-concept={r.concept_id}>
-            <span className="kind review" title="FSRS 复习">复习</span>
-            <span className="grow"><button className="linkbtn" onClick={() => onDetail(r.concept_id)}>{r.concept_title} ›</button></span>
-            <span className="small">{late ? `已过期 · ${fmtDay(r.due_at)}` : fmtLocal(r.due_at, false)}</span>
-            <span className="rates" data-testid="review-rate">{RATING.map(([v, label]) => <button key={v} className={`tbtn rate r${v}`} disabled={busy} data-rating={v} onClick={() => onRate(r, v)}>{label}</button>)}</span>
-            <AddToChatButton resource={{ kind: 'review', id: r.id, title: r.concept_title, courseId }} onAddToChat={onAddToChat} testId="add-to-chat-review" />
-          </div>
-        );
-      })}
-      {[...overdue.map((t) => ({ t, late: true })), ...dueToday.map((t) => ({ t, late: false }))].map(({ t, late }) => (
-        <div key={t.id} className={`dueitem ${late ? 'late' : ''} ${picked === t.id ? 'picked' : ''}`} data-todo-id={t.id} onClick={() => onPick(t.id)}>
-          <span className="kind todo">待办</span>
-          <button className="tbtn" title="标为完成" onClick={(e) => { e.stopPropagation(); onToggle(t); }}>○</button>
-          <span className="grow">{t.title}</span>
-          <span className="small">{late ? `已过期 · ${fmtLocal(t.due_at)}` : fmtLocal(t.due_at, false)}</span>
-          {t.concept_id && <button className="linkbtn" onClick={(e) => { e.stopPropagation(); onDetail(t.concept_id); }}>{t.concept_title ?? '知识点'} ›</button>}
-          <AddToChatButton resource={{ kind: 'todo', id: t.id, title: t.title, courseId }} onAddToChat={onAddToChat} testId="add-to-chat-todo" />
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function TodoForm({ busy, kps, defaultConcept, onCreate }) {
-  const [title, setTitle] = useState('');
-  const [due, setDue] = useState(defaultDue);
-  const [concept, setConcept] = useState(defaultConcept);
-  useEffect(() => { setConcept(defaultConcept); }, [defaultConcept]);
-  const submit = async (e) => {
-    e.preventDefault();
-    if (!title.trim()) return;
-    const ok = await onCreate({ title: title.trim(), dueAt: localInputToIso(due), conceptId: concept || undefined });
-    if (ok) setTitle('');
-  };
-  return (
-    <form className="todoform" onSubmit={submit} data-testid="todo-form">
-      <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="新待办，例如：复习顶点式" data-testid="todo-title" maxLength={200} />
-      <input type="datetime-local" value={due} onChange={(e) => setDue(e.target.value)} data-testid="todo-due" aria-label="到期时间" />
-      <select value={concept} onChange={(e) => setConcept(e.target.value)} data-testid="todo-concept" aria-label="关联知识点">
-        <option value="">不关联知识点</option>{kps.map((k) => <option key={k.concept_id} value={k.concept_id}>{k.title}</option>)}
-      </select>
-      <button className="action" disabled={busy || !title.trim()} data-testid="todo-add">添加待办</button>
-    </form>
   );
 }
 
@@ -257,10 +199,10 @@ function ConceptDrawer({ detail, topics, nav, busy, onRate, onClose, onNewTodo, 
       <div className="kplinks" data-testid="kp-detail-links">
         {detail.board_cards.length
           ? detail.board_cards.map((id, i) => <button key={id} className="linkbtn" data-testid="kp-go-card" data-element={id} onClick={() => nav.toCard(id, detail.concept_id)}>{i === 0 ? '▦ 去白板卡片' : `▦ 第 ${i + 1} 张卡片`} ›</button>)
-          : <span className="small muted" data-testid="kp-no-card">还没有白板卡片（在「知识白板」点「从大纲生成」可放入）</span>}
+          : <span className="small muted" data-testid="kp-no-card">还没有白板卡片（在「知识白板」点「补齐缺失卡片」可放入）</span>}
         <button className="linkbtn" data-testid="kp-go-outline" onClick={() => nav.toOutline(detail.concept_id)}>☰ 在大纲中查看 ›</button>
         <button className="linkbtn" data-testid="kp-go-graph" onClick={() => nav.toGraph(detail.concept_id)}>◎ 在图谱中查看 ›</button>
-        <button className="linkbtn" onClick={onNewTodo}>＋ 给它加待办</button>
+        <button className="linkbtn" onClick={onNewTodo}>＋ 在日历里给它加待办</button>
         <AddToChatButton resource={{ kind: 'concept', id: detail.concept_id, title: detail.title, courseId }} onAddToChat={onAddToChat} testId="add-to-chat-kp" />
       </div>
       <ReviewSection review={detail.review} busy={busy} onRate={onRate} />

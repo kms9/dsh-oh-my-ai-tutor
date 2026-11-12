@@ -387,7 +387,7 @@ export function toolSpecs(storeOrResolve) {
     }] : []),
     ...((typeof storeOrResolve === 'function' || typeof storeOrResolve.todo === 'function') ? [{
       name: 'tutor_todo',
-      description: 'Create or update a learner to-do with a due date (shown in the workbench 数据 tab: 待办, 今天到期, calendar). '
+      description: 'Create or update a learner to-do with a due date (shown in the workbench 日历 tab: 待办, 今天到期, calendar; the 数据 tab only shows saved learning records). '
         + 'op "create": {courseId, title, dueAt?, remindAt?, conceptId?, note?}; op "update": {id, baseRevision, title?, dueAt? (null clears), remindAt?, status? (open | done | dropped), conceptId?, note?}. '
         + 'Times are ISO 8601 with an offset, e.g. 2026-11-12T19:00:00-07:00 (the learner is in America/Phoenix unless they say otherwise). conceptId must be a knowledge point of the same course (from tutor_visualize outline or tutor_table_query v_knowledge_points). '
         + 'baseRevision is the to-do\'s own revision (from tutor_table_query v_todos or a previous tutor_todo result); on conflict READ AGAIN, the learner may have just ticked it off — never retry blindly. '

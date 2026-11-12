@@ -64,7 +64,7 @@ page.on('console', (m) => m.type() === 'error' && !(serverDown && /ERR_CONNECTIO
 const url = `http://127.0.0.1:${port}/`;
 await page.goto(url);
 await page.waitForSelector('[data-testid=tutor-workbench]');
-const VIEW_ID = { outline: 'outline-view', mindmap: 'mindmap-view', graph: 'graph-view', board: 'board-view', data: 'data-view' };
+const VIEW_ID = { outline: 'outline-view', mindmap: 'mindmap-view', graph: 'graph-view', board: 'board-view', data: 'data-view', calendar: 'calendar-view' };
 const tab = async (k, p = page) => { await p.click(`#omt-tab-${k}`); await p.waitForSelector(`[data-testid=${VIEW_ID[k]}]`); };
 const mmId = (syllabusId) => (String(syllabusId).startsWith('mm-') || String(syllabusId).startsWith('mmroot-') ? syllabusId : `mm-${syllabusId}`);
 const mmNode = (id) => `[data-testid=mindmap-elixir] [data-nodeid="me${mmId(id)}"]`;
@@ -81,7 +81,8 @@ const mindmapOfCourse = async () => (await readState()).mindmaps[cid];
 await step('initial render reads the real state (no hard-coded ZPD lesson)', async () => {
   const st = await readState();
   const lesson = Object.values(st.lessons)[0];
-  assert.equal(await page.textContent('[data-testid=lesson-title]'), lesson.title);
+  // the heading also carries the 「添加到对话」 button; compare the title text itself
+  assert.equal((await page.locator('[data-testid=lesson-title]').evaluate((h) => h.firstChild.textContent)).trim(), lesson.title);
   const body = await page.textContent('[data-testid=lesson-body]');
   assert.ok(body.includes('1932'), 'lesson body shows the real part text');
   assert.ok(!(await page.textContent('body')).includes('ZPD'), 'no design-fixture ZPD text');
@@ -1066,6 +1067,18 @@ await step('data: 数据 tab loads the Glide grid chunk; 知识点总表 has the
     assert.ok((await gridRows(id)) >= 1, `${k} table has real rows`);
   }
   await page.screenshot({ path: join(shots, '11-data-attempts.png') });
+  // 数据 = saved row records only: the reminder surface (calendar / 今天到期 / to-do form / review grid) lives in 日历
+  assert.deepEqual(await page.locator('[data-testid=data-subtabs] [data-sub]').evaluateAll((els) => els.map((e) => e.dataset.sub)), ['kp', 'questions', 'attempts', 'lessons', 'reviewLogs']);
+  for (const id of ['todo-calendar', 'due-today', 'todo-form', 'grid-todos', 'grid-reviews', 'chunk-calendar'])
+    assert.equal(await page.locator(`[data-testid=data-view] [data-testid=${id}]`).count(), 0, `no ${id} inside 数据`);
+  assert.doesNotMatch(await page.textContent('[data-testid=data-view] .status'), /日历里|FullCalendar/);
+  await page.click('[data-testid=data-subtabs] [data-sub=lessons]');
+  await page.waitForSelector('[data-testid=grid-lessons] canvas');
+  assert.equal(await gridRows('grid-lessons'), (await store.data('lessons', { courseId: cid })).length);
+  await page.click('[data-testid=data-subtabs] [data-sub=reviewLogs]');
+  const logs = await store.data('reviewLogs', { courseId: cid });
+  if (logs.length) { await page.waitForSelector('[data-testid=grid-review-logs] canvas'); assert.equal(await gridRows('grid-review-logs'), logs.length); }
+  else await page.waitForSelector('[data-testid=grid-review-logs-empty] >> text=还没有复习记录');
   await page.click('[data-testid=data-subtabs] [data-sub=kp]');
   await page.waitForSelector('[data-testid=grid-kp] canvas');
   await page.screenshot({ path: join(shots, '11-data-kp.png') });
@@ -1203,8 +1216,8 @@ await step('data: 「详情」 opens the knowledge point detail (content, attemp
 });
 
 await step('to-dos: add one due today linked to a knowledge point → 今天到期 + calendar (FullCalendar chunk); toggle; stale toggle conflicts', async () => {
-  await tab('data');
-  await page.click('[data-testid=data-subtabs] [data-sub=todos]');
+  await tab('calendar');
+  await page.click('[data-testid=calendar-subtabs] [data-sub=todos]');
   await page.waitForSelector('[data-testid=todo-form]');
   const c = Object.values((await readState()).concepts).find((x) => x.courseId === cid && x.status === 'active');
   // due later today in the learner's zone (America/Phoenix in this browser context)
@@ -1219,7 +1232,7 @@ await step('to-dos: add one due today linked to a knowledge point → 今天到�
   assert.equal(phx, due, 'the instant stored is the wall-clock time the learner typed, in America/Phoenix');
   await page.waitForSelector('[data-testid=grid-todos] canvas');
   await page.screenshot({ path: join(shots, '14-todos-due-today.png') });
-  await page.click('[data-testid=data-subtabs] [data-sub=calendar]');
+  await page.click('[data-testid=calendar-subtabs] [data-sub=calendar]');
   await page.waitForSelector('[data-testid=todo-calendar] .fc-event');
   assert.ok((await page.textContent('[data-testid=todo-calendar]')).includes('e2e：复习这个知识点'));
   await page.click('[data-testid=todo-calendar] .fc-timeGridWeek-button');
@@ -1248,17 +1261,17 @@ await step('reviews (FSRS): a due review is purple in 今天到期 + the calenda
   assert.ok(card?.due_at, 'knowledge points with attempts got a scheduled card on migration');
   // simulate the passage of time: this card's review falls due now (test-only write to the card row)
   store.db.prepare('UPDATE review_cards SET due_at = ? WHERE id = ?').run(new Date(Date.now() - 60000).toISOString(), card.id);
-  await tab('graph'); await tab('data');
-  await page.click('[data-testid=data-subtabs] [data-sub=reviews]');
+  await tab('graph'); await tab('calendar');
+  await page.click('[data-testid=calendar-subtabs] [data-sub=reviews]');
   await page.waitForSelector('[data-testid=grid-reviews] canvas');
   const item = `[data-testid=due-today] [data-review-id="${card.id}"]`;
   await page.waitForSelector(item);
   assert.match(await page.textContent(item), new RegExp(card.concept_title.slice(0, 6)));
   assert.equal(await page.locator(`${item} .kind.review`).evaluate((e) => getComputedStyle(e).backgroundColor), 'rgb(124, 77, 204)', 'review tag is purple');
-  assert.match(await page.textContent('[data-testid=data-subtabs] [data-sub=reviews]'), /到期 \d/);
+  assert.match(await page.textContent('[data-testid=calendar-subtabs] [data-sub=reviews]'), /到期 \d/);
   await page.screenshot({ path: join(shots, '15-review-due.png') });
   // calendar: purple review event next to blue to-dos
-  await page.click('[data-testid=data-subtabs] [data-sub=calendar]');
+  await page.click('[data-testid=calendar-subtabs] [data-sub=calendar]');
   await page.waitForSelector('[data-testid=todo-calendar] .review-event');
   const ev = page.locator('[data-testid=todo-calendar] .review-event').filter({ hasText: card.concept_title }).first();
   // purple block in 月/周; in the narrow column's 日程 list: purple dot + purple 复习 tag
@@ -1275,10 +1288,11 @@ await step('reviews (FSRS): a due review is purple in 今天到期 + the calenda
   const e1 = (await readState()).events.at(-1);
   assert.equal(e1.action, 'review.rate'); assert.equal(e1.actor, 'learner');
   await eventually(async () => assert.equal(await page.locator(item).count(), 0));
-  // the click on the calendar event opens the knowledge point detail with the new date
-  await page.click('[data-testid=data-subtabs] [data-sub=reviews]');
+  // the knowledge point link in 复习 opens 数据 with the knowledge point detail (its row) and the new date
+  await page.click('[data-testid=calendar-subtabs] [data-sub=reviews]');
   await page.waitForSelector('[data-testid=grid-reviews] canvas');
   await gridClick('grid-reviews', card.concept_id, 'kp');
+  await page.waitForSelector('[data-testid=data-view]');
   await page.waitForSelector(`[data-testid=kp-detail][data-concept="${card.concept_id}"] [data-testid=kp-review]`);
   const d = new Date(after.due_at);
   await eventually(async () => assert.equal(await page.textContent('[data-testid=kp-next-review]'), `${d.getMonth() + 1}月${d.getDate()}日`));
@@ -1299,8 +1313,8 @@ await step('reviews (FSRS): a due review is purple in 今天到期 + the calenda
 });
 
 await step('calendar in the narrow right column: titles are recognisable (日程 list by default, wrapped month cells) and hover shows the full title', async () => {
-  await tab('data');
-  await page.click('[data-testid=data-subtabs] [data-sub=todos]');
+  await tab('calendar');
+  await page.click('[data-testid=calendar-subtabs] [data-sub=todos]');
   await page.waitForSelector('[data-testid=todo-form]');
   const due = await page.evaluate(() => { const d = new Date(); d.setHours(Math.min(23, d.getHours() + 2), 0, 0, 0); const p = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; });
   const title = 'e2e：今晚复习皮姆斯勒分级间隔并做两道迁移题';
@@ -1310,7 +1324,7 @@ await step('calendar in the narrow right column: titles are recognisable (日程
   await page.waitForSelector(`[data-testid=due-today] >> text=${title}`);
   // a review on the calendar too
   const rc = (await store.data('reviews', { courseId: cid })).find((r) => r.due_at);
-  await page.click('[data-testid=data-subtabs] [data-sub=calendar]');
+  await page.click('[data-testid=calendar-subtabs] [data-sub=calendar]');
   const cal = '[data-testid=todo-calendar]';
   await page.waitForSelector(`${cal}[data-narrow="1"]`);
   const w = (await page.locator(cal).boundingBox()).width;
@@ -1348,8 +1362,8 @@ await step('calendar in the narrow right column: titles are recognisable (日程
   await ev.hover();
   await page.screenshot({ path: join(shots, '17b-calendar-narrow-month.png') });
   // the learner's choice sticks across reloads of the data; the whole-workbench width goes back to the month grid
-  await page.click('[data-testid=data-zoom]');
-  await page.click('[data-testid=data-zoom-full]');
+  await page.click('[data-testid=calendar-zoom]');
+  await page.click('[data-testid=calendar-zoom-full]');
   await page.waitForSelector('[data-testid=tutor-workbench][data-mm-zoom=full]');
   await page.waitForSelector(`${cal}[data-narrow="0"]`);
   await page.waitForSelector(`${cal} .fc-daygrid-event`);

@@ -763,6 +763,9 @@ export class SqliteTutorStore {
       case 'attempts': return plain(db.prepare('SELECT * FROM v_attempts WHERE course_id = ? ORDER BY recorded_at DESC').all(courseId));
       case 'reviews': return plain(db.prepare("SELECT * FROM v_review_cards WHERE course_id = ? ORDER BY state = 'new', due_at, topic_index, sub_index").all(courseId));
       case 'todos': return plain(db.prepare("SELECT * FROM v_todos WHERE course_id = ? ORDER BY status = 'open' DESC, due_at IS NULL, due_at, created_at").all(courseId));
+      case 'lessons': return plain(db.prepare('SELECT * FROM v_lessons WHERE course_id = ? ORDER BY created_at DESC').all(courseId));
+      case 'reviewLogs': return plain(db.prepare(`SELECT l.* FROM v_review_logs l JOIN concepts k ON k.id = l.concept_id
+          WHERE k.course_id = ? ORDER BY l.reviewed_at DESC, l.id`).all(courseId));
       case 'concept': {
         const id = String(params.conceptId ?? '');
         const kp = db.prepare('SELECT * FROM v_knowledge_points WHERE course_id = ? AND concept_id = ?').get(courseId, id);

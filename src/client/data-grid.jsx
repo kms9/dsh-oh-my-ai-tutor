@@ -57,7 +57,7 @@ function CopyEditor({ value, onFinishedEditing }) {
 const provideEditor = (cell) => ((cell.kind === GridCellKind.Text || cell.kind === GridCellKind.Number) && cell.readonly
   ? { editor: CopyEditor, disablePadding: true, disableStyling: false } : undefined);
 const strip = (label) => String(label).replace(/\s*›$/, '');
-export function DataGrid({ columns, rows, rowKey, onAction, height = 320, highlightKey = null, testId = 'data-grid' }) {
+export function DataGrid({ columns, rows, rowKey, onAction, height = 320, highlightKey = null, testId = 'data-grid', emptyText = '没有符合条件的行。' }) {
   const wrapRef = useRef(null);
   const [width, setWidth] = useState(600);
   const [sort, setSort] = useState(null); // { id, dir }
@@ -126,7 +126,7 @@ export function DataGrid({ columns, rows, rowKey, onAction, height = 320, highli
           onHeaderClicked={(col) => { const id = columns[col].id; setSort((s) => (s?.id !== id ? { id, dir: 'asc' } : s.dir === 'asc' ? { id, dir: 'desc' } : null)); }}
           theme={{ accentColor: '#2f5bd3', accentLight: 'rgba(47,91,211,.10)', textDark: '#1d2433', textMedium: '#5b6476', textHeader: '#4a5366',
             bgHeader: '#f4f6fb', bgHeaderHovered: '#e9edf7', borderColor: 'rgba(30,40,70,.10)', fontFamily: 'inherit', baseFontStyle: '13px', headerFontStyle: '600 12px' }} />
-      ) : <div className="empty" style={{ padding: 18 }}>没有符合条件的行。</div>}
+      ) : <div className="empty" data-testid={`${testId}-empty`} style={{ padding: 18 }}>{emptyText}</div>}
       {sorted.length > 0 && (
         <div className="dghint small muted" data-testid={`${testId}-hint`}>
           {copied ? <span className="dgcopied" data-testid="grid-copied">{copied.text == null ? '复制失败，请双击单元格后手动选中文字复制' : `已复制：${copied.text.length > 24 ? `${copied.text.slice(0, 24)}…` : copied.text || '（空）'}`}</span> : COPY_HINT}

@@ -143,6 +143,12 @@ test('a newly recorded attempt reschedules its card in the same transaction; a n
   assert.equal(after.state, 'review'); assert.ok(after.due_at); assert.equal(after.revision, card.revision + 1);
   const logs = (await store.data('concept', { courseId: course.id, conceptId: card.concept_id })).review.logs;
   assert.equal(logs.length, 1, 'rated exactly once'); assert.equal(logs[0].actor, 'ai'); assert.ok(logs[0].assessment_id);
+  // 数据 tab record tables: the review log and the lesson are saved rows of this course
+  const logRows = (await store.data('reviewLogs', { courseId: course.id })).filter((r) => r.card_id === card.id);
+  assert.equal(logRows.length, 1); assert.equal(logRows[0].concept_id, card.concept_id); assert.ok(logRows[0].assessment_id);
+  assert.deepEqual(await store.data('reviewLogs', { courseId: 'crs_nope' }), []);
+  const lessonRows = await store.data('lessons', { courseId: course.id });
+  assert.ok(lessonRows.some((l) => l.lesson_id === lesson.id && l.title === '复习测试课' && l.parts === 1));
   const st2 = await store.read();
   const course2 = Object.values(st2.courses)[0];
   const out = await store.mutate('course.editOutline', { courseId: course.id, syllabusRevision: course2.syllabus.revision,

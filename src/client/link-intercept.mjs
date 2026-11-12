@@ -28,5 +28,5 @@ export function installTutorLinks(onOpen, target = typeof window === 'undefined'
 
 /** The view a link opens on (the workbench tab); `focus` carries the object. */
 export function viewFor(link) {
-  return { concept: 'data', card: 'board', note: undefined, lesson: undefined, topic: 'outline', outline: 'outline', mindmapNode: 'mindmap', graphNode: 'graph', relation: 'graph', todo: 'data', review: 'data' }[link.kind];
+  return { concept: 'data', card: 'board', note: undefined, lesson: undefined, topic: 'outline', outline: 'outline', mindmapNode: 'mindmap', graphNode: 'graph', relation: 'graph', todo: 'calendar', review: 'calendar' }[link.kind];
 }
