@@ -513,13 +513,16 @@ function LessonLinks({ lesson, topics, conceptById, nav }) {
   );
 }
 
+const QTYPE_LABEL = { choice: '单选', multi: '多选', fill: '填空' };
 /** Where we stopped: the open question (word for word), answers and hints so far, the recap. */
 function ResumeBox({ resume }) {
   const q = resume.pendingQuestion;
   if (!q && !resume.recap) return null;
   return (
     <div className="resume" data-testid="resume">
-      {q && <div data-testid="resume-question"><b>待你回答：</b>{q.question}<span className="small">（已答 {q.attempts} 次{q.hintCount ? ` · 已给 ${q.hintCount} 次提示` : ''}）</span></div>}
+      {q && <div data-testid="resume-question"><b>待你回答{QTYPE_LABEL[q.type] ? `（${QTYPE_LABEL[q.type]}）` : ''}：</b>{q.question}<span className="small">（已答 {q.attempts} 次{q.hintCount ? ` · 已给 ${q.hintCount} 次提示` : ''}）</span></div>}
+      {q?.options?.length ? <ol className="small resume-options" data-testid="resume-options">{q.options.map((o) => <li key={o.id} data-option={o.id}><b>{o.id}.</b> {o.text}</li>)}</ol> : null}
+      {q && q.type && q.type !== 'short' ? <div className="small muted">在对话里回答即可（选择题写选项字母），系统会按出题时定好的标准答案判分。</div> : null}
       {resume.recap && <div className="small" data-testid="resume-recap"><b>上次要点：</b>{resume.recap.text}</div>}
       <div className="small muted">新对话里 AI 会先请你回忆上次的要点，再接着这道题往下讲。</div>
     </div>

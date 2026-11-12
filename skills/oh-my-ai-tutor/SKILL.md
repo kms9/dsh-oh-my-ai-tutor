@@ -12,7 +12,15 @@ summary: DSH 中通过明确教学状态和学习证据管理 Goal、Course、Le
 4. `tutor_visualize({courseId,view})` 的 view 为 `outline` / `mindmap` / `graph` / `board`（只读投影）。在 DSH web 中结果会在对话里画成图形卡片（导图卡片画出完整深度），并同步显示在右侧栏「AI 学习工作台」，**不要**再用 ASCII 树、Mermaid 源码或表格重画一遍。大纲回答「教什么、按什么顺序」；思维导图和知识图谱是独立资源，用从属或引用关联，不和大纲绑成同一棵树。`mindmap` 若 `skeleton=true`，说明还只是大纲骨架，应按下面「从课程生成可视化」充实。`graph` 返回图谱节点（可引用知识点）及已提出的关系候选。`relation.propose` / `graph.generate` 永远只创建 `candidate`，不得当成确认事实。
 5. `lesson.create` 的 payload: `{courseId,title,topicId?,conceptIds?,parts:[{title,objective,conceptIds?}]}`。有 `topicId` 但没有 conceptIds 时，会挂上该主题下全部在用知识点。展示规划，默认请学习者在工作台点 **批准课时计划**；同样仅在学习者说「交给你」「跳过批准」或已交出批准权时，才可调用 `lesson.approve {lessonId,planRevision,consent}`。看到 `phase: teaching` 后再开讲。
 6. 教学以一个 Part 为单位，写入 `lesson.partWrite` 的 `{lessonId,partIndex,body,sourceRefs?}`。**新的 sourceRefs 必须是已登记资料的 `{sourceId,locator}`**（locator 如 `p.12`、`第12页`、`01:30`），旧的自由文本出处仍可读取但不要再写。等学习者提问或确认后再 `lesson.cover`，不能把阅读视作掌握。出题用 `lesson.ask`，提示用 `lesson.hint`，记下要点用 `lesson.checkpoint`。
-7. Review 用真实回答：`assessment.record` payload `{lessonId,conceptId,question,studentAnswer,feedback,score,transfer,hintCount}`。**任何回答都不得由 Agent 假造**。这里的状态是 `model-unverified` 暂定证据，不是校准概率。
+7. Review 用真实回答：`assessment.record` payload `{lessonId,conceptId,questionId,question,studentAnswer,feedback,score,transfer,hintCount}`。**任何回答都不得由 Agent 假造**。
+   **题型分流（`lesson.ask` 必须写 `type`）：**
+   - `choice` 单选：`options:[{id:"A",text},{id:"B",text},…]`（至少 2 个，id 唯一）+ `answerKey:{correct:"A"}`。
+   - `multi` 多选：同样的 `options` + `answerKey:{correct:["A","C"]}`；全对才得分（选项顺序无关）。
+   - `fill` 填空：`answerKey:{accepted:["5","-5"],match?:"normalized"|"numeric"|"exact"}`；默认 `normalized`（去首尾空白、合并空白、全角半角、大小写不敏感），`numeric` 按数值比较（5 = 5.0，可写 1/2），`exact` 只去首尾空白后逐字比较。任一 accepted 命中即对。
+   - `short` 简答/开放题：不带 options 和 answerKey，仍由你评分。不写 type 时按 `short` 处理，但**请总是显式写 type**。
+   客观题（choice/multi/fill）的标准答案**必须在出题时**随 `lesson.ask` 写入并冻结，缺 key 或选项会被拒绝；**不要在记分时再编答案**，学习者作答前**不要在对话里透露答案**（工具结果里也只返回 `hasAnswerKey: true`，不回显答案）。
+   客观题作答：用 `assessment.record` 带 `questionId` 和学习者的**原话** `studentAnswer`（feedback 可选、简短），**不要设定或试图改分**——系统按冻结答案判分（0 或 1），忽略你给的 score，`judgedBy: "answer-key"`。用返回的 `official.score` 和 `official.expectedAnswer` 讲解对错。答错时题目仍开放、答案仍保密（`expectedAnswer: null`），先给提示（`lesson.hint`）再让学习者重答；学习者放弃时用 `close:true` 或 `lesson.dropQuestion`，结果里才会给出标准答案。
+   简答题照旧由你给 `score` 和 `feedback`，状态是 `model-unverified` 暂定证据，不是校准概率。答对也不等于掌握。
 8. 然后 `lesson.reviewEnd({lessonId,skipped?:boolean})`。按学习者选择写 `note.add`（可带 `conceptIds` 或更宽的 `anchors:[{type,id}]`，type 为 concept|topic|mindmapNode|graphNode|relation|lesson；笔记也可挂在导图/图谱扩展节点上）或 `lesson.finish` 时 `skipNotes:true`。`lesson.finish` 之后进入 **课末反馈**（`feedback_pending`）：收集反馈，可选按反馈改大纲（`lesson.feedback {lessonId,feedback,adjustOutline:true}` → `plan_adjustment_pending`）。用 `tutor_outline_edit`（必须带 `reason`）改大纲，**仍然需要一次明确的批准**（学习者点按钮，或在其要求下由你代批），再 `lesson.adjustDone`（或批准时自动继续），并可附带下一课预告 `nextPreview`。流程是：反馈 → 调整 → 批准 → 继续。
 9. 大纲和思维导图是独立资源，不要当成同一份数据。改大纲用 `tutor_outline_edit`：先 `tutor_visualize(outline)` 取 id 和 `syllabusRevision`（**必填**），再提交原子操作（addTopic / renameTopic / moveTopic / removeTopic / addSubtopic / renameSubtopic / moveSubtopic / removeSubtopic），**必须带 reason**。大纲是两层树（主题 → 子主题），子主题用 `conceptIds` 引用知识点，二者不是同一个对象。新建主题或子主题不要自带 id。任何大纲修改都要重新批准。从大纲去掉一个子主题**不会**退役该知识点（作答和复习仍保留）。改思维导图用 `tutor_mindmap_edit`（先 `tutor_visualize(mindmap)` 取节点 id 和 `mindmapRevision`）；深度不限，可在某个知识点下加研究方法、易错点等扩展节点，这些节点不是考点。值得测验和复习时，用 `tutor_concept_promote`（或 `concept.promote`）升格为知识点，不会自动写入大纲。学习者也可能在工作台里手动改过，冲突时重新读取再判断。
 10. 课程白板：先 `tutor_board_read` 取 `revision` 和元素 id，再 `tutor_board_patch({courseId, baseRevision, operations})`（`baseRevision` 必填）。元素 id 只来自 `tutor_board_read`；新卡片/便签/箭头**不带 id**，由内核分配，同一批里要引用新卡片时给它 `ref:"n1"`，再用 `"$n1"` 指向它。`seed:true`（或 `board.generate`）补齐**全部相关**知识点卡片（含已升格、大纲外的点）、与本课/主题相关的导图或图谱扩展（作为注释卡，不是考点）、以及候选关系箭头；已在板上的元素保留位置，只补缺失的。被人手动删掉的关系箭头不会被补回，随卡片级联删除的会随卡片一起补回；被人直接删掉的扩展注释也不会被补回。从大纲删掉的知识点，卡片保留为虚线（stale），需要时手动删。颜色只接受 `#rgb` / `#rrggbb`。白板箭头只是视觉连线，语义关系要另用 `relation.propose`。禁止从坐标远近推断关系。外部 `dsh-whiteboard`（Excalidraw）若已安装，仍需 `whiteboard_list`/`whiteboard_read` 后再 patch，不会与课程白板自动同步。
@@ -67,11 +75,11 @@ summary: DSH 中通过明确教学状态和学习证据管理 Goal、Course、Le
 | `lesson.approve` | `{lessonId,planRevision,consent?}`；规则同 course.approve |
 | `lesson.partWrite` | `{lessonId,partIndex,body,sourceRefs?}`；sourceRefs 为 [{sourceId,locator?}] |
 | `lesson.cover` | `{lessonId,partIndex}` |
-| `lesson.ask` | `{lessonId,question,conceptId?,replace?}` |
+| `lesson.ask` | `{lessonId,question,type,options?,answerKey?,conceptId?,replace?}`；type 为 `choice`/`multi`/`fill`/`short`，客观题必须带 answerKey（choice/multi 还要 options） |
 | `lesson.hint` | `{lessonId,hint}` |
 | `lesson.dropQuestion` | `{lessonId}` |
 | `lesson.checkpoint` | `{lessonId,recap}` |
-| `assessment.record` | `{lessonId,conceptId,question,studentAnswer,feedback,score,transfer,hintCount?,questionId?,close?}` |
+| `assessment.record` | `{lessonId,conceptId,question,studentAnswer,feedback,score,transfer,hintCount?,questionId?,close?}`；客观题由系统按冻结答案判分（忽略 score，feedback 可选），简答题用你的 score（暂定） |
 | `lesson.reviewEnd` | `{lessonId,skipped?}` |
 | `note.add` | `{lessonId?,courseId?,title,content,conceptIds?,anchors?,sourceRefs?}`；anchors 为 `[{type,id}]`（concept|topic|mindmapNode|graphNode|relation|lesson）；作者由调用方决定 |
 | `note.link` | `{noteId,conceptIds?,anchors?}` |

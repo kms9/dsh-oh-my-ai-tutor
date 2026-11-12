@@ -15,7 +15,7 @@ import { normalizeState, legacyAnchors, conceptIdsFromAnchors } from './resource
 import { cardFromRow, rowFromCard, review as fsrsReview, preview as fsrsPreview, replay, spreadOverdue, ratingFromAttempt, RATING_LABEL, STATE_NAME } from './review.mjs';
 
 /** Physical layout version of this database (PRAGMA user_version). Bump only with a migration step below. */
-export const DB_VERSION = 4;
+export const DB_VERSION = 5;
 const APPLICATION_ID = 0x4f4d5454; // "OMTT": never adopt or reset an unrelated SQLite file
 export const TODO_STATUS = Object.freeze(['open', 'done', 'dropped']);
 
@@ -212,6 +212,25 @@ CREATE VIEW v_knowledge_points AS
   // courses are upgraded in JS: syllabus projection → a stored mind map, each concept → a graph node that
   // refers to it, relations remapped onto those nodes, learning records keep their concept ids.
   4: migrateToV4,
+  // 5: objective questions are graded by the store against a frozen answer key. v_attempts gains the question type
+  // and the expected answer — withheld (NULL) while that question is still open, so the key never leaks before an answer.
+  5: `
+DROP VIEW IF EXISTS v_questions;
+DROP VIEW IF EXISTS v_attempts;
+CREATE VIEW v_attempts AS
+  SELECT l.course_id, a.id AS assessment_id, a.concept_id, k.title AS concept_title, a.lesson_id, l.title AS lesson_title,
+    json_extract(a.doc, '$.question') AS question, json_extract(a.doc, '$.studentAnswer') AS student_answer,
+    json_extract(a.doc, '$.feedback') AS feedback, a.score, json_extract(a.doc, '$.hintCount') AS hint_count,
+    json_extract(a.doc, '$.transfer') AS transfer, json_extract(a.doc, '$.judgedBy') AS judged_by, a.recorded_at,
+    COALESCE(json_extract(a.doc, '$.type'), 'short') AS question_type,
+    CASE WHEN json_extract(a.doc, '$.questionId') IS NOT NULL AND json_extract(a.doc, '$.questionId') IS json_extract(l.doc, '$.pendingQuestion.id')
+      THEN NULL ELSE json_extract(a.doc, '$.expectedAnswer') END AS expected_answer
+  FROM assessments a LEFT JOIN lessons l ON l.id = a.lesson_id LEFT JOIN concepts k ON k.id = a.concept_id;
+CREATE VIEW v_questions AS
+  SELECT course_id, question, concept_id, concept_title, lesson_id, lesson_title, count(*) AS attempts, round(avg(score), 2) AS avg_score,
+    min(recorded_at) AS first_at, max(recorded_at) AS last_at, min(assessment_id) AS assessment_id
+  FROM v_attempts GROUP BY course_id, question, concept_id, lesson_id;
+`,
 };
 
 const V4_SCHEMA = `

@@ -7,6 +7,8 @@ import { AddToChatButton } from './AddToChat.jsx';
 const DataGrid = lazyComponent('grid', 'DataGrid', 200);
 
 /** 数据 tab sub-views: saved learning records only (row data from SQLite). To-dos / review reminders / calendar live in 日历. */
+const QTYPE = { choice: '单选', multi: '多选', fill: '填空', short: '简答' };
+const JUDGED = { 'answer-key': '对照标准答案', 'model-unverified': '模型暂定' };
 export const DATA_TABS = [['kp', '知识点'], ['questions', '题目'], ['attempts', '作答'], ['lessons', '课时'], ['reviewLogs', '复习记录']];
 /** FSRS grades with short Chinese labels (Again / Hard / Good / Easy). */
 export const RATING = [[1, '忘了'], [2, '吃力'], [3, '想起来了'], [4, '轻松']];
@@ -129,7 +131,10 @@ export function DataView({ api, course, revision, topics, selected, onSelectConc
     { id: 'kp', title: '知识点', width: 116, link: (r) => (r.concept_id ? { label: `${r.concept_title ?? '知识点'} ›`, action: 'detail' } : null) },
     { id: 'question', title: '题目', width: 180, value: (r) => r.question },
     { id: 'answer', title: '你的回答', width: 180, value: (r) => r.student_answer },
+    { id: 'type', title: '题型', width: 56, value: (r) => QTYPE[r.question_type] ?? r.question_type ?? '简答' },
     { id: 'score', title: '得分', width: 56, value: (r) => (r.score == null ? null : Math.round(r.score * 100)) },
+    { id: 'judged', title: '评分', width: 76, kind: 'muted', value: (r) => JUDGED[r.judged_by] ?? r.judged_by },
+    { id: 'expected', title: '标准答案', width: 140, value: (r) => r.expected_answer ?? (r.question_type && r.question_type !== 'short' ? '（题目未结束，暂不显示）' : '') },
     { id: 'hints', title: '提示', width: 50, value: (r) => r.hint_count },
     { id: 'transfer', title: '迁移题', width: 60, value: (r) => (r.transfer ? '是' : '否') },
     { id: 'feedback', title: '反馈', width: 200, kind: 'muted', value: (r) => r.feedback },
@@ -214,7 +219,7 @@ function ConceptDrawer({ detail, topics, nav, busy, onRate, onClose, onNewTodo, 
       <div className="kpsec"><span className="small">作答记录</span>
         {detail.attempts.length ? detail.attempts.map((a) => (
           <div key={a.assessment_id} className="qa"><div><b>{a.question}</b> <span className={`score ${a.score < 0.6 ? 'low' : ''}`}>{Math.round(a.score * 100)} 分</span></div>
-            <div className="small">你的回答：{a.student_answer}</div><div className="small">反馈：{a.feedback}</div></div>
+            <div className="small">你的回答：{a.student_answer}</div>{a.expected_answer ? <div className="small">标准答案：{a.expected_answer}</div> : null}<div className="small">{JUDGED[a.judged_by] ?? a.judged_by}{a.feedback ? ` · 反馈：${a.feedback}` : ''}</div></div>
         )) : <div className="small muted">还没有作答。</div>}
       </div>
       <div className="kpsec" data-testid="kp-lessons"><span className="small">讲到它的课时</span>

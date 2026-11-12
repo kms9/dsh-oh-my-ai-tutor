@@ -269,7 +269,7 @@ test('migration v2 → current: backup (0600) first, dedicated markers, lesson d
   const store = new SqliteTutorStore(path, { legacyJsonPath: null });
   store.open();
   assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, DB_VERSION);
-  assert.equal(DB_VERSION, 4);
+  assert.equal(DB_VERSION, 5);
   assert.ok(store.backup && store.backup.includes('.bak-v2-'));
   assert.equal((await stat(store.backup)).mode & 0o777, 0o600, 'backup is owner-only');
   const bak = new DatabaseSync(store.backup, { readOnly: true });
@@ -286,6 +286,8 @@ test('migration v2 → current: backup (0600) first, dedicated markers, lesson d
   assert.ok(kps.every((r) => r.lessons === 0), 'old lessons have no links (not guessed from attempts)');
   const lessonView = await store.readOnlyQuery('SELECT lesson_id, concept_ids, topic_id FROM v_lessons');
   assert.equal(lessonView.rows[0].concept_ids, '[]');
+  const attemptView = await store.readOnlyQuery('SELECT question_type, expected_answer, judged_by FROM v_attempts');
+  assert.ok(attemptView.rows.every((r) => r.question_type === 'short' && r.expected_answer === null), 'v5: old attempts are short, without a key');
   const detail = await store.data('concept', { courseId: Object.keys(st.courses)[0], conceptId: Object.values(st.assessments)[0].conceptId });
   assert.equal(detail.lessons[0].via, 'attempt', 'an old lesson still shows up through its attempts');
   store.close();

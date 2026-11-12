@@ -132,6 +132,8 @@ export function toolSpecs(storeOrResolve) {
         + 'Approvals: by default show the outline / lesson plan and ask the learner to approve (批准 in the AI 学习工作台). Call course.approve {courseId, syllabusRevision, consent} / lesson.approve {lessonId, planRevision, consent} yourself ONLY when the learner told you to (consent = their words, e.g. 「交给你」「跳过批准」), or after course.setApproval {courseId, mode:"delegated", consent} recorded a standing delegation. Never approve on your own initiative. '
         + 'lesson.create {courseId, title, topicId?, conceptIds?, parts:[{title, objective, conceptIds?}]} ties the lesson to the outline. sourceRefs are [{sourceId, locator?}] of registered sources (locator like "p.12" or "01:30"). '
         + LINK_RULE
+        + 'lesson.ask {lessonId, question, type, options?, answerKey?, conceptId?, replace?}: ALWAYS set type. choice: options [{id:"A",text},...] (>=2) + answerKey {correct:"A"}; multi: options + answerKey {correct:["A","C"]} (all-or-nothing); fill: answerKey {accepted:["5","-5"], match?: "normalized"(default)|"numeric"|"exact"}; short: no options/key (model-graded). Omitted type = short. The key is frozen at ask time and is never echoed back (hasAnswerKey:true); do not reveal it to the learner before they answer. '
+        + 'assessment.record {lessonId, conceptId, questionId, question, studentAnswer, feedback, score, transfer, hintCount?, close?}: for an open choice/multi/fill question the STORE grades studentAnswer against the frozen key (score 0|1, judgedBy "answer-key") and ignores your score; feedback is optional. Use result.official.score / official.expectedAnswer to explain (expectedAnswer stays null while a wrong answer leaves the question open for another try; close:true or lesson.dropQuestion reveals it). For short answers your score and feedback are recorded as provisional (judgedBy "model-unverified"). Never set a key at record time. '
         + 'A learner answer must be actually supplied by the learner, never invented.',
       parameters: {
         action: { type: 'string', enum: WRITE_ACTIONS, required: true },
@@ -150,7 +152,7 @@ export function toolSpecs(storeOrResolve) {
     {
       name: 'tutor_read',
       description: 'Read durable tutor domain state, optionally a single course (includes its live board). Does not read the DSH Session transcript. '
-        + 'resume (one per course without courseId) is where to pick up in a new conversation: current lesson, part, the open question (pendingQuestion: full text, attempts, hintCount), the last recap, covered parts, nextPreview and nextStep, with links. '
+        + 'resume (one per course without courseId) is where to pick up in a new conversation: current lesson, part, the open question (pendingQuestion: full text, type, options for choice/multi, attempts, hintCount; the answer key is never included — the store grades objective answers itself), the last recap, covered parts, nextPreview and nextStep, with links. '
         + 'When resuming: first help the learner recall the last key points (recap / covered); if pendingQuestion is set, continue with that same question.',
       parameters: { courseId: { type: 'string', description: 'Optional course id.' } },
       execute: run(async (store, args) => {
@@ -350,7 +352,7 @@ export function toolSpecs(storeOrResolve) {
         + `One SELECT (or WITH … SELECT) statement over these views only: ${SqliteTutorStore.QUERYABLE.join(', ')}. `
         + 'v_knowledge_points(course_id, concept_id, title, topic_id, topic_title, topic_index, sub_index, subtopic_id, description, mastery, attempts, avg_score, last_attempt_at, relations, board_cards (JSON array of board element ids), open_todos); '
         + 'v_outline(course_id, topic_index, topic_id, topic_title, sub_index, subtopic_id, title, description, concept_id); v_board_cards(course_id, element_id, concept_id, ord, x, y, created_by); '
-        + 'v_attempts(course_id, assessment_id, concept_id, concept_title, lesson_id, lesson_title, question, student_answer, feedback, score 0..1, hint_count, transfer, judged_by, recorded_at); '
+        + 'v_attempts(course_id, assessment_id, concept_id, concept_title, lesson_id, lesson_title, question, student_answer, feedback, score 0..1, hint_count, transfer, judged_by answer-key|model-unverified, recorded_at, question_type choice|multi|fill|short, expected_answer (NULL while that question is still open)); '
         + 'v_questions(course_id, question, concept_id, concept_title, lesson_id, lesson_title, attempts, avg_score, first_at, last_at, assessment_id); '
         + 'v_todos(id, course_id, concept_id, concept_title, title, status, due_at, remind_at, note, created_by, created_at, updated_at, revision); v_events(seq, revision, at, actor, action, entity_id, summary). '
         + 'v_lessons(course_id, lesson_id, title, status, phase, topic_id, concept_ids JSON, active_part_index, parts, pending_question, pending_attempts, pending_hints, feedback, next_preview, created_at, updated_at); '

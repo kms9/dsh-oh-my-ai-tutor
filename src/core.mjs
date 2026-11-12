@@ -3,6 +3,7 @@ import { BOARD_CARD, boardSeedPosition } from './board-layout.mjs';
 import { collectBoardSeedOps } from './board-seed.mjs';
 import { parseLocator, linksFor, refView } from './links.mjs';
 import { diffOutline, diffLines } from './outline-diff.mjs';
+import { questionSpec, gradeAnswer, expectedAnswer, isObjective, publicQuestion, redactAssessment, JUDGED_BY_KEY, JUDGED_BY_MODEL } from './grade.mjs';
 import {
   subConceptIds, stampSubConcepts, originOf, mergeAnchors, conceptIdsFromAnchors, lessonIdFromAnchors,
   legacyAnchors, normalizeBelongsTo, normalizeAnchors, mindmapOf, mindmapHierarchy, buildMindmapFromSyllabus,
@@ -700,25 +701,45 @@ export function transition(original, action, input = {}, opts = {}) {
       const pending = lesson.pendingQuestion ?? null;
       if (payload.questionId !== undefined && payload.questionId !== pending?.id) throw new Error(`questionId ${payload.questionId} is not the open question of this lesson${pending ? ` (open: ${pending.id})` : ' (none is open)'}`);
       const answersPending = pending && (payload.questionId === pending.id || (payload.questionId === undefined && String(payload.question ?? '').trim() === pending.question));
-      const score = Number(payload.score), hintCount = Number(payload.hintCount ?? (answersPending ? pending.hintCount : 0));
+      // objective questions (choice / multi / fill with a key frozen at lesson.ask) are graded HERE against that key;
+      // the model's score is ignored. Everything else keeps the model's provisional score.
+      const keyed = answersPending && isObjective(pending);
+      const studentAnswer = requireText(payload.studentAnswer, 'studentAnswer');
+      const grade = keyed ? gradeAnswer(pending, studentAnswer) : null;
+      const score = keyed ? grade.score : Number(payload.score), hintCount = Number(payload.hintCount ?? (answersPending ? pending.hintCount : 0));
       if (!Number.isFinite(score) || score < 0 || score > 1) throw new Error('score must be between 0 and 1');
       if (!Number.isInteger(hintCount) || hintCount < 0 || hintCount > 10) throw new Error('hintCount must be 0..10');
+      const feedback = keyed ? (payload.feedback === undefined || payload.feedback === null ? '' : String(payload.feedback).trim().slice(0, 5000))
+        : requireText(payload.feedback, 'feedback');
       const record = { id: id('assess'), lessonId: lesson.id, conceptId: concept.id,
-        question: requireText(payload.question, 'question'), studentAnswer: requireText(payload.studentAnswer, 'studentAnswer'),
-        feedback: requireText(payload.feedback, 'feedback'), score, hintCount,
-        transfer: payload.transfer === true, judgedBy: 'model-unverified', recordedAt: now };
+        question: keyed && (payload.question === undefined || payload.question === null) ? pending.question : requireText(payload.question, 'question'),
+        studentAnswer, feedback, score, hintCount,
+        transfer: payload.transfer === true, type: answersPending ? (pending.type ?? 'short') : 'short',
+        judgedBy: keyed ? JUDGED_BY_KEY : JUDGED_BY_MODEL, recordedAt: now };
+      if (keyed) {
+        record.options = pending.options;
+        record.answerKey = pending.answerKey;
+        record.expectedAnswer = expectedAnswer(pending).text;
+        record.grading = { parsed: grade.parsed, matched: grade.matched, ...(payload.score !== undefined && Number(payload.score) !== score ? { ignoredModelScore: Number.isFinite(Number(payload.score)) ? Number(payload.score) : String(payload.score).slice(0, 40) } : {}) };
+      }
+      let closed = false;
       if (answersPending) {
         pending.attempts += 1; pending.lastAnswerAt = now; pending.lastScore = score;
         record.questionId = pending.id; record.attemptNo = pending.attempts;
         // the question stays open after a wrong answer (hint → try again) unless it is closed explicitly
-        if (score >= 0.8 || payload.close === true) { lesson.answeredQuestions = [...(lesson.answeredQuestions ?? []), { ...pending, closedAt: now }].slice(-20); lesson.pendingQuestion = null; }
+        if (score >= 0.8 || payload.close === true) { lesson.answeredQuestions = [...(lesson.answeredQuestions ?? []), { ...pending, closedAt: now }].slice(-20); lesson.pendingQuestion = null; closed = true; }
       }
       s.assessments[record.id] = record;
       touchLesson(lesson);
       // Provisional evidence level only; never claim calibrated mastery probability.
       concept.mastery = score >= 0.8 && record.transfer && hintCount === 0 ? 'demonstrated' : 'developing';
       concept.updatedAt = now;
-      result = { assessment: record, provisionalMastery: concept.mastery, pendingQuestion: lesson.pendingQuestion ?? null }; break;
+      // the key is revealed in the result only once the learner can no longer retry this question
+      const shown = keyed && !closed ? redactAssessment(record, new Set([pending.id])) : record;
+      result = { assessment: shown, provisionalMastery: concept.mastery, pendingQuestion: publicQuestion(lesson.pendingQuestion ?? null),
+        official: { score, judgedBy: record.judgedBy, ...(keyed ? { isCorrect: grade.correct, ...(closed ? { expectedAnswer: record.expectedAnswer }
+          : { expectedAnswer: null, note: 'Wrong; the question stays open for another try, so the key is withheld. Give a hint (lesson.hint), or close it (close:true / lesson.dropQuestion) to get the expected answer.' }) } : {}) } };
+      break;
     }
     case 'lesson.ask': {
       // the question now waiting for the learner's answer (survives a new DSH session)
@@ -727,10 +748,14 @@ export function transition(original, action, input = {}, opts = {}) {
       if (lesson.pendingQuestion && payload.replace !== true)
         throw new Error(`A question is still waiting for the learner's answer: 「${lesson.pendingQuestion.question.slice(0, 80)}」 (${lesson.pendingQuestion.id}). Record the answer with assessment.record, or pass replace:true to drop it`);
       const conceptId = payload.conceptId === undefined ? null : courseConcepts(s, lesson.courseId, [payload.conceptId], 'conceptId')[0];
-      lesson.pendingQuestion = { id: id('q'), question: requireText(payload.question, 'question', 5000), conceptId,
+      // choice / multi / fill: options and the answer key are validated and frozen now, before the learner answers
+      const spec = questionSpec(payload);
+      const question = requireText(payload.question, 'question', 5000);
+      if (lesson.pendingQuestion) lesson.answeredQuestions = [...(lesson.answeredQuestions ?? []), { ...lesson.pendingQuestion, droppedAt: now }].slice(-20);
+      lesson.pendingQuestion = { id: id('q'), question, ...spec, conceptId,
         phase: lesson.phase, partIndex: lesson.phase === 'teaching' ? lesson.activePartIndex : null, askedAt: now, attempts: 0, hintCount: 0, hints: [] };
       touchLesson(lesson);
-      result = { lessonId: lesson.id, pendingQuestion: lesson.pendingQuestion }; break;
+      result = { lessonId: lesson.id, pendingQuestion: publicQuestion(lesson.pendingQuestion) }; break;
     }
     case 'lesson.hint': {
       const lesson = requireId(s, 'lessons', payload.lessonId);
@@ -738,14 +763,16 @@ export function transition(original, action, input = {}, opts = {}) {
       if (!q) throw new Error('No open question to give a hint for (lesson.ask first)');
       q.hints = [...q.hints, requireText(payload.hint, 'hint', 1000)].slice(-10); q.hintCount = Math.min(10, q.hintCount + 1); q.lastHintAt = now;
       touchLesson(lesson);
-      result = { lessonId: lesson.id, pendingQuestion: q }; break;
+      result = { lessonId: lesson.id, pendingQuestion: publicQuestion(q) }; break;
     }
     case 'lesson.dropQuestion': {
       const lesson = requireId(s, 'lessons', payload.lessonId);
       if (!lesson.pendingQuestion) throw new Error('No open question');
-      lesson.answeredQuestions = [...(lesson.answeredQuestions ?? []), { ...lesson.pendingQuestion, droppedAt: now }].slice(-20);
+      const dropped = lesson.pendingQuestion;
+      lesson.answeredQuestions = [...(lesson.answeredQuestions ?? []), { ...dropped, droppedAt: now }].slice(-20);
       lesson.pendingQuestion = null; touchLesson(lesson);
-      result = { lessonId: lesson.id, pendingQuestion: null }; break;
+      // closed now: the expected answer of a keyed question can be explained
+      result = { lessonId: lesson.id, pendingQuestion: null, ...(isObjective(dropped) ? { droppedQuestion: { id: dropped.id, type: dropped.type, expectedAnswer: expectedAnswer(dropped).text } } : {}) }; break;
     }
     case 'lesson.checkpoint': {
       // a short recap of where the learner is, read back first when the lesson resumes (「先回忆」)
@@ -1072,16 +1099,26 @@ export function snapshot(state, courseId) {
   if (!courseId) return { revision: s.revision, goals: Object.values(s.goals), courses: Object.values(s.courses),
     resume: Object.values(s.courses).map((c) => resumePointer(s, c)) };
   const course = requireId(s, 'courses', courseId);
+  const openIds = openQuestionIds(s);
   return { revision: s.revision, course,
     concepts: Object.values(s.concepts).filter(x => x.courseId === courseId && x.status === 'active'),
     relations: Object.values(s.relations).filter(x => x.courseId === courseId),
     graphNodes: Object.values(s.graphNodes).filter(x => x.courseId === courseId),
     mindmap: s.mindmaps[courseId] ?? null,
-    lessons: Object.values(s.lessons).filter(x => x.courseId === courseId),
+    lessons: Object.values(s.lessons).filter(x => x.courseId === courseId).map(publicLesson),
     notes: Object.values(s.notes).filter(x => x.courseId === courseId),
     sources: (course.sourceIds ?? []).map(id => s.sources[id]).filter(Boolean),
-    assessments: Object.values(s.assessments).filter(x => s.lessons[x.lessonId]?.courseId === courseId),
+    assessments: Object.values(s.assessments).filter(x => s.lessons[x.lessonId]?.courseId === courseId).map((a) => redactAssessment(a, openIds)),
     board: liveBoard(s, course), resume: resumePointer(s, course), outlineSinceApproved: sinceApproved(course) };
+}
+
+/** Ids of questions still waiting for an answer: their answer keys stay inside the store. */
+export function openQuestionIds(state) {
+  return new Set(Object.values(state.lessons ?? {}).map((l) => l.pendingQuestion?.id).filter(Boolean));
+}
+/** A lesson as read outside the store: the open question without its answer key. */
+export function publicLesson(lesson) {
+  return lesson?.pendingQuestion?.answerKey ? { ...lesson, pendingQuestion: publicQuestion(lesson.pendingQuestion) } : lesson;
 }
 
 const NEXT_STEP = {
@@ -1110,10 +1147,11 @@ export function resumePointer(state, course) {
   const q = lesson.pendingQuestion ?? null;
   return { courseId: course.id, lessonId: lesson.id, lessonNo: lessons.indexOf(lesson) + 1, lessonTitle: lesson.title, phase: lesson.phase,
     partIndex: lesson.activePartIndex, partTitle: part?.title ?? null, partHasBody: Boolean(part?.body),
-    pendingQuestion: q ? { id: q.id, question: q.question, conceptId: q.conceptId, attempts: q.attempts, hintCount: q.hintCount, hintGiven: q.hintCount > 0, hints: q.hints, askedAt: q.askedAt } : null,
+    pendingQuestion: q ? { id: q.id, question: q.question, type: q.type ?? 'short', ...(q.options ? { options: q.options } : {}), ...(q.answerKey ? { hasAnswerKey: true } : {}),
+      conceptId: q.conceptId, attempts: q.attempts, hintCount: q.hintCount, hintGiven: q.hintCount > 0, hints: q.hints, askedAt: q.askedAt } : null,
     recap: lesson.recap ?? null,
     covered: lesson.parts.filter((p) => p.status === 'covered').map((p) => ({ index: p.index, title: p.title, objective: p.objective })),
-    lastAttempts: attempts.map((a) => ({ question: a.question, score: a.score, conceptId: a.conceptId, at: a.recordedAt })),
+    lastAttempts: attempts.map((a) => ({ question: a.question, score: a.score, judgedBy: a.judgedBy ?? 'model-unverified', conceptId: a.conceptId, at: a.recordedAt })),
     lastNote: notes.at(-1) ? { id: notes.at(-1).id, title: notes.at(-1).title } : null,
     topicId: lesson.topicId ?? null, conceptIds: lesson.conceptIds ?? [],
     feedback: lesson.feedback ?? null, adjust: lesson.adjust ?? null, nextPreview: lesson.nextPreview ?? preview,
