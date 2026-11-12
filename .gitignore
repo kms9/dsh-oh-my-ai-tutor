@@ -8,3 +8,6 @@ state.json
 *.tmp
 .e2e-out/
 lib/
+*.db
+*.db-wal
+*.db-shm

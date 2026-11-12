@@ -4,11 +4,11 @@
 // Browser: PW_CHANNEL=chrome (default, system Chrome) or PW_CHANNEL=bundled (Playwright's Chromium, used in CI).
 import { chromium } from 'playwright';
 import { spawn } from 'node:child_process';
-import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
-import { JsonTutorStore } from '../../src/store.mjs';
+import { SqliteTutorStore } from '../../src/sqlite-store.mjs';
 import { toolSpecs } from '../../src/tools.mjs';
 import { validateState } from '../../src/core.mjs';
 
@@ -20,10 +20,13 @@ let port = Number(arg('--port', 0)); // 0 = any free port; the restart step reus
 const shots = join(out, 'shots');
 await mkdir(shots, { recursive: true });
 const statePath = join(out, 'tutor-state.json');
-await copyFile(fixture, statePath);
-const store = new JsonTutorStore(statePath);
+const dbPath = join(out, 'tutor-state.db');
+for (const f of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) await rm(f, { force: true });
+for (const f of await readdir(out)) if (f.startsWith('tutor-state.json.migrated-')) await rm(join(out, f), { force: true });
+await copyFile(fixture, statePath); // the harness imports it into SQLite once (same path as the DSH plugin's first start)
+const store = new SqliteTutorStore(dbPath, { legacyJsonPath: statePath });
 const tools = Object.fromEntries(toolSpecs(store).map((t) => [t.name, t]));
-const readState = async () => validateState(JSON.parse(await readFile(statePath, 'utf8')));
+const readState = async () => validateState(await store.read());
 const results = [];
 const t0 = Date.now();
 

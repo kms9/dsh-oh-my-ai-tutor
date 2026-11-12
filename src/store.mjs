@@ -14,7 +14,7 @@ export class JsonTutorStore {
   async read() {
     try {
       const bytes = await readFile(this.path, 'utf8');
-      if (bytes.length > 16_000_000) throw new Error('Tutor data exceeds 16MB; migrate to DSH SQLite storage domain');
+      if (bytes.length > 16_000_000) throw new Error('Tutor data exceeds 16MB; use the default SQLite store (tutor.db) instead of storage: json');
       return validateState(JSON.parse(bytes));
     } catch (e) {
       if (e.code === 'ENOENT') return newState();

@@ -97,7 +97,7 @@ function applySyllabus(s, course, topics, now) {
   course.status = 'draft'; course.updatedAt = now;
 }
 
-const MAX_EVENTS = 2000;
+export const MAX_EVENTS = 2000;
 function requireSyllabusRevision(course, value) {
   if (!Number.isInteger(value)) throw new Error(`syllabusRevision is required (current outline revision from tutor_visualize(outline) / tutor_read; now ${course.syllabus.revision})`);
   if (value !== course.syllabus.revision)
