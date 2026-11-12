@@ -1098,8 +1098,11 @@ await step('reviews (FSRS): a due review is purple in 今天到期 + the calenda
   // calendar: purple review event next to blue to-dos
   await page.click('[data-testid=data-subtabs] [data-sub=calendar]');
   await page.waitForSelector('[data-testid=todo-calendar] .review-event');
-  const ev = page.locator('[data-testid=todo-calendar] .review-event').filter({ hasText: card.concept_title.slice(0, 4) }).first();
-  assert.equal(await ev.evaluate((e) => getComputedStyle(e).backgroundColor), 'rgb(124, 77, 204)');
+  const ev = page.locator('[data-testid=todo-calendar] .review-event').filter({ hasText: card.concept_title }).first();
+  // purple block in 月/周; in the narrow column's 日程 list: purple dot + purple 复习 tag
+  const colors = await ev.evaluate((e) => [getComputedStyle(e).backgroundColor, getComputedStyle(e.querySelector('.fc-list-event-dot') ?? e).borderColor, getComputedStyle(e.querySelector('.omt-ev-tag')).backgroundColor]);
+  assert.ok(colors.includes('rgb(124, 77, 204)'), `review event is purple (${colors})`);
+  assert.ok((await ev.getAttribute('title')).startsWith(`复习：${card.concept_title}`));
   await page.screenshot({ path: join(shots, '15b-review-calendar.png') });
   // rate 想起来了 from 今天到期 → next date moves out of today, card revision +1, event actor learner
   await page.click(`${item} [data-rating="3"]`);
@@ -1131,6 +1134,66 @@ await step('reviews (FSRS): a due review is purple in 今天到期 + the calenda
   await page.waitForSelector('[data-testid=grid-kp] canvas');
   assert.ok(JSON.parse(await page.getAttribute('[data-testid=grid-kp]', 'data-cols')).some((c) => c.id === 'review'), '知识点总表 has a 下次复习 column');
   assert.equal((await store.data('knowledgePoints', { courseId: cid })).find((r) => r.concept_id === card.concept_id).next_review_at, ai.card.due_at);
+});
+
+await step('calendar in the narrow right column: titles are recognisable (日程 list by default, wrapped month cells) and hover shows the full title', async () => {
+  await tab('data');
+  await page.click('[data-testid=data-subtabs] [data-sub=todos]');
+  await page.waitForSelector('[data-testid=todo-form]');
+  const due = await page.evaluate(() => { const d = new Date(); d.setHours(Math.min(23, d.getHours() + 2), 0, 0, 0); const p = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; });
+  const title = 'e2e：今晚复习皮姆斯勒分级间隔并做两道迁移题';
+  await page.fill('[data-testid=todo-title]', title);
+  await page.fill('[data-testid=todo-due]', due);
+  await page.click('[data-testid=todo-add]');
+  await page.waitForSelector(`[data-testid=due-today] >> text=${title}`);
+  // a review on the calendar too
+  const rc = (await store.data('reviews', { courseId: cid })).find((r) => r.due_at);
+  await page.click('[data-testid=data-subtabs] [data-sub=calendar]');
+  const cal = '[data-testid=todo-calendar]';
+  await page.waitForSelector(`${cal}[data-narrow="1"]`);
+  const w = (await page.locator(cal).boundingBox()).width;
+  assert.ok(w < 560, `right column calendar is narrow (${w}px)`);
+  // default in the narrow column: 日程 (list) view with whole titles on one line each
+  await page.waitForSelector(`${cal} .fc-listWeek-view`);
+  const row = page.locator(`${cal} .fc-list-event`).filter({ hasText: title });
+  assert.equal(await row.locator('.omt-ev-title').textContent(), title);
+  assert.equal(await row.getAttribute('title'), await row.getAttribute('data-full-title'));
+  assert.match(await row.getAttribute('title'), new RegExp(`^待办：${title}`));
+  await page.screenshot({ path: join(shots, '17-calendar-narrow-list.png') });
+  // month view in the same width: the title wraps — at least its first 8 characters are visible inside the event box
+  await page.click(`${cal} .fc-dayGridMonth-button`);
+  await page.waitForSelector(`${cal} .fc-daygrid-event`);
+  let ev = page.locator(`${cal} .fc-daygrid-event`).filter({ hasText: title }).first();
+  if (!(await ev.isVisible())) { // more events that day than fit: FullCalendar's 「+N」 popover lists them
+    await page.locator(`${cal} .fc-day-today .fc-daygrid-more-link`).click();
+    ev = page.locator(`${cal} .fc-popover .fc-daygrid-event`).filter({ hasText: title }).first();
+    await ev.waitFor();
+  }
+  assert.match(await ev.getAttribute('title'), new RegExp(`待办：${title}`), 'hover tooltip = full title');
+  const visible = await ev.evaluate((el) => {
+    if (!el.checkVisibility({ visibilityProperty: true })) return 0;
+    const t = el.querySelector('.omt-ev-title'); const box = el.getBoundingClientRect(); const clip = t.getBoundingClientRect();
+    const node = t.firstChild; const r = document.createRange(); let n = 0;
+    for (let i = 0; i < node.length; i++) { r.setStart(node, i); r.setEnd(node, i + 1); const c = r.getBoundingClientRect();
+      if (c.right <= Math.min(box.right, clip.right) + 0.5 && c.bottom <= Math.min(box.bottom, clip.bottom) + 0.5 && c.width > 0) n++; else break; }
+    return n;
+  });
+  assert.ok(visible >= 8, `month cell shows ${visible} characters of the title (was 1 before the fix)`);
+  if (rc && await page.locator(`${cal} .review-event`).count()) {
+    const rv = page.locator(`${cal} .review-event`).first();
+    assert.match(await rv.getAttribute('title'), /^复习：/);
+  }
+  await ev.hover();
+  await page.screenshot({ path: join(shots, '17b-calendar-narrow-month.png') });
+  // the learner's choice sticks across reloads of the data; the whole-workbench width goes back to the month grid
+  await page.click('[data-testid=data-zoom]');
+  await page.click('[data-testid=data-zoom-full]');
+  await page.waitForSelector('[data-testid=tutor-workbench][data-mm-zoom=full]');
+  await page.waitForSelector(`${cal}[data-narrow="0"]`);
+  await page.waitForSelector(`${cal} .fc-daygrid-event`);
+  await page.screenshot({ path: join(shots, '17c-calendar-wide.png') });
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('[data-testid=tutor-workbench][data-mm-zoom=off]');
 });
 
 await step('chat tool cards render tool results as graphics (outline/mindmap/graph/board)', async () => {

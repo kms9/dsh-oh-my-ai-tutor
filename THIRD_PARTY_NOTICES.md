@@ -40,7 +40,7 @@ No React Flow Pro code (xyflow Pro examples are under the xyflow Pro License) wa
 | d3-force, d3-dispatch, d3-quadtree, d3-timer, d3-selection, d3-zoom, d3-drag, d3-interpolate, d3-color, d3-transition | 3.x | ISC — Copyright Mike Bostock |
 | @glideapps/glide-data-grid (in `lib/client.grid.js`) | 6.0.3 | MIT — Copyright (c) 2020 Glide |
 | lodash, marked, react-responsive-carousel, react-number-format, react-easy-swipe, canvas-hypertxt, @linaria/core, @linaria/react, @emotion/is-prop-valid, @emotion/memoize, prop-types, classnames (Glide Data Grid dependencies) | 4.17.21, 4.3.0, 3.2.23, 5.4.5, 0.0.21, 1.0.3, 4.5.4, 4.5.4, 1.4.0, 0.9.0, 15.8.1, 2.5.1 | MIT |
-| @fullcalendar/core, @fullcalendar/react, @fullcalendar/daygrid, @fullcalendar/timegrid, @fullcalendar/interaction (in `lib/client.calendar.js`; Standard plugins only, no Premium) | 6.1.22 | MIT — Copyright (c) 2021 Adam Shaw |
+| @fullcalendar/core, @fullcalendar/react, @fullcalendar/daygrid, @fullcalendar/timegrid, @fullcalendar/list, @fullcalendar/interaction (in `lib/client.calendar.js`; Standard plugins only, no Premium) | 6.1.22 | MIT — Copyright (c) 2021 Adam Shaw |
 | preact (FullCalendar's internal renderer) | 10.12.1 | MIT — Copyright (c) 2015-present Jason Miller |
 | d3-ease | 3.0.2 | BSD-3-Clause — Copyright Mike Bostock |
 | @dagrejs/dagre, @dagrejs/graphlib | 3.1.3, 4.0.6 | MIT — Copyright (c) 2012-2014 Chris Pettitt |
