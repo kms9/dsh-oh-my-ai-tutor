@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { BOARD_CARD, boardSeedPosition } from './board-layout.mjs';
+import { collectBoardSeedOps } from './board-seed.mjs';
 import { parseLocator, linksFor, refView } from './links.mjs';
 import { diffOutline, diffLines } from './outline-diff.mjs';
 import {
   subConceptIds, stampSubConcepts, originOf, mergeAnchors, conceptIdsFromAnchors, lessonIdFromAnchors,
-  legacyAnchors, normalizeBelongsTo, mindmapOf, mindmapHierarchy, buildMindmapFromSyllabus,
+  legacyAnchors, normalizeBelongsTo, normalizeAnchors, mindmapOf, mindmapHierarchy, buildMindmapFromSyllabus,
   ensureCanonicalGraphNode, resolveGraphEndpoint, conceptIdOfEndpoint, graphNodeForConcept,
-  normalizeState, editMindmap, mindmapRootId,
+  normalizeState, editMindmap, mindmapRootId, enrichMindmap, isMindmapSkeleton, titleKey,
+  topicIdFromMindmapNode,
 } from './resources.mjs';
 
 export const SCHEMA_VERSION = 1;
@@ -372,9 +374,37 @@ function boardOf(s, courseId) {
   return s.boards[courseId] ?? { courseId, revision: 0, elements: [] };
 }
 const CARD = BOARD_CARD;
-/** Deterministic seed layout: every concept card in its syllabus topic's section (2-column section grid). */
-export function boardLayoutFor(course, conceptId) {
-  return boardSeedPosition(course.syllabus.topics, conceptId);
+
+/** Create a candidate knowledge relation, or throw. Does not write to state. */
+function buildCandidateRelation(s, payload, now) {
+  const courseHint = payload.courseId ?? s.graphNodes[payload.from]?.courseId ?? s.concepts[payload.from]?.courseId
+    ?? s.graphNodes[payload.to]?.courseId ?? s.concepts[payload.to]?.courseId;
+  if (!courseHint) throw new Error('relation.propose needs from/to (graph node or knowledge point ids)');
+  const from = resolveGraphEndpoint(s, courseHint, payload.from, 'from');
+  const to = resolveGraphEndpoint(s, courseHint, payload.to, 'to');
+  if (from.courseId !== to.courseId) throw new Error('Cross-course relation needs a dedicated merge/review workflow');
+  if (!EDGE_SET.has(payload.type)) throw new Error(`Invalid relation type: ${payload.type}`);
+  if (Object.values(s.relations).some(r => r.from === from.id && r.to === to.id && r.type === payload.type)) throw new Error('Duplicate relation');
+  if (from.id === to.id) throw new Error('Self relation is not allowed');
+  const fromConcept = from.refersTo ?? null, toConcept = to.refersTo ?? null;
+  if (fromConcept && toConcept && fromConcept === toConcept) throw new Error('Self relation is not allowed');
+  if (['prerequisite', 'partOf'].includes(payload.type)) {
+    if (wouldCycle(s.relations, from.id, to.id, payload.type)) throw new Error('Relation would create a cycle');
+    if (fromConcept && toConcept) {
+      const byConcept = Object.fromEntries(Object.entries(s.relations).map(([k, r]) => [k, { ...r, from: r.fromConceptId ?? conceptIdOfEndpoint(s, r.from), to: r.toConceptId ?? conceptIdOfEndpoint(s, r.to) }]));
+      if (wouldCycle(byConcept, fromConcept, toConcept, payload.type)) throw new Error('Relation would create a cycle');
+    }
+  }
+  return { id: id('rel'), courseId: from.courseId, from: from.id, to: to.id,
+    fromConceptId: fromConcept, toConceptId: toConcept,
+    type: payload.type, status: 'candidate', note: typeof payload.note === 'string' ? payload.note.slice(0, 1000) : '',
+    evidenceRefs: Array.isArray(payload.evidenceRefs) ? payload.evidenceRefs.filter(x => typeof x === 'string').slice(0, 50) : [],
+    createdAt: now };
+}
+
+/** Deterministic seed layout: every concept card in its topic section, with overflow for out-of-syllabus points. */
+export function boardLayoutFor(course, conceptId, concepts = []) {
+  return boardSeedPosition(course.syllabus.topics, conceptId, concepts);
 }
 /**
  * Apply one atomic board batch. Element ids are always assigned by the store (callers never invent ids);
@@ -422,7 +452,7 @@ function boardPatch(s, course, board, operations, now, actor, maxOps = 100, inte
           if (!concept || concept.courseId !== course.id || concept.status !== 'active') throw new Error(`Unknown or retired conceptId for this course: ${op.conceptId}`);
           if (elements.some((e) => !e.deleted && e.type === 'concept' && e.conceptId === concept.id)) throw new Error(`Concept already on board: ${concept.title}`);
           conceptId = concept.id;
-          pos = boardLayoutFor(course, conceptId);
+          pos = boardLayoutFor(course, conceptId, Object.values(s.concepts).filter((c) => c.courseId === course.id));
         } else if (op.noteId !== undefined) {
           // a lesson note as a card: its text follows the note; it links back to the note and its knowledge points
           const note = s.notes[op.noteId];
@@ -434,11 +464,17 @@ function boardPatch(s, course, board, operations, now, actor, maxOps = 100, inte
           if (near) pos = { x: Math.min(20_000, near.x + (near.width ?? CARD.width) + 28), y: near.y };
           if (op.arrows === true) linkTo = elements.filter((e) => !e.deleted && e.type === 'concept' && (note.conceptIds ?? []).includes(e.conceptId));
         } else text = requireText(op.text, 'note.text', 500);
+        const anchors = op.anchors !== undefined ? normalizeAnchors(s, course.id, op.anchors, 'anchors') : undefined;
+        if (op.seedKey !== undefined && (typeof op.seedKey !== 'string' || !/^[A-Za-z0-9_-]{1,120}$/.test(op.seedKey)))
+          throw new Error(`operations[${n}].seedKey must match /^[A-Za-z0-9_-]{1,120}$/`);
         el = { ...base, ...(conceptId ? { conceptId } : noteId ? { noteId } : { text }),
           x: op.x === undefined ? pos.x : boardCoord(op.x, 'x'), y: op.y === undefined ? pos.y : boardCoord(op.y, 'y'),
           width: op.width === undefined ? CARD.width : finiteNumber(op.width, 'width', 60, 800),
           height: op.height === undefined ? CARD.height : finiteNumber(op.height, 'height', 40, 600),
-          color: boardColor(op.color) ?? '' };
+          color: boardColor(op.color) ?? '',
+          ...(anchors?.length ? { anchors } : {}),
+          ...(op.seedKey ? { seedKey: op.seedKey } : {}),
+          ...(op.conceptIds ? { conceptIds: [...new Set(op.conceptIds.filter((id) => typeof id === 'string' && s.concepts[id]?.courseId === course.id))] } : (anchors ? { conceptIds: conceptIdsFromAnchors(anchors) } : {})) };
       }
       elements.push(el); byId.set(eid, el); touched.push(eid);
       // visual arrows from a note card to its knowledge point cards (a view of note.conceptIds, not a semantic relation)
@@ -806,67 +842,24 @@ export function transition(original, action, input = {}, opts = {}) {
       result = { lessonId: lesson.id, phase: lesson.phase, status: lesson.status, adjust: lesson.adjust, nextPreview: lesson.nextPreview ?? null }; break;
     }
     case 'relation.propose': {
-      const courseHint = payload.courseId ?? s.graphNodes[payload.from]?.courseId ?? s.concepts[payload.from]?.courseId
-        ?? s.graphNodes[payload.to]?.courseId ?? s.concepts[payload.to]?.courseId;
-      if (!courseHint) throw new Error('relation.propose needs from/to (graph node or knowledge point ids)');
-      const from = resolveGraphEndpoint(s, courseHint, payload.from, 'from');
-      const to = resolveGraphEndpoint(s, courseHint, payload.to, 'to');
-      if (from.courseId !== to.courseId) throw new Error('Cross-course relation needs a dedicated merge/review workflow');
-      if (!EDGE_SET.has(payload.type)) throw new Error(`Invalid relation type: ${payload.type}`);
-      if (Object.values(s.relations).some(r => r.from === from.id && r.to === to.id && r.type === payload.type)) throw new Error('Duplicate relation');
-      if (from.id === to.id) throw new Error('Self relation is not allowed');
-      const fromConcept = from.refersTo ?? null, toConcept = to.refersTo ?? null;
-      if (fromConcept && toConcept && fromConcept === toConcept) throw new Error('Self relation is not allowed');
-      if (['prerequisite', 'partOf'].includes(payload.type)) {
-        if (wouldCycle(s.relations, from.id, to.id, payload.type)) throw new Error('Relation would create a cycle');
-        if (fromConcept && toConcept) {
-          const byConcept = Object.fromEntries(Object.entries(s.relations).map(([k, r]) => [k, { ...r, from: r.fromConceptId ?? conceptIdOfEndpoint(s, r.from), to: r.toConceptId ?? conceptIdOfEndpoint(s, r.to) }]));
-          if (wouldCycle(byConcept, fromConcept, toConcept, payload.type)) throw new Error('Relation would create a cycle');
-        }
-      }
-      const item = { id: id('rel'), courseId: from.courseId, from: from.id, to: to.id,
-        fromConceptId: fromConcept, toConceptId: toConcept,
-        type: payload.type, status: 'candidate', note: typeof payload.note === 'string' ? payload.note.slice(0, 1000) : '',
-        evidenceRefs: Array.isArray(payload.evidenceRefs) ? payload.evidenceRefs.filter(x => typeof x === 'string').slice(0, 50) : [],
-        createdAt: now };
+      const item = buildCandidateRelation(s, payload, now);
       s.relations[item.id] = item; result = item; break;
     }
-    case 'board.seed': {
+    case 'board.seed':
+    case 'board.generate': {
       const course = requireId(s, 'courses', payload.courseId);
       const board = boardOf(s, course.id);
       if (!Number.isInteger(payload.baseRevision)) throw new Error('baseRevision (board revision from tutor_board_read) is required');
       if (payload.baseRevision !== board.revision)
         throw Object.assign(new Error(`Board changed (latest revision ${board.revision}); read it again`), { code: 'conflict', boardRevision: board.revision });
-      const used = new Set(board.elements.map((e) => e.id));
-      const cards = new Map(board.elements.filter((e) => !e.deleted && e.type === 'concept').map((e) => [e.conceptId, e.id]));
-      const ops = [];
-      const taught = [];
-      for (const t of course.syllabus.topics) for (const sub of t.subtopics) {
-        const ids = sub.conceptIds?.length ? sub.conceptIds : (sub.conceptId ? [sub.conceptId] : []);
-        for (const conceptId of ids) if (!taught.includes(conceptId)) taught.push(conceptId);
-      }
-      for (const conceptId of taught) {
-        if (cards.has(conceptId) || s.concepts[conceptId]?.status !== 'active') continue;
-        let cid = `card-${conceptId}`.slice(0, 120);
-        if (used.has(cid)) cid = id('card');
-        used.add(cid); cards.set(conceptId, cid);
-        ops.push({ op: 'add', type: 'concept', conceptId, id: cid });
-      }
-      // Candidate relation arrows: re-drawn when missing, EXCEPT ones somebody deleted on purpose (deletedBy "direct").
-      // Arrows that only vanished because their card was deleted (deletedBy "cascade") come back with the re-seeded card.
-      // A visual arrow never becomes a semantic edge by itself.
-      const drawn = new Set(board.elements.filter((e) => e.type === 'arrow' && e.relationId && (!e.deleted || e.deletedBy !== 'cascade')).map((e) => e.relationId));
-      for (const r of Object.values(s.relations)) {
-        const fromC = r.fromConceptId ?? conceptIdOfEndpoint(s, r.from) ?? r.from;
-        const toC = r.toConceptId ?? conceptIdOfEndpoint(s, r.to) ?? r.to;
-        if (r.courseId === course.id && !drawn.has(r.id) && cards.has(fromC) && cards.has(toC))
-          ops.push({ op: 'add', type: 'arrow', from: cards.get(fromC), to: cards.get(toC), label: r.type, relationId: r.id });
-      }
+      // Missing knowledge-point cards (including promoted / out-of-syllabus), candidate-relation arrows,
+      // and related mind-map / graph extensions as annotation cards. Existing layout is left alone.
+      const ops = collectBoardSeedOps(s, course, board, { lessonId: payload.lessonId, notes: payload.notes });
       if (!ops.length) { result = { courseId: course.id, revision: board.revision, added: 0 }; break; }
       const next = boardPatch(s, course, board, ops, now, actor, MAX_BOARD_ELEMENTS, true);
-      delete next.touched; delete next.refs;
+      const { touched, refs } = next; delete next.touched; delete next.refs;
       s.boards[course.id] = next;
-      result = { courseId: course.id, revision: next.revision, added: ops.length }; break;
+      result = { courseId: course.id, revision: next.revision, added: ops.length, touched, ...(Object.keys(refs).length ? { refs } : {}) }; break;
     }
     case 'board.patch': {
       const course = requireId(s, 'courses', payload.courseId);
@@ -958,7 +951,7 @@ export function transition(original, action, input = {}, opts = {}) {
       const item = { id: id('kp'), courseId: course.id,
         title: payload.title !== undefined ? requireText(payload.title, 'title', 160) : requireText(srcTitle, 'title', 160),
         description: typeof payload.description === 'string' ? payload.description.slice(0, 1500) : '',
-        topicId: node.belongsTo?.type === 'topic' ? node.belongsTo.id : (s.concepts[node.belongsTo?.id]?.topicId ?? null),
+        topicId: from.type === 'mindmapNode' ? topicIdFromMindmapNode(s, mm, node) : (node.belongsTo?.type === 'topic' ? node.belongsTo.id : (s.concepts[node.belongsTo?.id]?.topicId ?? null)),
         subtopicId: null, status: 'active', evidenceRefs: [], mastery: 'unverified',
         origin: originOf('learning', actor, now), updatedAt: now };
       s.concepts[item.id] = item;
@@ -980,7 +973,79 @@ export function transition(original, action, input = {}, opts = {}) {
       if (gn) { gn.title = concept.title; gn.updatedAt = now; }
       result = concept; break;
     }
+    case 'mindmap.generate': {
+      const course = requireId(s, 'courses', payload.courseId);
+      if (!s.mindmaps[course.id]) s.mindmaps[course.id] = buildMindmapFromSyllabus(course, { now, actor });
+      const mm = s.mindmaps[course.id];
+      if (payload.mindmapRevision !== undefined && payload.mindmapRevision !== null) {
+        if (!Number.isInteger(payload.mindmapRevision)) throw new Error('mindmapRevision must be an integer');
+        if (payload.mindmapRevision !== mm.revision)
+          throw Object.assign(new Error(`Mind map changed (revision ${mm.revision}); read it again`), { code: 'conflict', mindmapRevision: mm.revision });
+      }
+      const phase = payload.phase === 'learning' ? 'learning' : 'authoring';
+      const raw = Array.isArray(payload.nodes) ? payload.nodes : [];
+      const additions = raw.map((n) => ({ ...n, phase: n.phase ?? phase }));
+      const { added, skipped } = enrichMindmap(mm, additions, { id, now, actor });
+      s.mindmaps[course.id] = mm;
+      result = { courseId: course.id, mindmapRevision: mm.revision, added: added.length, skipped, addedIds: added,
+        hierarchy: mindmapHierarchy(mm, course), skeleton: isMindmapSkeleton(mm, course) }; break;
+    }
+    case 'graph.generate': {
+      const course = requireId(s, 'courses', payload.courseId);
+      for (const c of Object.values(s.concepts)) if (c.courseId === course.id) ensureCanonicalGraphNode(s, c, { now, actor });
+      const proposedNodes = Array.isArray(payload.nodes) ? payload.nodes : [];
+      const proposedRels = Array.isArray(payload.relations) ? payload.relations : [];
+      if (proposedNodes.length + proposedRels.length > 100) throw new Error('graph.generate accepts at most 100 nodes and relations in total');
+      const addedNodes = [], skippedNodes = [], addedRelations = [], skippedRelations = [];
+      const refs = new Map();
+      const remember = (ref, nodeId) => { if (typeof ref === 'string' && ref) refs.set(ref, nodeId); };
+      proposedNodes.forEach((item, i) => {
+        if (!item || typeof item !== 'object') throw new Error(`nodes[${i}] must be an object`);
+        const refersTo = item.refersTo ? requireId(s, 'concepts', item.refersTo).id : null;
+        if (refersTo && s.concepts[refersTo].courseId !== course.id) throw new Error('refersTo belongs to another course');
+        if (refersTo) {
+          const existing = graphNodeForConcept(s, course.id, refersTo);
+          if (existing) { skippedNodes.push({ title: item.title ?? existing.title, reason: 'exists', id: existing.id }); remember(item.ref, existing.id); return; }
+        }
+        const title = requireText(item.title, `nodes[${i}].title`, 160);
+        if (!refersTo) {
+          const dup = Object.values(s.graphNodes).find((n) => n.courseId === course.id && !n.refersTo && titleKey(n.title) === titleKey(title));
+          if (dup) { skippedNodes.push({ title, reason: 'duplicate', id: dup.id }); remember(item.ref, dup.id); return; }
+        }
+        const node = { id: id('gn'), courseId: course.id, title,
+          description: typeof item.description === 'string' ? item.description.slice(0, 1500) : '',
+          refersTo, belongsTo: normalizeBelongsTo(item.belongsTo),
+          origin: originOf(item.phase === 'learning' || payload.phase === 'learning' ? 'learning' : 'authoring', actor, now),
+          createdAt: now, updatedAt: now };
+        s.graphNodes[node.id] = node; addedNodes.push(node.id); remember(item.ref, node.id);
+      });
+      const resolveEnd = (value, field) => {
+        if (typeof value !== 'string' || !value) throw new Error(`${field} is required`);
+        if (value.startsWith('$')) {
+          const nid = refs.get(value.slice(1));
+          if (!nid) throw new Error(`Unknown graph.generate ref: ${value}`);
+          return nid;
+        }
+        if (refs.has(value)) return refs.get(value);
+        return value;
+      };
+      for (const rel of proposedRels) {
+        if (!rel || typeof rel !== 'object') throw new Error('relations entries must be objects');
+        try {
+          const item = buildCandidateRelation(s, {
+            courseId: course.id, from: resolveEnd(rel.from, 'from'), to: resolveEnd(rel.to, 'to'),
+            type: rel.type, note: rel.note, evidenceRefs: rel.evidenceRefs,
+          }, now);
+          s.relations[item.id] = item; addedRelations.push(item.id);
+        } catch (err) {
+          if (!/Duplicate relation/.test(err.message)) throw err;
+          skippedRelations.push({ from: rel.from, to: rel.to, type: rel.type, reason: 'duplicate' });
+        }
+      }
+      result = { courseId: course.id, addedNodes, skippedNodes, addedRelations, skippedRelations }; break;
+    }
     default: throw new Error(`Unknown tutor action: ${action}`);
+
   }
   s.revision = original.revision + 1;
   const summary = opts.summary ?? autoSummary;

@@ -302,7 +302,7 @@ export function editMindmap(mindmap, operations, { id: makeId, now, actor, defau
       case 'addChild': {
         const parent = requireNode(nodes, op.parentId, 'parentId');
         const title = (typeof op.title === 'string' && op.title.trim()) ? op.title.trim().slice(0, 160) : defaultTitle;
-        const node = make(title, parent.id, { belongsTo: normalizeBelongsTo(op.belongsTo) });
+        const node = make(title, parent.id, { belongsTo: normalizeBelongsTo(op.belongsTo), phase: op.phase });
         if (Number.isInteger(op.index) && op.index >= 0) {
           const sibs = mindmapChildren(nodes, parent.id).filter((x) => x.id !== node.id);
           const at = Math.min(op.index, sibs.length);
@@ -419,6 +419,88 @@ export function indexMindmap(hierarchy) {
   return index;
 }
 
+
+export function skeletonMindNodeIds(course) {
+  const ids = new Set([mindmapRootId(course.id)]);
+  for (const t of course.syllabus?.topics ?? []) {
+    ids.add(skeletonMindNodeId(t.id));
+    for (const s of t.subtopics ?? []) ids.add(skeletonMindNodeId(s.id));
+  }
+  return ids;
+}
+
+/** True when the mind map still only has the syllabus skeleton (no extension nodes). */
+export function isMindmapSkeleton(mindmap, course) {
+  if (!mindmap?.nodes || !mindmap.rootId) return true;
+  const allowed = skeletonMindNodeIds(course);
+  return Object.keys(mindmap.nodes).every((id) => allowed.has(id));
+}
+
+export function topicIdFromMindmapNode(state, mindmap, node) {
+  let cur = node;
+  const seen = new Set();
+  while (cur && !seen.has(cur.id)) {
+    seen.add(cur.id);
+    if (cur.belongsTo?.type === 'topic') return cur.belongsTo.id;
+    if (cur.belongsTo?.type === 'concept') {
+      const tid = state.concepts[cur.belongsTo.id]?.topicId;
+      if (tid) return tid;
+    }
+    if (cur.refersTo) {
+      const tid = state.concepts[cur.refersTo]?.topicId;
+      if (tid) return tid;
+    }
+    cur = cur.parentId ? mindmap?.nodes?.[cur.parentId] : null;
+  }
+  return null;
+}
+
+export function titleKey(value) {
+  return String(value ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+/**
+ * Add-only enrichment of a mind map. Never renames, moves or deletes existing nodes.
+ * A proposed child is skipped when the parent already has a child with the same title (case-insensitive).
+ * Returns { added, skipped } (node ids / reasons). Mutates `mindmap` only when something is added.
+ */
+export function enrichMindmap(mindmap, additions, { id: makeId, now, actor, defaultTitle = '新节点' } = {}) {
+  if (!Array.isArray(additions)) throw new Error('nodes must be an array');
+  if (additions.length > 100) throw new Error('nodes must contain at most 100 items');
+  const added = [], skipped = [];
+  if (!additions.length) return { added, skipped };
+  const ops = [];
+  const pendingByParent = new Map();
+  const existsTitle = (parentId, key) => {
+    if (mindmapChildren(mindmap.nodes, parentId).some((c) => titleKey(c.title) === key)) return true;
+    return (pendingByParent.get(parentId) ?? new Set()).has(key);
+  };
+  const mark = (parentId, key) => {
+    if (!pendingByParent.has(parentId)) pendingByParent.set(parentId, new Set());
+    pendingByParent.get(parentId).add(key);
+  };
+  additions.forEach((item, i) => {
+    if (!item || typeof item !== 'object') throw new Error(`nodes[${i}] must be an object`);
+    const rawParent = item.parentId ?? item.parent;
+    if (typeof rawParent !== 'string' || !rawParent) throw new Error(`nodes[${i}].parentId is required`);
+    const parentId = (rawParent === 'root' || rawParent === mindmap.courseId) ? mindmap.rootId : rawParent;
+    if (!mindmap.nodes[parentId]) throw new Error(`Unknown mind-map parent: ${rawParent}`);
+    const title = typeof item.title === 'string' && item.title.trim() ? item.title.trim().slice(0, 160) : defaultTitle;
+    const key = titleKey(title);
+    if (existsTitle(parentId, key)) { skipped.push({ parentId, title, reason: 'duplicate' }); return; }
+    mark(parentId, key);
+    const op = { op: 'addChild', parentId, title };
+    if (item.belongsTo) op.belongsTo = item.belongsTo;
+    if (item.phase) op.phase = item.phase;
+    ops.push(op);
+  });
+  if (ops.length) {
+    const { touched } = editMindmap(mindmap, ops, { id: makeId, now, actor, defaultTitle });
+    added.push(...touched);
+  }
+  return { added, skipped };
+}
+
 export default {
   ANCHOR_TYPES, BELONGS_TYPES, subConceptIds, primaryConceptId, stampSubConcepts, originOf,
   canonicalGraphNodeId, skeletonMindNodeId, mindmapRootId, conceptIdsFromAnchors, lessonIdFromAnchors,
@@ -426,4 +508,5 @@ export default {
   reindexSiblings, collectDescendants, wouldMindmapCycle, mindmapHierarchy, buildMindmapFromSyllabus,
   mermaidMindmap, ensureCanonicalGraphNode, graphNodeForConcept, resolveGraphEndpoint,
   conceptIdOfEndpoint, remapRelationEndpoints, normalizeState, MINDMAP_OPS, editMindmap, indexMindmap,
+  skeletonMindNodeIds, isMindmapSkeleton, topicIdFromMindmapNode, titleKey, enrichMindmap,
 };

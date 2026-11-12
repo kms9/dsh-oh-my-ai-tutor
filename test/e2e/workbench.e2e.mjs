@@ -622,6 +622,7 @@ await step('mind map: AI reorders and prunes via tutor_mindmap_edit; the outline
   await page.screenshot({ path: join(shots, '05-mindmap-after-ai.png') });
 });
 
+let promotedConceptId;
 await step('mind map: add an extension under a knowledge point, attach a note, promote only then creates a review object', async () => {
   await tab('mindmap');
   await page.waitForSelector('[data-testid=mindmap-elixir] .me-tpc');
@@ -663,6 +664,7 @@ await step('mind map: add an extension under a knowledge point, attach a note, p
     assert.equal(reviews.length, reviewsBefore + 1);
     assert.ok(reviews.some((r) => r.concept_id === conceptId), 'review card appears only after promote');
   });
+  promotedConceptId = conceptId;
 });
 
 const card = (i) => page.locator('[data-testid=board] .rf-card').nth(i);
@@ -727,7 +729,9 @@ await step('board (React Flow): seed from syllabus → cards in topic sections +
   await tab('board');
   await page.click('[data-testid=board-seed]');
   const taught = (await topics()).flatMap((t) => t.subtopics.flatMap((s) => s.conceptIds?.length ? s.conceptIds : (s.conceptId ? [s.conceptId] : [])));
-  await eventually(async () => assert.equal(await page.locator('[data-testid=board] .rf-card').count(), taught.length));
+  const st = await readState();
+  const expectedCards = Object.values(st.concepts).filter((c) => c.courseId === cid && c.status === 'active').length;
+  await eventually(async () => assert.equal(await page.locator('[data-testid=board] .rf-card.concept').count(), expectedCards));
   assert.equal(await arrowsOnScreen().count(), 1);
   assert.match(await arrowsOnScreen().first().locator('path').first().getAttribute('style'), /stroke-dasharray/, 'relation arrow dashed');
   assert.equal(await page.locator('[data-testid=board] .rf-section').count(), (await topics()).length, 'one section per topic');
@@ -741,7 +745,12 @@ await step('board (React Flow): seed from syllabus → cards in topic sections +
   });
   assert.equal(misplaced, 0);
   await assertSectionsClean(page, 'after seed');
-  assert.equal(await page.locator('[data-testid=board] .rf-card[data-actor=learner] .rf-by.me').count(), taught.length, 'learner-seeded cards are tagged 你');
+  const seededEls = (await readState()).boards[cid].elements.filter((e) => !e.deleted && e.type === 'concept');
+  assert.equal(seededEls.length, expectedCards);
+  assert.ok(promotedConceptId, 'previous step promoted an extension');
+  assert.ok(!taught.includes(promotedConceptId), 'promoted point stays outside the syllabus');
+  assert.ok(seededEls.some((e) => e.conceptId === promotedConceptId), 'board.seed includes the promoted, out-of-syllabus knowledge point');
+  assert.equal(await page.locator('[data-testid=board] .rf-card.concept[data-actor=learner] .rf-by.me').count(), expectedCards, 'learner-seeded cards are tagged 你');
   await page.screenshot({ path: join(shots, '06-board-seeded.png') });
   await page.click('[data-testid=board-zoom]');
   await page.waitForSelector('[data-testid=tutor-workbench][data-mm-zoom=wide]');
@@ -750,7 +759,8 @@ await step('board (React Flow): seed from syllabus → cards in topic sections +
   await eventually(async () => assert.ok((await page.locator('[data-testid=board]').boundingBox()).width > 1100));
   await page.click('[data-testid=board-fit]'); await page.waitForTimeout(300);
   await assertSectionsClean(page, 'whole workbench');
-  assert.equal(await page.getAttribute('[data-testid=board]', 'data-overflow'), 'false', 'the whole board fits the whole workbench at a readable zoom (3 sections per row)');
+  assert.ok(Number(await page.getAttribute('[data-testid=board]', 'data-scale')) >= 0.8, 'whole workbench keeps a readable zoom');
+  // Promoted / extension cards can make the board a little taller than the original syllabus-only seed; overflow at the minimum readable zoom is acceptable.
   await page.screenshot({ path: join(shots, '06b-board-whole-workbench.png') });
   // the interactive board steps below run on the enlarged board (as a learner editing a big board would)
 });

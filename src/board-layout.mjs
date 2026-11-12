@@ -38,12 +38,51 @@ export function slotPosition(rect, k) {
     y: rect.y + SECTION.title + Math.floor(k / SECTION.cols) * (BOARD_CARD.height + SECTION.gap) };
 }
 
-/** Deterministic seed position of a concept card: its slot inside its topic's section (syllabus order). */
-export function boardSeedPosition(topics, conceptId) {
-  const grid = sectionGrid(topics.map((t) => ({ id: t.id, count: t.subtopics.length })));
-  for (const t of topics) {
-    const k = t.subtopics.findIndex((s) => s.conceptId === conceptId);
-    if (k >= 0) return slotPosition(grid.get(t.id), k);
+/** Stable id for the overflow section that holds knowledge points not attached to a syllabus topic. */
+export const EXTRA_SECTION_ID = '__extensions';
+
+/**
+ * Groups used to seed the board: each syllabus topic (concepts in outline order, then extra
+ * active knowledge points that belong to that topic), then an overflow group for the rest.
+ * `concepts` is a list of { id, topicId?, status? } (promoted / out-of-syllabus points included).
+ */
+export function boardSeedGroups(topics = [], concepts = []) {
+  const taught = new Set();
+  const groups = (topics ?? []).map((t) => {
+    const ids = [];
+    for (const s of t.subtopics ?? []) {
+      const list = s.conceptIds?.length ? s.conceptIds : (s.conceptId ? [s.conceptId] : []);
+      for (const cid of list) if (cid && !taught.has(cid)) { taught.add(cid); ids.push(cid); }
+    }
+    return { id: t.id, conceptIds: ids };
+  });
+  const extras = new Map();
+  const orphans = [];
+  for (const c of concepts ?? []) {
+    if (!c?.id || (c.status && c.status !== 'active')) continue;
+    if (taught.has(c.id)) continue;
+    taught.add(c.id);
+    const tid = c.topicId && groups.some((g) => g.id === c.topicId) ? c.topicId : null;
+    if (tid) {
+      if (!extras.has(tid)) extras.set(tid, []);
+      extras.get(tid).push(c.id);
+    } else orphans.push(c.id);
+  }
+  for (const g of groups) {
+    const more = extras.get(g.id);
+    if (more) g.conceptIds.push(...more);
+  }
+  if (orphans.length) groups.push({ id: EXTRA_SECTION_ID, conceptIds: orphans });
+  return groups;
+}
+
+/** Deterministic seed position of a concept card: its slot inside its topic (or overflow) section. */
+export function boardSeedPosition(topics, conceptId, concepts = []) {
+  const groups = boardSeedGroups(topics, concepts);
+  const grid = sectionGrid(groups.map((g) => ({ id: g.id, count: g.conceptIds.length })));
+  for (const g of groups) {
+    const k = g.conceptIds.indexOf(conceptId);
+    if (k >= 0) return slotPosition(grid.get(g.id), k);
   }
   return { x: SECTION.origin, y: SECTION.origin };
 }

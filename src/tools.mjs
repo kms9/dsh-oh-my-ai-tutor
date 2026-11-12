@@ -15,8 +15,9 @@ export const WRITE_ACTIONS = Object.freeze([
   'lesson.create', 'lesson.updatePlan', 'lesson.link', 'lesson.approve', 'lesson.partWrite', 'lesson.cover',
   'lesson.ask', 'lesson.hint', 'lesson.dropQuestion', 'lesson.checkpoint', 'assessment.record',
   'lesson.reviewEnd', 'note.add', 'note.link', 'lesson.finish', 'lesson.feedback', 'lesson.adjustDone',
-  'relation.propose', 'board.seed', 'board.patch',
-  'mindmap.ensure', 'mindmap.edit', 'graphNode.add', 'graphNode.rename', 'graphNode.remove',
+  'relation.propose', 'board.seed', 'board.generate', 'board.patch',
+  'mindmap.ensure', 'mindmap.edit', 'mindmap.generate', 'graphNode.add', 'graphNode.rename', 'graphNode.remove',
+  'graph.generate',
   'concept.create', 'concept.promote', 'concept.rename',
 ]);
 
@@ -120,7 +121,7 @@ export function toolSpecs(storeOrResolve) {
       description: 'Persist a real learner tutoring event in the durable tutor domain. Read the state first; only use approved transitions. payload_json is a JSON object string for the chosen action (see the oh-my-ai-tutor skill). '
         + `source.register: {title, uri, kind?} where kind is one of ${SOURCE_KINDS.join(' | ')} (an article/web page is "web"; anything else is stored as "other"). `
         + 'course.plan: {courseId, syllabusRevision, topics:[{id?, title, subtopics:[{id?, title}]}]} — syllabusRevision is required (0 for a new course; otherwise from tutor_visualize(outline)); NEW topics/subtopics must NOT carry an id (the store assigns ids); existing items you do not mention are KEPT (remove them with tutor_outline_edit). '
-        + 'For syllabus edits prefer tutor_outline_edit (changing an existing outline needs reason, shown with the diff). For the mind map use tutor_mindmap_edit (it does not change the outline). concept.promote {courseId, from:{type:"mindmapNode"|"graphNode", id}, title?} turns an extension node into a knowledge point (quiz/review); it is not added to the syllabus. '
+        + 'For syllabus edits prefer tutor_outline_edit (changing an existing outline needs reason, shown with the diff). For the mind map use tutor_mindmap_generate (add-only enrichment from course content) or tutor_mindmap_edit (it does not change the outline). After the outline is approved, generate or enrich the mind map and knowledge graph (graph.generate) from the course goals, syllabus and materials; never rebuild a map the learner has already edited — only fill in missing nodes, and keep every relation as a candidate. concept.promote {courseId, from:{type:"mindmapNode"|"graphNode", id}, title?} turns an extension node into a knowledge point (quiz/review); it is not added to the syllabus. '
         + 'Approvals: by default show the outline / lesson plan and ask the learner to approve (批准 in the AI 学习工作台). Call course.approve {courseId, syllabusRevision, consent} / lesson.approve {lessonId, planRevision, consent} yourself ONLY when the learner told you to (consent = their words, e.g. 「交给你」「跳过批准」), or after course.setApproval {courseId, mode:"delegated", consent} recorded a standing delegation. Never approve on your own initiative. '
         + 'lesson.create {courseId, title, topicId?, conceptIds?, parts:[{title, objective, conceptIds?}]} ties the lesson to the outline. sourceRefs are [{sourceId, locator?}] of registered sources (locator like "p.12" or "01:30"). '
         + LINK_RULE
@@ -159,7 +160,7 @@ export function toolSpecs(storeOrResolve) {
       name: 'tutor_visualize',
       description: 'Project one course as syllabus outline, mind map, semantic knowledge graph, or the editable course board (read-only view). '
         + 'In DSH web the result is drawn as a graphic card in the chat and the same data is live in the "AI 学习工作台" right-sidebar tab, so do NOT redraw it as ASCII, Mermaid or tables in your reply; just summarise what changed or matters. '
-        + 'The outline answers what is taught and in what order (edit with tutor_outline_edit, approval required). The mind map is an independent thinking structure (edit with tutor_mindmap_edit; no outline approval). The graph has its own nodes, which may refer to knowledge points. The board is edited with tutor_board_patch.',
+        + 'The outline answers what is taught and in what order (edit with tutor_outline_edit, approval required). The mind map is an independent thinking structure (generate with tutor_mindmap_generate, edit with tutor_mindmap_edit; no outline approval). If the mind-map result has skeleton=true it still only mirrors the outline — enrich it from the course content. The graph has its own nodes, which may refer to knowledge points (graph.generate writes only candidate relations). The board is edited with tutor_board_patch; seed=true now also places promoted / out-of-syllabus knowledge points and related extensions as notes.',
       parameters: {
         courseId: { type: 'string', required: true },
         view: { type: 'string', enum: VIEWS, required: true },
@@ -209,6 +210,55 @@ export function toolSpecs(storeOrResolve) {
       }),
     },
     {
+      name: 'tutor_mindmap_generate',
+      description: 'Enrich the course mind map from course content (goals, approved syllabus, lesson text, registered sources). Add-only: existing nodes are never renamed, moved or deleted; a proposed child is skipped when the same title already sits under that parent. '
+        + 'Use this after the syllabus is approved, or when tutor_visualize(mindmap) returns skeleton=true (the map still only has the outline skeleton). Pass node ids from tutor_visualize(mindmap) as parentId (or "root"). belongsTo is optional ({type:"topic"|"concept", id}). '
+        + 'Does not change the outline and does not require outline approval. On conflict read the map again. ' + LINK_RULE,
+      parameters: {
+        courseId: { type: 'string', required: true },
+        mindmapRevision: { type: 'integer', required: true, description: 'mindmapRevision from tutor_visualize(mindmap).' },
+        nodes: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
+          parentId: { type: 'string', description: 'Existing node id, or "root".' },
+          title: { type: 'string' },
+          belongsTo: { type: 'object', additionalProperties: false, properties: { type: { type: 'string', enum: ['topic', 'concept'] }, id: { type: 'string' } } },
+        } }, description: 'Children to add; at most 100. Duplicates under the same parent are skipped.' },
+      },
+      execute: run(async (store, args) => {
+        const payload = { courseId: requireCourseId(args), mindmapRevision: args.mindmapRevision, nodes: args.nodes, phase: 'authoring' };
+        const out = await store.mutate('mindmap.generate', payload, undefined, { actor: 'ai', summary: 'AI 根据课程内容充实思维导图' });
+        const state = await store.read();
+        return { revision: out.revision, ...out.result, mindmap: projectCourse(state, payload.courseId, 'mindmap'),
+          links: linksForWrite(state, 'mindmap.generate', payload, out.result) };
+      }),
+    },
+    {
+      name: 'tutor_graph_generate',
+      description: 'Extract or enrich the course knowledge graph: independent nodes ("what to know") and typed candidate relations (how they depend). '
+        + 'Add-only: existing nodes are not overwritten; relations are always created as candidate (never accepted). Nodes may refer to a knowledge point (refersTo) or be extensions. '
+        + 'from/to may be a graph-node id, a knowledge-point id, or "$ref" of a node added in this same call (give that node ref:"n1"). '
+        + 'Does not change the outline. Prefer evidenceRefs / note when a registered source supports the relation. ' + LINK_RULE,
+      parameters: {
+        courseId: { type: 'string', required: true },
+        nodes: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
+          title: { type: 'string' }, description: { type: 'string' }, refersTo: { type: 'string' },
+          ref: { type: 'string', description: 'Batch-local name; point at this node as "$ref" in relations.' },
+          belongsTo: { type: 'object', additionalProperties: false, properties: { type: { type: 'string', enum: ['topic', 'concept'] }, id: { type: 'string' } } },
+        } } },
+        relations: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
+          from: { type: 'string' }, to: { type: 'string' },
+          type: { type: 'string', enum: ['prerequisite', 'partOf', 'explains', 'contrasts', 'applies', 'exampleOf', 'relatedTo'] },
+          note: { type: 'string' }, evidenceRefs: { type: 'array', items: { type: 'string' } },
+        } } },
+      },
+      execute: run(async (store, args) => {
+        const payload = { courseId: requireCourseId(args), nodes: args.nodes ?? [], relations: args.relations ?? [], phase: 'authoring' };
+        const out = await store.mutate('graph.generate', payload, undefined, { actor: 'ai', summary: 'AI 从课程内容提取知识图谱候选' });
+        const state = await store.read();
+        return { revision: out.revision, ...out.result, graph: projectCourse(state, payload.courseId, 'graph'),
+          links: linksForWrite(state, 'graph.generate', payload, out.result) };
+      }),
+    },
+    {
       name: 'tutor_concept_promote',
       description: 'Promote a mind-map or graph extension node to a knowledge point (quiz and review). Writes refersTo back onto the node. Does not add the point to the syllabus (that takes tutor_outline_edit + approval).',
       parameters: {
@@ -242,7 +292,7 @@ export function toolSpecs(storeOrResolve) {
         + 'Element ids ONLY come from tutor_board_read; new elements never carry an id (the store assigns one) — give a new card ref:"n1" and point at it later in the same batch as "$n1"; the result maps refs to real ids. '
         + 'Deleting a card also deletes its arrows. Coordinates are canvas pixels (>= 0); cards are about 196x72, keep ~14-40px gaps. The workbench groups cards into one section per syllabus topic (a view of where the cards sit: put a note inside a topic area, or connect it to a card of that topic, to group it there). Arrows are visual only: use tutor_write relation.propose for a semantic candidate relation. '
         + 'A lesson note can sit on the board as a card: {op:"add", type:"note", noteId, arrows?:true} (text follows the note; arrows are visual only). '
-        + 'Set seed=true (with no operations) to add every missing knowledge point card plus candidate-relation arrows (relation arrows someone deleted on purpose are not re-added). When a knowledge point is removed from the outline its card stays as a dashed "stale" card until someone deletes it. On conflict READ AGAIN; the learner may have moved or deleted cards.',
+        + 'Set seed=true (with no operations) to add every missing knowledge-point card (including promoted and out-of-syllabus points), related mind-map/graph extensions as annotation notes, and candidate-relation arrows (relation arrows someone deleted on purpose are not re-added). Existing cards keep their positions. When a knowledge point is removed from the outline its card stays as a dashed "stale" card until someone deletes it. On conflict READ AGAIN; the learner may have moved or deleted cards.',
       parameters: {
         courseId: { type: 'string', required: true },
         baseRevision: { type: 'integer', required: true, description: 'Board revision from tutor_board_read (not the domain state revision).' },
@@ -253,7 +303,7 @@ export function toolSpecs(storeOrResolve) {
         const courseId = requireCourseId(args);
         if (args.seed !== true && (!Array.isArray(args.operations) || !args.operations.length)) throw new Error('operations is required unless seed=true');
         const out = args.seed === true
-          ? await store.mutate('board.seed', { courseId, baseRevision: args.baseRevision }, undefined, { actor: 'ai', summary: 'AI 从大纲生成白板' })
+          ? await store.mutate('board.seed', { courseId, baseRevision: args.baseRevision }, undefined, { actor: 'ai', summary: 'AI 补齐课程白板（不覆盖已有摆放）' })
           : await store.mutate('board.patch', { courseId, baseRevision: args.baseRevision, operations: args.operations }, undefined, { actor: 'ai', summary: summarize('AI 编辑白板', args.operations) });
         const state = await store.read();
         return { ...out.result, board: liveBoard(state, state.courses[courseId]), links: linksFor(state, courseId, { elementIds: (out.result.touched ?? []).slice(0, 12) }) };

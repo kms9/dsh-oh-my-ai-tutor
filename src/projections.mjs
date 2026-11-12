@@ -1,5 +1,5 @@
 import { snapshot } from './core.mjs';
-import { mindmapHierarchy, mermaidMindmap, conceptIdOfEndpoint } from './resources.mjs';
+import { mindmapHierarchy, mermaidMindmap, conceptIdOfEndpoint, isMindmapSkeleton } from './resources.mjs';
 
 const tidy = (s) => String(s ?? '').replace(/[\r\n\t]/g, ' ').replace(/[()\[\]{}<>`"']/g, '').trim().slice(0, 80);
 const elementId = (value, prefix) => `${prefix}-${String(value).replace(/[^A-Za-z0-9-]/g, '').slice(0, 110)}`;
@@ -15,6 +15,7 @@ export function projectCourse(state, courseId, view = 'mindmap') {
     const hierarchy = mm ? mindmapHierarchy(mm, data.course) : { id: data.course.id, title: data.course.title, children: [] };
     return { revision: data.revision, courseId: data.course.id, syllabusRevision: syllabus.revision,
       mindmapRevision: mm?.revision ?? 0, rootId: mm?.rootId ?? hierarchy.id,
+      skeleton: !mm || isMindmapSkeleton(mm, data.course),
       hierarchy, mermaid: mermaidMindmap(hierarchy, tidy) };
   }
   const conceptById = new Map((data.concepts ?? []).map((c) => [c.id, c]));

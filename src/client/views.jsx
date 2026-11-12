@@ -16,7 +16,7 @@ export function MindmapSvg({ hierarchy, editable = false, selectedId, onSelect, 
   const svgRef = useRef(null);
   const [drag, setDrag] = useState(null);
   const topicIndex = new Map((hierarchy?.children ?? []).map((t, i) => [t.id, i]));
-  const colorOf = (n) => TOPIC_COLORS[(n.kind === 'topic' ? n.index : topicIndex.get(n.parentId) ?? 0) % TOPIC_COLORS.length];
+  const colorOf = (n) => TOPIC_COLORS[(n.kind === 'topic' ? n.index : n.branch ?? topicIndex.get(n.parentId) ?? 0) % TOPIC_COLORS.length];
   const hit = (p, except) => layout.nodes.find((n) => n.id !== except && p.x >= n.x - 6 && p.x <= n.x + n.w + 6 && p.y >= n.y - 5 && p.y <= n.y + n.h + 5);
   function down(e, n) {
     if (!editable || n.kind === 'root' || e.button !== 0) return;

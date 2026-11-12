@@ -26,61 +26,89 @@ export function wrapLabel(text, maxWidth, fontSize = 12, maxLines = 2) {
   return lines;
 }
 
-/** Horizontal tidy tree: root → topics → subtopics. Collapsed topics occupy one row. */
+/** Horizontal tidy tree of arbitrary depth. Collapsed nodes occupy one row and hide their descendants. */
 export function mindmapLayout(hierarchy, collapsed = new Set(), opts = {}) {
   const fs = opts.fontSize ?? 12, rowH = opts.rowHeight ?? 34, padX = 14, nodeH = 26;
   const measure = (t, bold, max) => Math.min(max, Math.max(56, textWidth(t, fs) + padX * 2 + (bold ? 6 : 0)));
-  const topics = hierarchy?.children ?? [];
-  const rootW = Math.min(220, textWidth(hierarchy?.title ?? '', 13) + 40);
-  const topicW = Math.max(80, ...topics.map((t) => measure(t.title, true, 210)));
-  const x0 = 12, x1 = x0 + rootW + 56, x2 = x1 + topicW + 48;
+  const kindOf = (node, depth) => node?.kind ?? (depth === 0 ? 'root' : depth === 1 ? 'topic' : (node?.conceptId || node?.refersTo ? 'sub' : 'node'));
+  const widthOf = (node, depth) => {
+    if (depth === 0) return Math.min(220, textWidth(node?.title ?? '', 13) + 40);
+    return measure(node?.title ?? '', depth === 1, depth <= 1 ? 210 : 240);
+  };
+  const heightOf = (depth) => (depth === 0 ? nodeH + 12 : depth === 1 ? nodeH + 4 : nodeH);
+  const gapAfter = (depth) => (depth === 0 ? 56 : 48);
+
+  const colW = [];
+  const walkMeasure = (node, depth) => {
+    colW[depth] = Math.max(colW[depth] ?? (depth === 1 ? 80 : 56), widthOf(node, depth));
+    if (!collapsed.has(node?.id)) for (const c of node?.children ?? []) walkMeasure(c, depth + 1);
+  };
+  walkMeasure(hierarchy ?? { id: 'root', title: '', children: [] }, 0);
+  const xOf = [12];
+  for (let d = 0; d < colW.length; d++) xOf[d + 1] = xOf[d] + (colW[d] ?? 56) + gapAfter(d);
+
   const nodes = [], links = [];
   let row = 0;
-  const topicNodes = topics.map((t, ti) => {
-    const kids = collapsed.has(t.id) ? [] : t.children;
-    const childNodes = kids.map((s, si) => {
-      const n = { id: s.id, kind: 'sub', title: s.title, conceptId: s.conceptId, parentId: t.id, index: si,
-        x: x2, y: 16 + (row++) * rowH, w: measure(s.title, false, 240), h: nodeH };
-      return n;
-    });
-    if (!kids.length) row++;
-    const y = childNodes.length ? (childNodes[0].y + childNodes.at(-1).y) / 2 : 16 + (row - 1) * rowH;
-    const tn = { id: t.id, kind: 'topic', title: t.title, parentId: hierarchy.id, index: ti, count: t.children.length,
-      collapsed: collapsed.has(t.id), x: x1, y, w: measure(t.title, true, 210), h: nodeH + 4 };
-    nodes.push(tn, ...childNodes);
-    for (const c of childNodes) links.push({ from: tn, to: c });
-    return tn;
-  });
-  const ry = topicNodes.length ? (topicNodes[0].y + topicNodes.at(-1).y) / 2 : 16;
-  if (opts.availableWidth && opts.availableWidth > 0 && opts.mode !== 'horizontal') {
-    const horizontalWidth = Math.max(...nodes.map((n) => n.x + n.w), x0 + rootW) + 16;
-    if (opts.mode === 'indent' || horizontalWidth > opts.availableWidth) return indentLayout(hierarchy, collapsed, opts.availableWidth, fs, measure);
-  }
-  const root = { id: hierarchy?.id ?? 'root', kind: 'root', title: hierarchy?.title ?? '', x: x0, y: ry - 4, w: rootW, h: nodeH + 12 };
-  nodes.unshift(root);
-  for (const t of topicNodes) links.unshift({ from: root, to: t });
-  const width = Math.max(...nodes.map((n) => n.x + n.w)) + 16;
+  const layoutNode = (node, depth, parent, index, branch) => {
+    const kids = collapsed.has(node.id) ? [] : (node.children ?? []);
+    const kind = kindOf(node, depth);
+    const w = widthOf(node, depth), h = heightOf(depth);
+    const childLayouts = [];
+    const startRow = row;
+    kids.forEach((c, i) => childLayouts.push(layoutNode(c, depth + 1, node.id, i, depth === 0 ? i : branch)));
+    if (!childLayouts.length) row++;
+    const y = childLayouts.length
+      ? (childLayouts[0].y + childLayouts.at(-1).y) / 2
+      : 16 + (Math.max(startRow, row - 1)) * rowH;
+    const n = {
+      id: node.id, kind, title: node.title ?? '', conceptId: node.conceptId ?? node.refersTo ?? null,
+      parentId: parent, index, count: (node.children ?? []).length, collapsed: collapsed.has(node.id),
+      depth, branch: branch ?? 0, x: xOf[depth], y: depth === 0 ? y - 4 : y, w, h,
+    };
+    nodes.push(n);
+    for (const c of childLayouts) links.push({ from: n, to: c });
+    return n;
+  };
+  const root = layoutNode(hierarchy ?? { id: 'root', title: '', children: [] }, 0, null, 0, 0);
+  if (!nodes.length) nodes.push(root);
+  const width = Math.max(...nodes.map((n) => n.x + n.w), xOf[0] + (colW[0] ?? 56)) + 16;
   const height = Math.max(...nodes.map((n) => n.y + n.h)) + 16;
+  if (opts.availableWidth && opts.availableWidth > 0 && opts.mode !== 'horizontal') {
+    if (opts.mode === 'indent' || width > opts.availableWidth) return indentLayout(hierarchy, collapsed, opts.availableWidth, fs, measure);
+  }
   return { nodes, links, width, height, mode: 'horizontal' };
 }
 
-/** Narrow-column mind map: root on top, topics and knowledge points as an indented tree with elbow connectors. */
+/** Narrow-column mind map: root on top, then an indented tree of arbitrary depth with elbow connectors. */
 function indentLayout(hierarchy, collapsed, avail, fs, measure) {
   const rowH = 36, nodeH = 26, nodes = [], links = [];
   let row = 0;
-  const root = { id: hierarchy?.id ?? 'root', kind: 'root', title: hierarchy?.title ?? '', x: 8, y: 8, w: Math.min(avail - 16, textWidth(hierarchy?.title ?? '', 13) + 40), h: nodeH + 6 };
-  nodes.push(root); row = 1;
-  (hierarchy?.children ?? []).forEach((t, ti) => {
-    const tn = { id: t.id, kind: 'topic', title: t.title, parentId: root.id, index: ti, count: t.children.length, collapsed: collapsed.has(t.id),
-      x: 34, y: 8 + row * rowH + 4, w: Math.min(avail - 60, measure(t.title, true, 420)), h: nodeH + 2 };
-    row++; nodes.push(tn); links.push({ from: root, to: tn });
-    if (!collapsed.has(t.id)) t.children.forEach((sub, si) => {
-      const n = { id: sub.id, kind: 'sub', title: sub.title, conceptId: sub.conceptId, parentId: t.id, index: si,
-        x: 66, y: 8 + row * rowH + 4, w: Math.min(avail - 76, measure(sub.title, false, 420)), h: nodeH };
-      row++; nodes.push(n); links.push({ from: tn, to: n });
-    });
-  });
-  const width = Math.max(avail - 2, ...nodes.map((n) => n.x + n.w + 26));
+  const kindOf = (node, depth) => node?.kind ?? (depth === 0 ? 'root' : depth === 1 ? 'topic' : (node?.conceptId || node?.refersTo ? 'sub' : 'node'));
+  const walk = (node, depth, parent, index, branch) => {
+    const kind = kindOf(node, depth);
+    const x = depth === 0 ? 8 : 8 + 26 + (depth - 1) * 32;
+    const wMax = Math.max(72, (avail ?? 360) - x - 16);
+    const w = depth === 0
+      ? Math.min(wMax, textWidth(node?.title ?? '', 13) + 40)
+      : Math.min(wMax, measure(node?.title ?? '', depth === 1, 420));
+    const n = {
+      id: node?.id ?? 'root', kind, title: node?.title ?? '', conceptId: node?.conceptId ?? node?.refersTo ?? null,
+      parentId: parent, index, count: (node?.children ?? []).length, collapsed: collapsed.has(node?.id),
+      depth, branch: branch ?? 0,
+      x, y: depth === 0 ? 8 : 8 + row * rowH + 4,
+      w, h: depth === 0 ? nodeH + 6 : depth === 1 ? nodeH + 2 : nodeH,
+    };
+    nodes.push(n);
+    if (parent) {
+      const from = nodes.find((x) => x.id === parent);
+      if (from) links.push({ from, to: n });
+    }
+    row++;
+    if (!collapsed.has(node?.id)) (node?.children ?? []).forEach((c, i) => walk(c, depth + 1, n.id, i, depth === 0 ? i : branch));
+    return n;
+  };
+  walk(hierarchy ?? { id: 'root', title: '', children: [] }, 0, null, 0, 0);
+  const width = Math.max((avail ?? 0) - 2, ...nodes.map((n) => n.x + n.w + 26));
   return { nodes, links, width, height: 8 + row * rowH + 12, mode: 'indent' };
 }
 
