@@ -36,10 +36,18 @@ test('course goal -> approved syllabus -> lesson -> review -> note -> finish',()
  assert.equal(assessment.provisionalMastery,'demonstrated');
  ctx.run('lesson.reviewEnd',{lessonId:lesson.id});
  assert.throws(()=>ctx.run('lesson.finish',{lessonId:lesson.id}),/Create a lesson note/);
- ctx.run('note.add',{lessonId:lesson.id,title:'ZPD insight',content:'ZPD is not a fixed level.',sourceRefs:['file:educational-psychology.md']});
+ assert.throws(()=>ctx.run('note.add',{lessonId:lesson.id,title:'x',content:'y',sourceRefs:['file:educational-psychology.md']}),/registered source/);
+ const src=ctx.run('source.register',{title:'Educational psychology',uri:'https://example.org/edpsych.pdf',kind:'file'});
+ const note=ctx.run('note.add',{lessonId:lesson.id,title:'ZPD insight',content:'ZPD is not a fixed level.',conceptIds:[ctx.ids[0]],sourceRefs:[{sourceId:src.id,locator:'p.17'}]});
+ assert.deepEqual(note.sourceRefs,[{sourceId:src.id,locator:'p.17',page:17}]);
+ assert.deepEqual(note.conceptIds,[ctx.ids[0]]);
  ctx.run('lesson.finish',{lessonId:lesson.id});
+ assert.equal(snapshot(ctx.state,ctx.course.id).lessons[0].phase,'feedback_pending');
+ assert.throws(()=>ctx.run('lesson.feedback',{lessonId:lesson.id}),/feedback/);
+ ctx.run('lesson.feedback',{lessonId:lesson.id,feedback:'节奏合适，想多看例子',nextPreview:'下一课：形成性评价的反馈循环'});
  assert.equal(snapshot(ctx.state,ctx.course.id).lessons[0].status,'complete');
- assert.equal(ctx.state.events.length,14);
+ assert.equal(snapshot(ctx.state,ctx.course.id).resume.nextPreview.text,'下一课：形成性评价的反馈循环');
+ assert.equal(ctx.state.events.length,16);
 });
 
 test('skipping review does not imply mastery',()=>{
@@ -50,6 +58,8 @@ test('skipping review does not imply mastery',()=>{
  ctx.run('lesson.cover',{lessonId:l.id,partIndex:0});
  ctx.run('lesson.reviewEnd',{lessonId:l.id,skipped:true});
  ctx.run('lesson.finish',{lessonId:l.id,skipNotes:true});
+ ctx.run('lesson.feedback',{lessonId:l.id,skipped:true});
+ assert.equal(ctx.state.lessons[l.id].status,'complete');
  assert.equal(ctx.state.concepts[ctx.ids[0]].mastery,'unverified');
 });
 

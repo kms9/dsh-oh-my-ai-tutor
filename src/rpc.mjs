@@ -5,7 +5,8 @@ export const ENDPOINT = 'dsh-oh-my-ai-tutor';
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 /** Learner-initiated writes allowed from the workbench UI. Assessments stay in the conversation (real answers only). */
 export const LEARNER_ACTIONS = Object.freeze([
-  'course.editOutline', 'course.approve', 'lesson.approve', 'board.seed', 'board.patch', 'relation.propose', 'note.add',
+  'course.editOutline', 'course.approve', 'course.setApproval', 'lesson.approve', 'board.seed', 'board.patch', 'relation.propose',
+  'note.add', 'note.link', 'lesson.feedback',
 ]);
 
 /** One UI read model: everything the three-column workbench needs, derived from the same state file. */
@@ -56,6 +57,7 @@ export function createRpcHandler(store) {
         ...(Number.isInteger(error.boardRevision) ? { boardRevision: error.boardRevision } : {}),
         ...(Number.isInteger(error.todoRevision) ? { todoRevision: error.todoRevision } : {}),
         ...(Number.isInteger(error.reviewRevision) ? { reviewRevision: error.reviewRevision } : {}),
+        ...(Number.isInteger(error.planRevision) ? { planRevision: error.planRevision } : {}),
       };
       return reply({ ok: false, error: { code, message: String(error.message ?? 'request failed'), details, ...details } });
     }

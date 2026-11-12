@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { BOARD_CARD, boardSeedPosition } from './board-layout.mjs';
+import { parseLocator, linksFor, refView } from './links.mjs';
+import { diffOutline, diffLines } from './outline-diff.mjs';
 
 export const SCHEMA_VERSION = 1;
 export const EDGE_TYPES = Object.freeze([
@@ -81,7 +83,13 @@ const MAX_BOARD_ELEMENTS = 2000;
 const BOARD_ID_RE = /^[A-Za-z0-9_-]{1,120}$/;
 
 /** Write a normalized topic tree into the course, keeping concept ids (and their evidence) stable. */
-function applySyllabus(s, course, topics, now) {
+function applySyllabus(s, course, topics, now, change = {}) {
+  const entries = diffOutline(course.syllabus.topics, topics);
+  const adjusting = Object.values(s.lessons).find((l) => l.courseId === course.id && l.phase === 'plan_adjustment_pending');
+  const record = { fromRevision: course.syllabus.revision, toRevision: course.syllabus.revision + 1, at: now, actor: change.actor ?? 'ai',
+    via: change.via ?? 'edit', reason: change.reason ?? '', entries, lines: diffLines(entries),
+    ...(adjusting ? { forLessonId: adjusting.id } : {}) };
+  course.syllabusChanges = [...(course.syllabusChanges ?? []), record].slice(-MAX_CHANGES);
   const activeIds = new Set();
   for (const t of topics) for (const sub of t.subtopics) {
     activeIds.add(sub.conceptId);
@@ -93,8 +101,93 @@ function applySyllabus(s, course, topics, now) {
   for (const concept of Object.values(s.concepts))
     if (concept.courseId === course.id && !activeIds.has(concept.id)) concept.status = 'retired';
   // Any syllabus change re-opens the learner approval gate (same rule as course.plan).
-  course.syllabus = { topics, revision: course.syllabus.revision + 1, approvedAt: null, approvedBy: null };
+  course.syllabus = { topics, revision: course.syllabus.revision + 1, approvedAt: null, approvedBy: null,
+    ...(course.syllabus.lastApproved ? { lastApproved: course.syllabus.lastApproved } : {}) };
   course.status = 'draft'; course.updatedAt = now;
+  return record;
+}
+
+/** Outline changes since the last approved version (null when it was never approved with a snapshot). */
+export function sinceApproved(course) {
+  const last = course?.syllabus?.lastApproved;
+  if (!last?.topics) return null;
+  if (course.status === 'active' && course.syllabus.approvedAt && last.revision === course.syllabus.revision) return { approvedRevision: last.revision, lines: [], entries: [] };
+  const entries = diffOutline(last.topics, course.syllabus.topics);
+  return { approvedRevision: last.revision, approvedBy: last.by, approvedAt: last.at, entries, lines: diffLines(entries) };
+}
+
+const MAX_CHANGES = 30;
+/** Validate knowledge point ids of one course (active ones only, de-duplicated, order kept). */
+function courseConcepts(s, courseId, ids, field, { allowRetired = false } = {}) {
+  if (ids === undefined || ids === null) return [];
+  if (!Array.isArray(ids) || ids.length > 60) throw new Error(`${field} must be an array of at most 60 knowledge point ids`);
+  const out = [];
+  for (const cid of ids) {
+    const c = typeof cid === 'string' ? s.concepts[cid] : null;
+    if (!c || c.courseId !== courseId) throw new Error(`${field}: unknown knowledge point for this course: ${cid} (ids come from tutor_visualize(outline) conceptId / tutor_read)`);
+    if (c.status !== 'active' && !allowRetired) throw new Error(`${field}: knowledge point 「${c.title}」 was removed from the outline`);
+    if (!out.includes(c.id)) out.push(c.id);
+  }
+  return out;
+}
+function courseTopic(course, topicId, field) {
+  if (topicId === undefined || topicId === null) return null;
+  const t = course.syllabus.topics.find((x) => x.id === topicId);
+  if (!t) throw new Error(`${field}: unknown topic id for this course: ${topicId} (topic ids come from tutor_visualize(outline))`);
+  return t.id;
+}
+/**
+ * Structured source references: [{sourceId, locator?, quote?}] where sourceId is a registered source (source.register).
+ * "source-…#p.12" / "source-… @ 01:30" strings are accepted and converted; other free text is refused (old free-text
+ * references already stored stay readable, see links.refView). A referenced source is linked to the course.
+ */
+export function normalizeSourceRefs(s, course, refs, field = 'sourceRefs') {
+  if (refs === undefined || refs === null) return [];
+  if (!Array.isArray(refs) || refs.length > 50) throw new Error(`${field} must be an array of at most 50 {sourceId, locator?} items`);
+  return refs.map((r, i) => {
+    let sourceId, locator, quote;
+    if (typeof r === 'string') {
+      const m = /^(source-[A-Za-z0-9-]{1,80})(?:\s*[#@|]\s*(.{1,120}))?$/.exec(r.trim());
+      if (!m) throw new Error(`${field}[${i}]: a reference is {sourceId, locator?} pointing at a registered source (register it with source.register, then use the id it returns); free text like "${r.slice(0, 40)}" is not accepted`);
+      [, sourceId, locator] = m;
+    } else if (r && typeof r === 'object' && !Array.isArray(r)) ({ sourceId, locator, quote } = r);
+    else throw new Error(`${field}[${i}] must be {sourceId, locator?, quote?}`);
+    if (typeof sourceId !== 'string' || !s.sources[sourceId])
+      throw new Error(`${field}[${i}].sourceId is not a registered source: ${sourceId}. Register it with source.register first and use the id it returns (never invent source ids).`);
+    if (locator !== undefined && locator !== null && typeof locator !== 'string' && typeof locator !== 'number') throw new Error(`${field}[${i}].locator must be a string such as "p.12", "第3页", "01:30"`);
+    const loc = parseLocator(locator === undefined || locator === null ? '' : String(locator));
+    const q = quote === undefined || quote === null ? undefined : optionalText(String(quote), `${field}[${i}].quote`, 500);
+    if (course && !course.sourceIds.includes(sourceId)) course.sourceIds.push(sourceId);
+    return { sourceId, ...loc, ...(q ? { quote: q } : {}) };
+  });
+}
+export const APPROVAL_MODES = Object.freeze(['learner', 'delegated']);
+/**
+ * Approvals: the learner (workbench button) or the AI. The AI approves only on the learner's say-so: either `consent`
+ * (the learner's own words in this conversation, e.g. 「交给你」 / 「你批准吧」) or a standing delegation the learner gave
+ * (course.setApproval mode 'delegated'). Either way it stays one explicit approve action with a revision check.
+ */
+function approvalConsent(course, actor, consent, what) {
+  if (actor === 'learner') return null;
+  const text = typeof consent === 'string' && consent.trim() ? consent.trim().slice(0, 300) : null;
+  if (text) return text;
+  if (course.approvalMode === 'delegated') return course.approvalDelegation?.consent ?? '学习者已委托 AI 批准';
+  throw Object.assign(new Error(`The AI may approve the ${what} only when the learner asked for it: pass consent (the learner's words, e.g. 「交给你」), or have the learner delegate approvals (course.setApproval mode "delegated"). Otherwise show it and ask the learner to approve (批准 in the AI 学习工作台).`), { code: 'forbidden' });
+}
+function lessonPlanRevision(lesson) { return Number.isInteger(lesson.planRevision) ? lesson.planRevision : 1; }
+function normalizeParts(s, course, parts) {
+  if (!Array.isArray(parts) || parts.length < 1 || parts.length > 8) throw new Error('parts must contain 1..8 items');
+  return parts.map((p, i) => ({ id: id('part'), index: i, title: requireText(p?.title, 'part.title', 160),
+    objective: requireText(p?.objective, 'part.objective', 2000), status: 'not_started', body: null, sourceRefs: [],
+    conceptIds: courseConcepts(s, course.id, p?.conceptIds, `parts[${i}].conceptIds`) }));
+}
+/** A lesson's topic and knowledge points: explicit ids, the parts' ids, and (topic only) that topic's live knowledge points. */
+function lessonLinks(s, course, payload, parts) {
+  const topicId = courseTopic(course, payload.topicId, 'topicId');
+  let conceptIds = courseConcepts(s, course.id, payload.conceptIds, 'conceptIds');
+  for (const p of parts) for (const c of p.conceptIds) if (!conceptIds.includes(c)) conceptIds.push(c);
+  if (!conceptIds.length && topicId) conceptIds = course.syllabus.topics.find((t) => t.id === topicId).subtopics.map((x) => x.conceptId).filter((c) => s.concepts[c]?.status === 'active');
+  return { topicId, conceptIds };
 }
 
 export const MAX_EVENTS = 2000;
@@ -102,6 +195,12 @@ function requireSyllabusRevision(course, value) {
   if (!Number.isInteger(value)) throw new Error(`syllabusRevision is required (current outline revision from tutor_visualize(outline) / tutor_read; now ${course.syllabus.revision})`);
   if (value !== course.syllabus.revision)
     throw Object.assign(new Error(`Outline changed (syllabus revision ${course.syllabus.revision}); read it again`), { code: 'conflict', syllabusRevision: course.syllabus.revision });
+}
+function requirePlanRevision(lesson, value, required) {
+  const cur = lessonPlanRevision(lesson);
+  if (value === undefined || value === null) { if (required) throw new Error(`planRevision is required (the lesson plan revision you showed the learner; now ${cur})`); return; }
+  if (!Number.isInteger(value)) throw new Error('planRevision must be an integer');
+  if (value !== cur) throw Object.assign(new Error(`Lesson plan changed (plan revision ${cur}); read it again`), { code: 'conflict', planRevision: cur });
 }
 /** course.plan never silently drops what the caller did not mention: unmentioned topics/subtopics are kept (remove them with tutor_outline_edit). */
 function mergePlan(planned, oldTopics) {
@@ -277,6 +376,7 @@ function boardPatch(s, course, board, operations, now, actor, maxOps = 100, inte
       if (typeof eid !== 'string' || !BOARD_ID_RE.test(eid)) throw new Error(`operations[${n}].id must match ${BOARD_ID_RE}`);
       if (byId.has(eid)) throw new Error(`Element id already used (ids are never reused): ${eid}`);
       if (op.ref !== undefined) refs.set(op.ref, eid);
+      let linkTo = [];
       const base = { id: eid, type: op.type, createdBy: actor, updatedBy: actor, createdAt: now, updatedAt: now };
       let el;
       if (op.type === 'arrow') {
@@ -291,21 +391,38 @@ function boardPatch(s, course, board, operations, now, actor, maxOps = 100, inte
         }
       } else {
         let text = '';
-        let conceptId;
+        let conceptId, noteId;
+        let pos = { x: 40, y: 40 };
         if (op.type === 'concept') {
           const concept = s.concepts[op.conceptId];
           if (!concept || concept.courseId !== course.id || concept.status !== 'active') throw new Error(`Unknown or retired conceptId for this course: ${op.conceptId}`);
           if (elements.some((e) => !e.deleted && e.type === 'concept' && e.conceptId === concept.id)) throw new Error(`Concept already on board: ${concept.title}`);
           conceptId = concept.id;
+          pos = boardLayoutFor(course, conceptId);
+        } else if (op.noteId !== undefined) {
+          // a lesson note as a card: its text follows the note; it links back to the note and its knowledge points
+          const note = s.notes[op.noteId];
+          if (!note || note.courseId !== course.id) throw new Error(`Unknown noteId for this course: ${op.noteId} (note ids come from tutor_read / note.add)`);
+          if (op.text !== undefined) throw new Error('A note card shows its lesson note; do not pass text (edit the note instead)');
+          if (elements.some((e) => !e.deleted && e.type === 'note' && e.noteId === note.id)) throw new Error(`Note already on board: ${note.title}`);
+          noteId = note.id;
+          const near = elements.find((e) => !e.deleted && e.type === 'concept' && (note.conceptIds ?? []).includes(e.conceptId));
+          if (near) pos = { x: Math.min(20_000, near.x + (near.width ?? CARD.width) + 28), y: near.y };
+          if (op.arrows === true) linkTo = elements.filter((e) => !e.deleted && e.type === 'concept' && (note.conceptIds ?? []).includes(e.conceptId));
         } else text = requireText(op.text, 'note.text', 500);
-        const pos = conceptId ? boardLayoutFor(course, conceptId) : { x: 40, y: 40 };
-        el = { ...base, ...(conceptId ? { conceptId } : { text }),
+        el = { ...base, ...(conceptId ? { conceptId } : noteId ? { noteId } : { text }),
           x: op.x === undefined ? pos.x : boardCoord(op.x, 'x'), y: op.y === undefined ? pos.y : boardCoord(op.y, 'y'),
           width: op.width === undefined ? CARD.width : finiteNumber(op.width, 'width', 60, 800),
           height: op.height === undefined ? CARD.height : finiteNumber(op.height, 'height', 40, 600),
           color: boardColor(op.color) ?? '' };
       }
       elements.push(el); byId.set(eid, el); touched.push(eid);
+      // visual arrows from a note card to its knowledge point cards (a view of note.conceptIds, not a semantic relation)
+      for (const target of linkTo) {
+        const aid = id('arrow');
+        const arrow = { id: aid, type: 'arrow', createdBy: actor, updatedBy: actor, createdAt: now, updatedAt: now, from: eid, to: target.id, label: '', noteLink: true };
+        elements.push(arrow); byId.set(aid, arrow); touched.push(aid);
+      }
     } else {
       const el = live(op.id);
       // Deleting something this same batch already removed (e.g. an arrow cascaded away with its card) is a no-op success.
@@ -324,6 +441,7 @@ function boardPatch(s, course, board, operations, now, actor, maxOps = 100, inte
         } else if (op.label !== undefined) throw new Error('label is only for arrows');
         if (op.text !== undefined) {
           if (el.type !== 'note') throw new Error('Concept card text follows the syllabus; rename the subtopic instead');
+          if (el.noteId) throw new Error('A note card shows its lesson note; edit the note instead');
           el.text = requireText(op.text, 'note.text', 500);
         }
         if (op.x !== undefined) el.x = boardCoord(op.x, 'x');
@@ -365,6 +483,10 @@ export function transition(original, action, input = {}, opts = {}) {
   const actor = ACTORS.includes(opts.actor) ? opts.actor : 'ai';
   const payload = input ?? {};
   let result;
+  let autoSummary = null;
+  // why the outline changed (shown next to the diff); the model-facing tools require it for AI edits of an existing outline
+  const needReason = () => (typeof payload.reason === 'string' ? payload.reason.trim().slice(0, 500) : '');
+  const touchLesson = (lesson) => { const c = s.courses[lesson.courseId]; if (c) c.resume = { lessonId: lesson.id, at: now }; lesson.updatedAt = now; };
   switch (action) {
     case 'goal.create': {
       const item = { id: id('goal'), title: requireText(payload.title, 'title', 160),
@@ -397,42 +519,86 @@ export function transition(original, action, input = {}, opts = {}) {
       requireSyllabusRevision(course, payload.syllabusRevision);
       const { topics, kept } = mergePlan(normalizeTopics(payload.topics, course.syllabus.topics), course.syllabus.topics);
       if (topics.length > 40) throw new Error('An outline must keep 1..40 topics');
-      applySyllabus(s, course, topics, now);
-      result = { courseId: course.id, syllabus: course.syllabus, ...(kept.length ? { keptUnmentioned: kept } : {}) }; break;
+      const change = applySyllabus(s, course, topics, now, { actor, reason: needReason(), via: 'plan' });
+      result = { courseId: course.id, syllabus: course.syllabus, change, ...(kept.length ? { keptUnmentioned: kept } : {}) }; break;
     }
     case 'course.editOutline': {
       const course = requireId(s, 'courses', payload.courseId);
       requireSyllabusRevision(course, payload.syllabusRevision);
+      const reason = needReason();
       const topics = editOutline(course.syllabus.topics, payload.operations);
-      applySyllabus(s, course, topics, now);
-      result = { courseId: course.id, syllabus: course.syllabus, applied: payload.operations.length }; break;
+      const change = applySyllabus(s, course, topics, now, { actor, reason, via: 'edit' });
+      result = { courseId: course.id, syllabus: course.syllabus, applied: payload.operations.length, change }; break;
     }
     case 'course.approve': {
-      // Hard gate: only the learner (workbench RPC) can approve, and only the exact outline revision on their screen.
-      if (actor !== 'learner') throw Object.assign(new Error('Only the learner can approve the outline (the 批准大纲 button in the AI 学习工作台); ask them to review and click it'), { code: 'forbidden' });
+      // One explicit approve of the exact outline revision (CAS). The learner (workbench) or the AI on the learner's say-so.
       const course = requireId(s, 'courses', payload.courseId);
       requireSyllabusRevision(course, payload.syllabusRevision);
       if (!course.syllabus.topics.length) throw new Error('Cannot approve an empty syllabus');
+      const consent = approvalConsent(course, actor, payload.consent, 'outline');
       course.status = 'active'; course.syllabus.approvedAt = now; course.syllabus.approvedBy = actor; course.updatedAt = now;
-      result = { courseId: course.id, status: course.status, syllabusRevision: course.syllabus.revision }; break;
+      course.syllabus.approval = { by: actor, at: now, ...(consent ? { consent } : {}), ...(actor === 'ai' && !payload.consent ? { delegated: true } : {}) };
+      course.syllabus.lastApproved = { revision: course.syllabus.revision, at: now, by: actor, topics: clone(course.syllabus.topics) };
+      if (actor === 'ai') autoSummary = `AI 代为批准大纲第 ${course.syllabus.revision} 版（依据：${consent.slice(0, 60)}）`;
+      result = { courseId: course.id, status: course.status, syllabusRevision: course.syllabus.revision, approvedBy: actor, ...(consent ? { consent } : {}) }; break;
+    }
+    case 'course.setApproval': {
+      const course = requireId(s, 'courses', payload.courseId);
+      if (!APPROVAL_MODES.includes(payload.mode)) throw new Error(`mode must be one of ${APPROVAL_MODES.join(' | ')}`);
+      let consent = null;
+      if (payload.mode === 'delegated') {
+        consent = actor === 'learner' ? '学习者在工作台选择「交给 AI 批准」' : (typeof payload.consent === 'string' && payload.consent.trim() ? payload.consent.trim().slice(0, 300) : null);
+        if (!consent) throw Object.assign(new Error('Delegating approvals to the AI needs the learner\'s words as consent (e.g. 「以后大纲和课时计划你直接批准」)'), { code: 'forbidden' });
+      }
+      course.approvalMode = payload.mode;
+      course.approvalDelegation = payload.mode === 'delegated' ? { by: actor, at: now, consent } : null;
+      course.updatedAt = now;
+      autoSummary = payload.mode === 'delegated' ? `${actor === 'learner' ? '你' : 'AI'}把批准交给 AI（${consent.slice(0, 60)}）` : `${actor === 'learner' ? '你' : 'AI'}恢复为学习者批准`;
+      result = { courseId: course.id, approvalMode: course.approvalMode, ...(consent ? { consent } : {}) }; break;
     }
     case 'lesson.create': {
       const course = requireId(s, 'courses', payload.courseId);
       if (course.status !== 'active') throw new Error('Approve course syllabus before creating a lesson');
-      if (!Array.isArray(payload.parts) || payload.parts.length < 1 || payload.parts.length > 8) throw new Error('parts must contain 1..8 items');
+      const parts = normalizeParts(s, course, payload.parts);
       const item = { id: id('lesson'), courseId: course.id, title: requireText(payload.title, 'title', 160),
-        status: 'planned', phase: 'plan_pending', activePartIndex: 0,
-        parts: payload.parts.map((p, i) => ({ id: id('part'), index: i, title: requireText(p.title, 'part.title', 160),
-          objective: requireText(p.objective, 'part.objective', 2000), status: 'not_started', body: null, sourceRefs: [] })),
-        createdAt: now, updatedAt: now };
-      s.lessons[item.id] = item; result = item; break;
+        status: 'planned', phase: 'plan_pending', activePartIndex: 0, ...lessonLinks(s, course, payload, parts), planRevision: 1,
+        parts, createdAt: now, updatedAt: now };
+      s.lessons[item.id] = item; touchLesson(item); result = item; break;
+    }
+    case 'lesson.updatePlan': {
+      const lesson = requireId(s, 'lessons', payload.lessonId);
+      const course = requireId(s, 'courses', lesson.courseId);
+      if (lesson.phase !== 'plan_pending') throw new Error('Only a lesson plan that is still awaiting approval can be changed');
+      requirePlanRevision(lesson, payload.planRevision, true);
+      if (payload.title !== undefined) lesson.title = requireText(payload.title, 'title', 160);
+      if (payload.parts !== undefined) lesson.parts = normalizeParts(s, course, payload.parts);
+      if (payload.parts !== undefined || payload.topicId !== undefined || payload.conceptIds !== undefined)
+        Object.assign(lesson, lessonLinks(s, course, { topicId: payload.topicId === undefined ? lesson.topicId : payload.topicId, conceptIds: payload.conceptIds }, lesson.parts));
+      lesson.planRevision = lessonPlanRevision(lesson) + 1; touchLesson(lesson);
+      result = { lessonId: lesson.id, planRevision: lesson.planRevision, parts: lesson.parts, topicId: lesson.topicId, conceptIds: lesson.conceptIds }; break;
+    }
+    case 'lesson.link': {
+      // attach (or re-attach) a lesson to its topic / knowledge points; older lessons may have none
+      const lesson = requireId(s, 'lessons', payload.lessonId);
+      const course = requireId(s, 'courses', lesson.courseId);
+      if (payload.topicId === undefined && payload.conceptIds === undefined) throw new Error('lesson.link needs topicId and/or conceptIds');
+      if (payload.topicId !== undefined) lesson.topicId = courseTopic(course, payload.topicId, 'topicId');
+      if (payload.conceptIds !== undefined) lesson.conceptIds = courseConcepts(s, course.id, payload.conceptIds, 'conceptIds');
+      else if (!lesson.conceptIds?.length && lesson.topicId) lesson.conceptIds = lessonLinks(s, course, { topicId: lesson.topicId }, []).conceptIds;
+      lesson.updatedAt = now;
+      result = { lessonId: lesson.id, topicId: lesson.topicId ?? null, conceptIds: lesson.conceptIds ?? [] }; break;
     }
     case 'lesson.approve': {
-      if (actor !== 'learner') throw Object.assign(new Error('Only the learner can approve a lesson plan (the 批准课时计划 button in the AI 学习工作台)'), { code: 'forbidden' });
       const lesson = requireId(s, 'lessons', payload.lessonId);
+      const course = requireId(s, 'courses', lesson.courseId);
       if (lesson.phase !== 'plan_pending') throw new Error('Lesson plan is not awaiting approval');
-      lesson.phase = 'teaching'; lesson.status = 'in_progress'; lesson.parts[0].status = 'in_progress'; lesson.updatedAt = now;
-      result = { lessonId: lesson.id, phase: lesson.phase, current: lesson.parts[0] }; break;
+      requirePlanRevision(lesson, payload.planRevision, actor === 'ai');
+      const consent = approvalConsent(course, actor, payload.consent, 'lesson plan');
+      lesson.phase = 'teaching'; lesson.status = 'in_progress'; lesson.parts[0].status = 'in_progress';
+      lesson.approval = { by: actor, at: now, planRevision: lessonPlanRevision(lesson), ...(consent ? { consent } : {}) };
+      touchLesson(lesson);
+      if (actor === 'ai') autoSummary = `AI 代为批准课时计划「${lesson.title}」（依据：${consent.slice(0, 60)}）`;
+      result = { lessonId: lesson.id, phase: lesson.phase, current: lesson.parts[0], approvedBy: actor, planRevision: lessonPlanRevision(lesson) }; break;
     }
     case 'lesson.partWrite': {
       const lesson = requireId(s, 'lessons', payload.lessonId);
@@ -440,9 +606,9 @@ export function transition(original, action, input = {}, opts = {}) {
         throw new Error('Can only write the current teaching part');
       const part = lesson.parts[payload.partIndex];
       part.body = requireText(payload.body, 'part.body', 60000);
-      part.sourceRefs = Array.isArray(payload.sourceRefs) ? payload.sourceRefs.filter(x => typeof x === 'string').slice(0, 100) : [];
-      lesson.updatedAt = now;
-      result = { lessonId: lesson.id, partIndex: payload.partIndex, stored: true }; break;
+      part.sourceRefs = normalizeSourceRefs(s, s.courses[lesson.courseId], payload.sourceRefs);
+      touchLesson(lesson);
+      result = { lessonId: lesson.id, partIndex: payload.partIndex, stored: true, sourceRefs: part.sourceRefs }; break;
     }
     case 'lesson.cover': {
       const lesson = requireId(s, 'lessons', payload.lessonId);
@@ -453,7 +619,7 @@ export function transition(original, action, input = {}, opts = {}) {
         lesson.activePartIndex++;
         lesson.parts[lesson.activePartIndex].status = 'in_progress';
       } else lesson.phase = 'review_pending';
-      lesson.updatedAt = now;
+      touchLesson(lesson);
       result = { lessonId: lesson.id, phase: lesson.phase, activePartIndex: lesson.activePartIndex }; break;
     }
     case 'assessment.record': {
@@ -461,43 +627,135 @@ export function transition(original, action, input = {}, opts = {}) {
       const concept = requireId(s, 'concepts', payload.conceptId);
       if (lesson.courseId !== concept.courseId) throw new Error('Assessment concept not in lesson course');
       if (!['review_pending', 'teaching'].includes(lesson.phase)) throw new Error('Assessment not allowed in this phase');
-      const score = Number(payload.score), hintCount = Number(payload.hintCount ?? 0);
+      const pending = lesson.pendingQuestion ?? null;
+      if (payload.questionId !== undefined && payload.questionId !== pending?.id) throw new Error(`questionId ${payload.questionId} is not the open question of this lesson${pending ? ` (open: ${pending.id})` : ' (none is open)'}`);
+      const answersPending = pending && (payload.questionId === pending.id || (payload.questionId === undefined && String(payload.question ?? '').trim() === pending.question));
+      const score = Number(payload.score), hintCount = Number(payload.hintCount ?? (answersPending ? pending.hintCount : 0));
       if (!Number.isFinite(score) || score < 0 || score > 1) throw new Error('score must be between 0 and 1');
       if (!Number.isInteger(hintCount) || hintCount < 0 || hintCount > 10) throw new Error('hintCount must be 0..10');
       const record = { id: id('assess'), lessonId: lesson.id, conceptId: concept.id,
         question: requireText(payload.question, 'question'), studentAnswer: requireText(payload.studentAnswer, 'studentAnswer'),
         feedback: requireText(payload.feedback, 'feedback'), score, hintCount,
         transfer: payload.transfer === true, judgedBy: 'model-unverified', recordedAt: now };
+      if (answersPending) {
+        pending.attempts += 1; pending.lastAnswerAt = now; pending.lastScore = score;
+        record.questionId = pending.id; record.attemptNo = pending.attempts;
+        // the question stays open after a wrong answer (hint → try again) unless it is closed explicitly
+        if (score >= 0.8 || payload.close === true) { lesson.answeredQuestions = [...(lesson.answeredQuestions ?? []), { ...pending, closedAt: now }].slice(-20); lesson.pendingQuestion = null; }
+      }
       s.assessments[record.id] = record;
+      touchLesson(lesson);
       // Provisional evidence level only; never claim calibrated mastery probability.
       concept.mastery = score >= 0.8 && record.transfer && hintCount === 0 ? 'demonstrated' : 'developing';
       concept.updatedAt = now;
-      result = { assessment: record, provisionalMastery: concept.mastery }; break;
+      result = { assessment: record, provisionalMastery: concept.mastery, pendingQuestion: lesson.pendingQuestion ?? null }; break;
+    }
+    case 'lesson.ask': {
+      // the question now waiting for the learner's answer (survives a new DSH session)
+      const lesson = requireId(s, 'lessons', payload.lessonId);
+      if (!['teaching', 'review_pending'].includes(lesson.phase)) throw new Error('Questions are asked while teaching or in the review');
+      if (lesson.pendingQuestion && payload.replace !== true)
+        throw new Error(`A question is still waiting for the learner's answer: 「${lesson.pendingQuestion.question.slice(0, 80)}」 (${lesson.pendingQuestion.id}). Record the answer with assessment.record, or pass replace:true to drop it`);
+      const conceptId = payload.conceptId === undefined ? null : courseConcepts(s, lesson.courseId, [payload.conceptId], 'conceptId')[0];
+      lesson.pendingQuestion = { id: id('q'), question: requireText(payload.question, 'question', 5000), conceptId,
+        phase: lesson.phase, partIndex: lesson.phase === 'teaching' ? lesson.activePartIndex : null, askedAt: now, attempts: 0, hintCount: 0, hints: [] };
+      touchLesson(lesson);
+      result = { lessonId: lesson.id, pendingQuestion: lesson.pendingQuestion }; break;
+    }
+    case 'lesson.hint': {
+      const lesson = requireId(s, 'lessons', payload.lessonId);
+      const q = lesson.pendingQuestion;
+      if (!q) throw new Error('No open question to give a hint for (lesson.ask first)');
+      q.hints = [...q.hints, requireText(payload.hint, 'hint', 1000)].slice(-10); q.hintCount = Math.min(10, q.hintCount + 1); q.lastHintAt = now;
+      touchLesson(lesson);
+      result = { lessonId: lesson.id, pendingQuestion: q }; break;
+    }
+    case 'lesson.dropQuestion': {
+      const lesson = requireId(s, 'lessons', payload.lessonId);
+      if (!lesson.pendingQuestion) throw new Error('No open question');
+      lesson.answeredQuestions = [...(lesson.answeredQuestions ?? []), { ...lesson.pendingQuestion, droppedAt: now }].slice(-20);
+      lesson.pendingQuestion = null; touchLesson(lesson);
+      result = { lessonId: lesson.id, pendingQuestion: null }; break;
+    }
+    case 'lesson.checkpoint': {
+      // a short recap of where the learner is, read back first when the lesson resumes (「先回忆」)
+      const lesson = requireId(s, 'lessons', payload.lessonId);
+      lesson.recap = { text: requireText(payload.recap, 'recap', 2000), at: now, by: actor };
+      touchLesson(lesson);
+      result = { lessonId: lesson.id, recap: lesson.recap }; break;
     }
     case 'lesson.reviewEnd': {
       const lesson = requireId(s, 'lessons', payload.lessonId);
       if (lesson.phase !== 'review_pending') throw new Error('Review not pending');
       if (payload.skipped !== true && !Object.values(s.assessments).some(a => a.lessonId === lesson.id))
         throw new Error('A review requires real learner answers, or explicitly skip it');
-      lesson.phase = 'summary_pending'; lesson.reviewSkipped = payload.skipped === true; lesson.updatedAt = now;
-      result = { lessonId: lesson.id, phase: lesson.phase, skipped: lesson.reviewSkipped }; break;
+      const dropped = lesson.pendingQuestion;
+      if (dropped) { lesson.answeredQuestions = [...(lesson.answeredQuestions ?? []), { ...dropped, droppedAt: now }].slice(-20); lesson.pendingQuestion = null; }
+      lesson.phase = 'summary_pending'; lesson.reviewSkipped = payload.skipped === true; touchLesson(lesson);
+      result = { lessonId: lesson.id, phase: lesson.phase, skipped: lesson.reviewSkipped, ...(dropped ? { droppedQuestion: dropped.question } : {}) }; break;
     }
     case 'note.add': {
       const lesson = requireId(s, 'lessons', payload.lessonId);
       const note = { id: id('note'), courseId: lesson.courseId, lessonId: lesson.id,
         title: requireText(payload.title, 'note.title', 160), content: requireText(payload.content, 'note.content', 50_000),
-        author: actor,
-        sourceRefs: Array.isArray(payload.sourceRefs) ? payload.sourceRefs.filter(x => typeof x === 'string').slice(0, 100) : [],
+        author: actor, conceptIds: courseConcepts(s, lesson.courseId, payload.conceptIds, 'conceptIds'),
+        sourceRefs: normalizeSourceRefs(s, s.courses[lesson.courseId], payload.sourceRefs),
         createdAt: now };
       s.notes[note.id] = note; result = note; break;
+    }
+    case 'note.link': {
+      const note = requireId(s, 'notes', payload.noteId);
+      note.conceptIds = courseConcepts(s, note.courseId, payload.conceptIds ?? [], 'conceptIds');
+      note.updatedAt = now;
+      result = { id: note.id, noteId: note.id, conceptIds: note.conceptIds }; break;
     }
     case 'lesson.finish': {
       const lesson = requireId(s, 'lessons', payload.lessonId);
       if (lesson.phase !== 'summary_pending') throw new Error('Finish only after review choice');
       if (!Object.values(s.notes).some(note => note.lessonId === lesson.id) && payload.skipNotes !== true)
         throw new Error('Create a lesson note or explicitly skip notes');
-      lesson.phase = 'complete'; lesson.status = 'complete'; lesson.updatedAt = now;
-      result = { lessonId: lesson.id, status: lesson.status }; break;
+      // end-of-lesson feedback comes next (it may adjust the outline); lesson.feedback completes the lesson
+      lesson.phase = 'feedback_pending'; lesson.notesSkipped = payload.skipNotes === true; touchLesson(lesson);
+      result = { lessonId: lesson.id, phase: lesson.phase, status: lesson.status }; break;
+    }
+    case 'lesson.feedback': {
+      // the learner's own end-of-lesson (or mid-lesson) feedback; adjustOutline opens plan_adjustment_pending
+      const lesson = requireId(s, 'lessons', payload.lessonId);
+      const course = requireId(s, 'courses', lesson.courseId);
+      if (!['feedback_pending', 'teaching'].includes(lesson.phase)) throw new Error('Feedback is collected at the end of a lesson (after lesson.finish) or while teaching');
+      const skipped = payload.skipped === true;
+      const text = skipped ? null : requireText(payload.feedback, 'feedback (the learner\'s own words; or skipped:true)', 4000);
+      const adjust = payload.adjustOutline === true;
+      if (skipped && adjust) throw new Error('adjustOutline needs the learner\'s feedback');
+      const preview = optionalText(payload.nextPreview, 'nextPreview', 2000);
+      const entry = { text, skipped, adjustOutline: adjust, at: now, by: actor, phase: lesson.phase, syllabusRevision: course.syllabus.revision };
+      lesson.feedbackLog = [...(lesson.feedbackLog ?? []), entry].slice(-20);
+      lesson.feedback = entry;
+      if (preview) lesson.nextPreview = { text: preview, at: now };
+      if (adjust) {
+        lesson.adjust = { returnPhase: lesson.phase === 'teaching' ? 'teaching' : 'complete', fromSyllabusRevision: course.syllabus.revision, at: now };
+        lesson.phase = 'plan_adjustment_pending';
+      } else if (lesson.phase === 'feedback_pending') { lesson.phase = 'complete'; lesson.status = 'complete'; }
+      touchLesson(lesson);
+      result = { lessonId: lesson.id, phase: lesson.phase, status: lesson.status, feedback: entry, nextPreview: lesson.nextPreview ?? null }; break;
+    }
+    case 'lesson.adjustDone': {
+      // feedback → outline change → approval → continue (or the learner decided against the change: skipped)
+      const lesson = requireId(s, 'lessons', payload.lessonId);
+      const course = requireId(s, 'courses', lesson.courseId);
+      if (lesson.phase !== 'plan_adjustment_pending') throw new Error('No outline adjustment is pending for this lesson');
+      const skipped = payload.skipped === true;
+      if (!skipped) {
+        if (course.syllabus.revision <= lesson.adjust.fromSyllabusRevision) throw new Error('The outline has not been changed since the feedback; change it (tutor_outline_edit with a reason) or pass skipped:true if the learner decided against it');
+        if (course.status !== 'active') throw Object.assign(new Error(`The adjusted outline (revision ${course.syllabus.revision}) still needs approval: the learner approves it in the workbench, or you approve it (course.approve) if the learner asked you to`), { code: 'conflict', syllabusRevision: course.syllabus.revision });
+      }
+      const preview = optionalText(payload.nextPreview, 'nextPreview', 2000);
+      if (preview) lesson.nextPreview = { text: preview, at: now };
+      lesson.adjust = { ...lesson.adjust, doneAt: now, skipped, toSyllabusRevision: course.syllabus.revision };
+      lesson.phase = lesson.adjust.returnPhase;
+      if (lesson.phase === 'complete') lesson.status = 'complete';
+      touchLesson(lesson);
+      result = { lessonId: lesson.id, phase: lesson.phase, status: lesson.status, adjust: lesson.adjust, nextPreview: lesson.nextPreview ?? null }; break;
     }
     case 'relation.propose': {
       const from = requireId(s, 'concepts', payload.from), to = requireId(s, 'concepts', payload.to);
@@ -555,9 +813,10 @@ export function transition(original, action, input = {}, opts = {}) {
     default: throw new Error(`Unknown tutor action: ${action}`);
   }
   s.revision = original.revision + 1;
+  const summary = opts.summary ?? autoSummary;
   s.events.push({ revision: s.revision, at: now, action, actor,
     entityId: result?.id ?? result?.lessonId ?? result?.courseId ?? null,
-    ...(opts.summary ? { summary: String(opts.summary).slice(0, 200) } : {}) });
+    ...(summary ? { summary: String(summary).slice(0, 200) } : {}) });
   // Bounded ledger: the workbench shows the last 40; keep the file from growing without limit.
   if (s.events.length > MAX_EVENTS) s.events.splice(0, s.events.length - MAX_EVENTS);
   return { state: s, result };
@@ -566,7 +825,8 @@ export function transition(original, action, input = {}, opts = {}) {
 /** Minimal scoped read model; this is domain state, not the DSH Session transcript. */
 export function snapshot(state, courseId) {
   validateState(state);
-  if (!courseId) return { revision: state.revision, goals: Object.values(state.goals), courses: Object.values(state.courses) };
+  if (!courseId) return { revision: state.revision, goals: Object.values(state.goals), courses: Object.values(state.courses),
+    resume: Object.values(state.courses).map((c) => resumePointer(state, c)) };
   const course = requireId(state, 'courses', courseId);
   return { revision: state.revision, course,
     concepts: Object.values(state.concepts).filter(x => x.courseId === courseId && x.status === 'active'),
@@ -575,8 +835,47 @@ export function snapshot(state, courseId) {
     notes: Object.values(state.notes).filter(x => x.courseId === courseId),
     sources: (course.sourceIds ?? []).map(id => state.sources[id]).filter(Boolean),
     assessments: Object.values(state.assessments).filter(x => state.lessons[x.lessonId]?.courseId === courseId),
-    board: liveBoard(state, course) };
+    board: liveBoard(state, course), resume: resumePointer(state, course), outlineSinceApproved: sinceApproved(course) };
 }
+
+const NEXT_STEP = {
+  plan_pending: '课时计划待批准：出示计划请学习者批准（或经同意由 AI 用 lesson.approve 代批）',
+  teaching: '分段讲解中：先帮学习者回忆上次要点；有待答题就从同一题接着',
+  review_pending: '课末复习：一次一题，记录真实作答（有待答题先接着问）',
+  summary_pending: '复习结束：征得同意后写笔记（note.add），或 lesson.finish 显式 skipNotes',
+  feedback_pending: '课末反馈：请学习者说说这节课的感受和想调整的地方（lesson.feedback），并预告下一课',
+  plan_adjustment_pending: '根据反馈调整大纲：tutor_outline_edit（带理由）→ 批准 → lesson.adjustDone',
+  complete: '本课已结束：按预告创建下一课（lesson.create 带 topicId / conceptIds）',
+};
+/**
+ * Where to pick up in a new conversation: the current lesson (course.resume, else the latest unfinished), its part,
+ * the open question with its attempts and hints, the last recap, what was covered and the next-lesson preview.
+ */
+export function resumePointer(state, course) {
+  const lessons = Object.values(state.lessons).filter((l) => l.courseId === course.id).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+  const lesson = state.lessons[course.resume?.lessonId] ?? lessons.filter((l) => l.status !== 'complete').at(-1) ?? lessons.at(-1) ?? null;
+  const preview = lessons.filter((l) => l.nextPreview).sort((a, b) => String(a.nextPreview.at).localeCompare(String(b.nextPreview.at))).at(-1)?.nextPreview ?? null;
+  if (!lesson) return { courseId: course.id, lessonId: null, phase: null, nextPreview: preview,
+    nextStep: course.status === 'active' ? '大纲已批准：创建第一课（lesson.create 带 topicId / conceptIds）' : '大纲待批准：出示大纲请学习者批准（或经同意由 AI 代批）',
+    links: linksFor(state, course.id, { outline: true }) };
+  const part = lesson.parts[lesson.activePartIndex] ?? null;
+  const notes = Object.values(state.notes).filter((n) => n.lessonId === lesson.id).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+  const attempts = Object.values(state.assessments).filter((a) => a.lessonId === lesson.id).sort((a, b) => String(a.recordedAt).localeCompare(String(b.recordedAt))).slice(-3);
+  const q = lesson.pendingQuestion ?? null;
+  return { courseId: course.id, lessonId: lesson.id, lessonNo: lessons.indexOf(lesson) + 1, lessonTitle: lesson.title, phase: lesson.phase,
+    partIndex: lesson.activePartIndex, partTitle: part?.title ?? null, partHasBody: Boolean(part?.body),
+    pendingQuestion: q ? { id: q.id, question: q.question, conceptId: q.conceptId, attempts: q.attempts, hintCount: q.hintCount, hintGiven: q.hintCount > 0, hints: q.hints, askedAt: q.askedAt } : null,
+    recap: lesson.recap ?? null,
+    covered: lesson.parts.filter((p) => p.status === 'covered').map((p) => ({ index: p.index, title: p.title, objective: p.objective })),
+    lastAttempts: attempts.map((a) => ({ question: a.question, score: a.score, conceptId: a.conceptId, at: a.recordedAt })),
+    lastNote: notes.at(-1) ? { id: notes.at(-1).id, title: notes.at(-1).title } : null,
+    topicId: lesson.topicId ?? null, conceptIds: lesson.conceptIds ?? [],
+    feedback: lesson.feedback ?? null, adjust: lesson.adjust ?? null, nextPreview: lesson.nextPreview ?? preview,
+    nextStep: NEXT_STEP[lesson.phase] ?? '',
+    links: linksFor(state, course.id, { lessonIds: [lesson.id], conceptIds: [...(q?.conceptId ? [q.conceptId] : []), ...(lesson.conceptIds ?? [])].slice(0, 8), noteIds: notes.slice(-2).map((n) => n.id) }) };
+}
+/** Stored references of one lesson part / note, readable (legacy free-text strings included) and clickable. */
+export function refsView(state, refs) { return (refs ?? []).map((r) => refView(state, r)); }
 
 /** Board read model: live elements only, concept cards resolved to their current syllabus title. */
 export function liveBoard(state, course) {
@@ -585,6 +884,11 @@ export function liveBoard(state, course) {
   const ids = new Set(live.map((e) => e.id));
   return { courseId: course.id, revision: board.revision,
     elements: live.filter((e) => e.type !== 'arrow' || (ids.has(e.from) && ids.has(e.to))).map((e) => {
+      if (e.type === 'note' && e.noteId) {
+        const n = state.notes?.[e.noteId];
+        return { ...e, text: n?.title ?? '(已删除的笔记)', excerpt: n ? String(n.content).slice(0, 140) : '', noteAuthor: n?.author ?? null,
+          conceptIds: n?.conceptIds ?? [], lessonId: n?.lessonId ?? null, stale: !n };
+      }
       if (e.type !== 'concept') return e;
       const c = state.concepts[e.conceptId];
       return { ...e, text: c?.title ?? '(已删除的知识点)', mastery: c?.mastery ?? 'unverified', stale: !c || c.status !== 'active' };

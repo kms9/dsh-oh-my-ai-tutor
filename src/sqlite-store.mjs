@@ -6,7 +6,7 @@
 // (so core.mjs keeps its pure state-object transitions and nothing is lost in mapping). Writes are one
 // BEGIN IMMEDIATE transaction: read → revision CAS → transition → write only the rows that changed.
 import { DatabaseSync, constants as sqliteConstants } from 'node:sqlite';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -14,7 +14,7 @@ import { newState, validateState, transition, SCHEMA_VERSION, MAX_EVENTS, ACTORS
 import { cardFromRow, rowFromCard, review as fsrsReview, preview as fsrsPreview, replay, spreadOverdue, ratingFromAttempt, RATING_LABEL, STATE_NAME } from './review.mjs';
 
 /** Physical layout version of this database (PRAGMA user_version). Bump only with a migration step below. */
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 const APPLICATION_ID = 0x4f4d5454; // "OMTT": never adopt or reset an unrelated SQLite file
 export const TODO_STATUS = Object.freeze(['open', 'done', 'dropped']);
 
@@ -110,7 +110,7 @@ CREATE VIEW v_events AS SELECT seq, revision, at, actor, action, entity_id, summ
  * transaction together with the user_version bump, so a failure leaves the file at the old version, untouched.
  * A fresh database is created with SCHEMA (= version 1) and then walks the same steps.
  */
-const MIGRATIONS = {
+export const MIGRATIONS = {
   // 2: FSRS review cards (ts-fsrs). Version 1 reserved review_cards / review_logs but never wrote them; only ADD COLUMN,
   // so even a file where someone did write rows keeps them.
   2: `
@@ -151,6 +151,61 @@ CREATE VIEW v_review_logs AS
     l.scheduled_days, l.assessment_id
   FROM review_logs l LEFT JOIN concepts k ON k.id = l.concept_id;
 `,
+  // 3: the learning flow joins up by conceptId — lessons and notes carry topicId / conceptIds, parts and notes carry
+  // structured source references, the outline keeps its change log. Those live in the entity docs (no table change,
+  // no data rewrite: older docs simply have none); this step adds the read views over them and extends
+  // v_knowledge_points with the lessons that teach a knowledge point and the notes attached to it.
+  3: `
+CREATE VIEW v_lessons AS
+  SELECT l.course_id, l.id AS lesson_id, l.title, l.status, l.phase, json_extract(l.doc, '$.topicId') AS topic_id,
+    COALESCE(json_extract(l.doc, '$.conceptIds'), '[]') AS concept_ids, json_extract(l.doc, '$.activePartIndex') AS active_part_index,
+    json_array_length(l.doc, '$.parts') AS parts, json_extract(l.doc, '$.pendingQuestion.question') AS pending_question,
+    json_extract(l.doc, '$.pendingQuestion.attempts') AS pending_attempts, json_extract(l.doc, '$.pendingQuestion.hintCount') AS pending_hints,
+    json_extract(l.doc, '$.feedback.text') AS feedback, json_extract(l.doc, '$.nextPreview.text') AS next_preview,
+    l.created_at, json_extract(l.doc, '$.updatedAt') AS updated_at
+  FROM lessons l;
+CREATE VIEW v_lesson_concepts AS
+  SELECT l.course_id, l.id AS lesson_id, l.title AS lesson_title, l.phase, j.value AS concept_id, k.title AS concept_title
+  FROM lessons l, json_each(l.doc, '$.conceptIds') j LEFT JOIN concepts k ON k.id = j.value;
+CREATE VIEW v_notes AS
+  SELECT n.course_id, n.id AS note_id, n.lesson_id, json_extract(n.doc, '$.title') AS title, n.author,
+    COALESCE(json_extract(n.doc, '$.conceptIds'), '[]') AS concept_ids, substr(json_extract(n.doc, '$.content'), 1, 300) AS excerpt, n.created_at
+  FROM notes n;
+CREATE VIEW v_note_concepts AS
+  SELECT n.course_id, n.id AS note_id, json_extract(n.doc, '$.title') AS title, j.value AS concept_id
+  FROM notes n, json_each(n.doc, '$.conceptIds') j;
+CREATE VIEW v_sources AS
+  SELECT s.id AS source_id, s.kind, s.title, json_extract(s.doc, '$.uri') AS uri, json_extract(s.doc, '$.access') AS access FROM sources s;
+CREATE VIEW v_source_refs AS
+  SELECT l.course_id, 'part' AS owner_kind, l.id AS lesson_id, CAST(p.key AS INTEGER) AS part_index, NULL AS note_id,
+    json_extract(r.value, '$.sourceId') AS source_id, json_extract(r.value, '$.locator') AS locator,
+    json_extract(r.value, '$.page') AS page, json_extract(r.value, '$.seconds') AS seconds
+  FROM lessons l, json_each(l.doc, '$.parts') p, json_each(p.value, '$.sourceRefs') r WHERE r.type = 'object'
+  UNION ALL
+  SELECT n.course_id, 'note', n.lesson_id, NULL, n.id, json_extract(r.value, '$.sourceId'), json_extract(r.value, '$.locator'),
+    json_extract(r.value, '$.page'), json_extract(r.value, '$.seconds')
+  FROM notes n, json_each(n.doc, '$.sourceRefs') r WHERE r.type = 'object';
+CREATE VIEW v_syllabus_changes AS
+  SELECT c.id AS course_id, json_extract(x.value, '$.fromRevision') AS from_revision, json_extract(x.value, '$.toRevision') AS to_revision,
+    json_extract(x.value, '$.at') AS at, json_extract(x.value, '$.actor') AS actor, json_extract(x.value, '$.reason') AS reason,
+    json_extract(x.value, '$.lines') AS lines, json_extract(x.value, '$.forLessonId') AS for_lesson_id
+  FROM courses c, json_each(c.doc, '$.syllabusChanges') x;
+DROP VIEW v_knowledge_points;
+CREATE VIEW v_knowledge_points AS
+  SELECT o.course_id, o.concept_id, o.title, o.topic_id, o.topic_title, o.topic_index, o.sub_index, o.subtopic_id, o.description,
+    k.mastery,
+    (SELECT count(*) FROM assessments a WHERE a.concept_id = o.concept_id) AS attempts,
+    (SELECT round(avg(a.score), 2) FROM assessments a WHERE a.concept_id = o.concept_id) AS avg_score,
+    (SELECT max(a.recorded_at) FROM assessments a WHERE a.concept_id = o.concept_id) AS last_attempt_at,
+    (SELECT count(*) FROM relations r WHERE r.from_id = o.concept_id OR r.to_id = o.concept_id) AS relations,
+    (SELECT json_group_array(element_id) FROM (SELECT element_id FROM v_board_cards b WHERE b.concept_id = o.concept_id AND b.course_id = o.course_id ORDER BY b.ord)) AS board_cards,
+    (SELECT count(*) FROM todos t WHERE t.concept_id = o.concept_id AND t.status = 'open') AS open_todos,
+    rc.id AS review_card_id, rc.state AS review_state, CASE WHEN rc.state = 'new' THEN NULL ELSE rc.due_at END AS next_review_at,
+    rc.reps AS review_reps, rc.revision AS review_revision,
+    (SELECT count(DISTINCT lc.lesson_id) FROM v_lesson_concepts lc WHERE lc.concept_id = o.concept_id) AS lessons,
+    (SELECT count(*) FROM v_note_concepts nc WHERE nc.concept_id = o.concept_id) AS notes
+  FROM v_outline o LEFT JOIN concepts k ON k.id = o.concept_id LEFT JOIN review_cards rc ON rc.concept_id = o.concept_id;
+`,
 };
 
 // collection → table, column extractors (doc is always the full entity)
@@ -166,17 +221,26 @@ const ENTITY = {
 };
 const STATE_KEYS = Object.keys(ENTITY);
 
+/** Consistent copy of a database before a migration: `<db>.bak-v<from>-<time>`, mode 0600 (never wider than the db). */
+export function backupDb(db, path, from, at = new Date().toISOString()) {
+  const target = `${path}.bak-v${from}-${String(at).replace(/[:.]/g, '-')}`;
+  if (existsSync(target)) return target;
+  db.exec(`VACUUM INTO '${target.replaceAll("'", "''")}'`);
+  chmodSync(target, 0o600);
+  return target;
+}
 function conflict(message, extra = {}) { return Object.assign(new Error(message), { code: 'conflict', ...extra }); }
 
 export class SqliteTutorStore {
   /**
    * @param {string} path database file (or ':memory:')
-   * @param {{ legacyJsonPath?: string|null, now?: () => string }} [opts] legacyJsonPath: a JSON state file to import once
+   * @param {{ legacyJsonPath?: string|null, now?: () => string, backupBeforeMigrate?: boolean }} [opts] legacyJsonPath: a JSON state file to import once; an existing db is copied before a migration unless backupBeforeMigrate is false
    */
   constructor(path = defaultDbPath(), opts = {}) {
     this.path = path;
     this.legacyJsonPath = opts.legacyJsonPath === undefined ? (path === ':memory:' ? null : join(dirname(path), 'state.json')) : opts.legacyJsonPath;
     this.now = opts.now ?? (() => new Date().toISOString());
+    this.backupBeforeMigrate = opts.backupBeforeMigrate !== false; // migrate-db.mjs takes its own copy first
     this.db = null;
     this.migration = null; // what happened at open: { imported: bool, from?, counts? }
   }
@@ -189,11 +253,14 @@ export class SqliteTutorStore {
       if (!existsSync(this.path)) closeSync(openSync(this.path, 'wx', 0o600)); // owner-only file
     }
     const db = new DatabaseSync(this.path);
+    let backup = null;
     try {
       db.exec('PRAGMA busy_timeout = 5000');
       const appId = db.prepare('PRAGMA application_id').get().application_id;
       const version = db.prepare('PRAGMA user_version').get().user_version;
       if (appId !== 0 && appId !== APPLICATION_ID) throw new Error(`${this.path} is not an oh-my-ai-tutor database (application_id ${appId})`);
+      // An existing database about to be migrated is copied first (consistent VACUUM INTO, WAL included), owner-only.
+      if (this.path !== ':memory:' && version >= 1 && version < DB_VERSION && this.backupBeforeMigrate !== false) backup = backupDb(db, this.path, version, this.now());
       if (this.path !== ':memory:') db.exec('PRAGMA journal_mode = WAL');
       db.exec('PRAGMA synchronous = NORMAL');
       db.exec('BEGIN IMMEDIATE');
@@ -217,13 +284,19 @@ export class SqliteTutorStore {
         }
         if (from < DB_VERSION && v !== 0) {
           db.prepare("INSERT INTO meta (key, value) VALUES ('dbMigrations', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-            .run(JSON.stringify({ from, to: DB_VERSION, at: this.now() }));
+            .run(JSON.stringify({ from, to: DB_VERSION, at: this.now(), ...(backup ? { backup } : {}) }));
+        }
+        // dedicated marker of the v3 step (written in the same transaction as the step itself)
+        if (from < 3 && DB_VERSION >= 3) {
+          db.prepare("INSERT INTO meta (key, value) VALUES ('migration.v3.learningFlow', ?) ON CONFLICT(key) DO NOTHING")
+            .run(JSON.stringify({ from, at: this.now(), fresh: v === 0, ...(backup ? { backup } : {}), views: ['v_lessons', 'v_lesson_concepts', 'v_notes', 'v_note_concepts', 'v_sources', 'v_source_refs', 'v_syllabus_changes'] }));
         }
         db.exec('COMMIT');
       } catch (e) { db.exec('ROLLBACK'); throw e; }
       void version;
     } catch (e) { db.close(); throw e; }
     this.db = db;
+    this.backup = backup;
     this.#importLegacyOnce();
     this.reviewInit = this.#tx(() => this.#reconcileReviewCards({ spread: true }));
     return db;
@@ -537,7 +610,17 @@ export class SqliteTutorStore {
           FROM relations r LEFT JOIN concepts f ON f.id = r.from_id LEFT JOIN concepts t ON t.id = r.to_id WHERE r.from_id = ? OR r.to_id = ? ORDER BY r.rowid`).all(id, id));
         const attempts = plain(db.prepare('SELECT * FROM v_attempts WHERE concept_id = ? ORDER BY recorded_at DESC').all(id));
         const todos = plain(db.prepare("SELECT * FROM v_todos WHERE concept_id = ? ORDER BY status = 'open' DESC, due_at").all(id));
-        return { ...kp, board_cards: JSON.parse(kp.board_cards ?? '[]'), concept, relations, attempts, todos, review: this.#reviewDetail(id) };
+        // lessons that teach it (lesson.conceptIds), then lessons that only show up through an attempt (older lessons)
+        const taught = plain(db.prepare(`SELECT l.lesson_id, l.title, l.phase, l.status, l.created_at, 'plan' AS via FROM v_lessons l
+          WHERE l.course_id = ? AND EXISTS (SELECT 1 FROM v_lesson_concepts lc WHERE lc.lesson_id = l.lesson_id AND lc.concept_id = ?) ORDER BY l.created_at`).all(courseId, id));
+        const byAttempt = plain(db.prepare(`SELECT DISTINCT l.lesson_id, l.title, l.phase, l.status, l.created_at, 'attempt' AS via FROM v_lessons l
+          JOIN assessments a ON a.lesson_id = l.lesson_id WHERE a.concept_id = ? ORDER BY l.created_at`).all(id)).filter((r) => !taught.some((t) => t.lesson_id === r.lesson_id));
+        const notes = plain(db.prepare(`SELECT n.note_id, n.lesson_id, n.title, n.author, n.excerpt, n.created_at FROM v_notes n
+          WHERE EXISTS (SELECT 1 FROM v_note_concepts nc WHERE nc.note_id = n.note_id AND nc.concept_id = ?) ORDER BY n.created_at DESC`).all(id));
+        const noteCards = plain(db.prepare(`SELECT e.id AS element_id, json_extract(e.doc, '$.noteId') AS note_id FROM board_elements e
+          WHERE e.course_id = ? AND e.deleted = 0 AND e.type = 'note' AND json_extract(e.doc, '$.noteId') IN (SELECT note_id FROM v_note_concepts WHERE concept_id = ?) ORDER BY e.ord`).all(courseId, id));
+        return { ...kp, board_cards: JSON.parse(kp.board_cards ?? '[]'), concept, relations, attempts, todos, review: this.#reviewDetail(id),
+          lessons: [...taught, ...byAttempt], notes, note_cards: noteCards };
       }
       default: throw new Error(`Unknown data query: ${name}`);
     }
@@ -553,7 +636,8 @@ export class SqliteTutorStore {
   }
 
   // ---------- model-facing read-only SQL (tutor_table_query) ----------
-  static QUERYABLE = Object.freeze(['v_knowledge_points', 'v_outline', 'v_board_cards', 'v_attempts', 'v_questions', 'v_todos', 'v_events', 'v_review_cards', 'v_review_logs']);
+  static QUERYABLE = Object.freeze(['v_knowledge_points', 'v_outline', 'v_board_cards', 'v_attempts', 'v_questions', 'v_todos', 'v_events', 'v_review_cards', 'v_review_logs',
+    'v_lessons', 'v_lesson_concepts', 'v_notes', 'v_note_concepts', 'v_sources', 'v_source_refs', 'v_syllabus_changes']);
   /**
    * One SELECT/WITH statement on a separate read-only connection. No RECURSIVE (cannot be interrupted once running),
    * no ATTACH/PRAGMA, only the documented views; at most `limit` (<= 200) rows, truncation reported.

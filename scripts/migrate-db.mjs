@@ -15,10 +15,10 @@ let backup = null;
 if (from < DB_VERSION && !process.argv.includes('--no-backup')) {
   backup = `${path}.bak-v${from}-${new Date().toISOString().replace(/[:.]/g, '-')}`;
   ro.exec(`VACUUM INTO '${backup.replaceAll("'", "''")}'`); // consistent copy, WAL included
-  chmodSync(backup, statSync(path).mode & 0o777); // the copy is as private as the original (tutor.db is 0600)
+  chmodSync(backup, statSync(path).mode & 0o600); // owner-only, never wider than the original (tutor.db is 0600)
 }
 ro.close();
-const store = new SqliteTutorStore(path, { legacyJsonPath: null });
+const store = new SqliteTutorStore(path, { legacyJsonPath: null, backupBeforeMigrate: false }); // the copy above is the backup
 store.open();
 const to = store.db.prepare('PRAGMA user_version').get().user_version;
 const cards = store.db.prepare("SELECT state, count(*) AS n FROM review_cards GROUP BY state").all().map((r) => `${r.state}=${r.n}`).join(' ');

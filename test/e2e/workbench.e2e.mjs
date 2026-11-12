@@ -306,24 +306,24 @@ await step('approval gate: the AI cannot approve; a stale approve click is refus
   await slow.waitForSelector('[data-testid=approval-banner]');
   // the learner's screen shows revision N; the AI edits (N+1) and the page has not refreshed yet
   const o = await tools.tutor_visualize.execute({ courseId: cid, view: 'outline' });
-  await tools.tutor_outline_edit.execute({ courseId: cid, syllabusRevision: o.syllabusRevision, operations: [{ op: 'renameTopic', topicId: o.topics[0].id, title: o.topics[0].title + '·' }] });
+  await tools.tutor_outline_edit.execute({ reason: 'e2e：模拟 AI 按学习者要求改大纲', courseId: cid, syllabusRevision: o.syllabusRevision, operations: [{ op: 'renameTopic', topicId: o.topics[0].id, title: o.topics[0].title + '·' }] });
   await slow.click('[data-testid=approve-outline]').catch(() => {});
   // the page was showing an approved outline (no button) or the old revision: either way nothing unseen gets approved
   await eventually(async () => assert.equal((await course()).status, 'draft'));
   await slow.close();
   const o2 = await tools.tutor_visualize.execute({ courseId: cid, view: 'outline' });
-  await tools.tutor_outline_edit.execute({ courseId: cid, syllabusRevision: o2.syllabusRevision, operations: [{ op: 'renameTopic', topicId: o2.topics[0].id, title: o.topics[0].title }] });
+  await tools.tutor_outline_edit.execute({ reason: 'e2e：模拟 AI 按学习者要求改大纲', courseId: cid, syllabusRevision: o2.syllabusRevision, operations: [{ op: 'renameTopic', topicId: o2.topics[0].id, title: o.topics[0].title }] });
   const stale = await context.newPage();
   await stale.goto(`${url}?view=outline&poll=600000`);
   await stale.waitForSelector('[data-testid=approve-outline]');
   const o3 = await tools.tutor_visualize.execute({ courseId: cid, view: 'outline' });
-  await tools.tutor_outline_edit.execute({ courseId: cid, syllabusRevision: o3.syllabusRevision, operations: [{ op: 'renameSubtopic', subtopicId: o3.topics[1].subtopics[0].id, title: o3.topics[1].subtopics[0].title + '（AI 未读）' }] });
+  await tools.tutor_outline_edit.execute({ reason: 'e2e：模拟 AI 按学习者要求改大纲', courseId: cid, syllabusRevision: o3.syllabusRevision, operations: [{ op: 'renameSubtopic', subtopicId: o3.topics[1].subtopics[0].id, title: o3.topics[1].subtopics[0].title + '（AI 未读）' }] });
   await stale.click('[data-testid=approve-outline]');
   await stale.waitForSelector('[data-testid=notice].err');
   assert.equal((await course()).status, 'draft', 'approve with the stale on-screen revision is refused');
   await stale.close();
   const o4 = await tools.tutor_visualize.execute({ courseId: cid, view: 'outline' });
-  await tools.tutor_outline_edit.execute({ courseId: cid, syllabusRevision: o4.syllabusRevision, operations: [{ op: 'renameSubtopic', subtopicId: o4.topics[1].subtopics[0].id, title: o3.topics[1].subtopics[0].title }] });
+  await tools.tutor_outline_edit.execute({ reason: 'e2e：模拟 AI 按学习者要求改大纲', courseId: cid, syllabusRevision: o4.syllabusRevision, operations: [{ op: 'renameSubtopic', subtopicId: o4.topics[1].subtopics[0].id, title: o3.topics[1].subtopics[0].title }] });
 });
 
 await step('outline: rename during the default 1 s poll keeps its revision; a conflict keeps the draft (review #2)', async () => {
@@ -333,7 +333,7 @@ await step('outline: rename during the default 1 s poll keeps its revision; a co
   await page.fill('[data-testid=inline-edit]', '学习者还在打字');
   // AI renames the SAME topic while the editor is open; wait for at least one poll to land
   const o = await tools.tutor_visualize.execute({ courseId: cid, view: 'outline' });
-  await tools.tutor_outline_edit.execute({ courseId: cid, syllabusRevision: o.syllabusRevision, operations: [{ op: 'renameTopic', topicId: t.id, title: 'AI 并发改名' }] });
+  await tools.tutor_outline_edit.execute({ reason: 'e2e：模拟 AI 按学习者要求改大纲', courseId: cid, syllabusRevision: o.syllabusRevision, operations: [{ op: 'renameTopic', topicId: t.id, title: 'AI 并发改名' }] });
   await eventually(async () => assert.equal(Number(await page.getAttribute('[data-testid=tutor-workbench]', 'data-revision')), (await readState()).revision));
   await page.keyboard.press('Enter');
   await page.waitForSelector('[data-testid=notice].err');
@@ -348,7 +348,7 @@ await step('outline: rename during the default 1 s poll keeps its revision; a co
 
 await step('outline: AI edit via tutor_outline_edit is visible in the UI', async () => {
   const o = await tools.tutor_visualize.execute({ courseId: cid, view: 'outline' });
-  const r = await tools.tutor_outline_edit.execute({ courseId: cid, syllabusRevision: o.syllabusRevision, operations: [
+  const r = await tools.tutor_outline_edit.execute({ reason: 'e2e：模拟 AI 按学习者要求改大纲', courseId: cid, syllabusRevision: o.syllabusRevision, operations: [
     { op: 'renameSubtopic', subtopicId: o.topics[0].subtopics[1].id, title: '适用场景：词汇、事实与概念（AI 改）' },
     { op: 'addSubtopic', topicId: o.topics[1].id, title: '测试效应与提取练习（AI 加）' },
   ] });
@@ -502,7 +502,7 @@ await step('mind map: an AI edit during a drag waits for the gesture; the drop t
   const revBefore = await outlineRev();
   await mmDrag(src.id, target.id, 'in', { hold: async () => {
     const o = await tools.tutor_visualize.execute({ courseId: cid, view: 'outline' });
-    await tools.tutor_outline_edit.execute({ courseId: cid, syllabusRevision: o.syllabusRevision, operations: [{ op: 'renameTopic', topicId: ts[3].id, title: renamed }] });
+    await tools.tutor_outline_edit.execute({ reason: 'e2e：模拟 AI 按学习者要求改大纲', courseId: cid, syllabusRevision: o.syllabusRevision, operations: [{ op: 'renameTopic', topicId: ts[3].id, title: renamed }] });
     await page.waitForTimeout(1600); // more than one poll
     assert.equal(await page.locator(`[data-testid=mindmap-elixir] .me-tpc:has-text("${renamed}")`).count(), 0, 'map not refreshed under the pointer');
     assert.equal(await page.locator('[data-testid=mindmap-elixir] .mind-elixir-ghost').evaluate((g) => g.style.display), 'block', 'drag still in progress');
@@ -517,7 +517,7 @@ await step('mind map: AI reorders and prunes via tutor_outline_edit; map, list a
   const o = await tools.tutor_visualize.execute({ courseId: cid, view: 'mindmap' });
   const last = o.hierarchy.children.at(-1);
   const prune = o.hierarchy.children[3].children.at(-1);
-  await tools.tutor_outline_edit.execute({ courseId: cid, syllabusRevision: o.syllabusRevision, operations: [
+  await tools.tutor_outline_edit.execute({ reason: 'e2e：模拟 AI 按学习者要求改大纲', courseId: cid, syllabusRevision: o.syllabusRevision, operations: [
     { op: 'moveTopic', topicId: last.id, beforeId: o.hierarchy.children[0].id }, { op: 'removeSubtopic', subtopicId: prune.id },
   ] });
   await eventually(async () => assert.equal(await page.locator(mmNode(prune.id)).count(), 0));

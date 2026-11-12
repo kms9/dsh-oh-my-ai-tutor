@@ -27,25 +27,62 @@ const course = (ctx) => ctx.state.courses[ctx.cid];
 const topics = (ctx) => course(ctx).syllabus.topics;
 const rev = (ctx) => course(ctx).syllabus.revision;
 
-test('#1 approval is learner-only and must match the outline revision on screen', () => {
+test('#1 approval: learner, or the AI on the learner\'s say-so; always one approve of the exact revision', () => {
   const ctx = seed();
-  assert.throws(() => ctx.run('course.approve', { courseId: ctx.cid, syllabusRevision: rev(ctx) }, 'ai'), (e) => e.code === 'forbidden' && /Only the learner/.test(e.message));
+  // the AI without the learner's consent is refused
+  assert.throws(() => ctx.run('course.approve', { courseId: ctx.cid, syllabusRevision: rev(ctx) }, 'ai'), (e) => e.code === 'forbidden' && /only when the learner asked/.test(e.message));
   assert.throws(() => ctx.run('course.approve', { courseId: ctx.cid }, 'learner'), /syllabusRevision is required/);
+  assert.throws(() => ctx.run('course.approve', { courseId: ctx.cid, consent: '交给你' }, 'ai'), /syllabusRevision is required/);
   const seen = rev(ctx);
   ctx.run('course.editOutline', { courseId: ctx.cid, syllabusRevision: seen, operations: [{ op: 'renameTopic', topicId: topics(ctx)[0].id, title: 'unseen' }] }, 'ai');
   assert.throws(() => ctx.run('course.approve', { courseId: ctx.cid, syllabusRevision: seen }, 'learner'), (e) => e.code === 'conflict' && e.syllabusRevision === seen + 1);
+  // the AI's approval is CAS-checked as well
+  assert.throws(() => ctx.run('course.approve', { courseId: ctx.cid, syllabusRevision: seen, consent: '交给你' }, 'ai'), (e) => e.code === 'conflict');
   assert.equal(course(ctx).status, 'draft');
-  ctx.run('course.approve', { courseId: ctx.cid, syllabusRevision: seen + 1 }, 'learner');
+  ctx.run('course.approve', { courseId: ctx.cid, syllabusRevision: seen + 1, consent: '学习者：大纲你看着批了就行' }, 'ai');
   assert.equal(course(ctx).status, 'active');
-  assert.equal(course(ctx).syllabus.approvedBy, 'learner');
+  assert.equal(course(ctx).syllabus.approvedBy, 'ai');
+  assert.equal(course(ctx).syllabus.approval.consent, '学习者：大纲你看着批了就行');
+  assert.equal(course(ctx).syllabus.lastApproved.revision, seen + 1);
+  const ev = ctx.state.events.at(-1);
+  assert.equal(ev.actor, 'ai'); assert.match(ev.summary, /AI 代为批准大纲第 \d+ 版/);
+  // lesson plan: the AI needs consent and the plan revision; the learner may approve as before
   const lesson = ctx.run('lesson.create', { courseId: ctx.cid, title: 'L', parts: [{ title: 'p', objective: 'o' }] });
-  assert.throws(() => ctx.run('lesson.approve', { lessonId: lesson.id }, 'ai'), (e) => e.code === 'forbidden');
-  ctx.run('lesson.approve', { lessonId: lesson.id }, 'learner');
-  assert.ok(!WRITE_ACTIONS.includes('course.approve') && !WRITE_ACTIONS.includes('lesson.approve'), 'AI tool cannot even name the approve actions');
-  assert.ok(LEARNER_ACTIONS.includes('course.approve'));
+  assert.equal(lesson.planRevision, 1);
+  assert.throws(() => ctx.run('lesson.approve', { lessonId: lesson.id, planRevision: 1 }, 'ai'), (e) => e.code === 'forbidden');
+  assert.throws(() => ctx.run('lesson.approve', { lessonId: lesson.id, consent: '交给你' }, 'ai'), /planRevision is required/);
+  ctx.run('lesson.updatePlan', { lessonId: lesson.id, planRevision: 1, parts: [{ title: 'p2', objective: 'o2' }] }, 'learner');
+  assert.throws(() => ctx.run('lesson.approve', { lessonId: lesson.id, planRevision: 1, consent: '交给你' }, 'ai'), (e) => e.code === 'conflict' && e.planRevision === 2);
+  assert.throws(() => ctx.run('lesson.approve', { lessonId: lesson.id, planRevision: 1 }, 'learner'), (e) => e.code === 'conflict');
+  const ok = ctx.run('lesson.approve', { lessonId: lesson.id, planRevision: 2, consent: '交给你' }, 'ai');
+  assert.equal(ok.approvedBy, 'ai'); assert.equal(ctx.state.lessons[lesson.id].approval.consent, '交给你');
+  assert.ok(WRITE_ACTIONS.includes('course.approve') && WRITE_ACTIONS.includes('lesson.approve'), 'the AI tool can approve (with consent)');
+  assert.ok(LEARNER_ACTIONS.includes('course.approve') && LEARNER_ACTIONS.includes('course.setApproval'));
 });
 
-test('#1 tutor_write cannot approve; the workbench RPC approves only the shown revision', async () => {
+test('#1 skip approval: the learner delegates (交给你), the AI still approves once per revision, and can be taken back', () => {
+  const ctx = seed();
+  assert.throws(() => ctx.run('course.setApproval', { courseId: ctx.cid, mode: 'delegated' }, 'ai'), (e) => e.code === 'forbidden');
+  ctx.run('course.setApproval', { courseId: ctx.cid, mode: 'delegated', consent: '以后大纲和课时计划都交给你' }, 'ai');
+  assert.equal(course(ctx).approvalMode, 'delegated');
+  // delegation never auto-activates: the outline stays draft until an approve
+  assert.equal(course(ctx).status, 'draft');
+  ctx.run('course.approve', { courseId: ctx.cid, syllabusRevision: rev(ctx) }, 'ai');
+  assert.equal(course(ctx).status, 'active');
+  assert.equal(course(ctx).syllabus.approval.delegated, true);
+  assert.equal(course(ctx).syllabus.approval.consent, '以后大纲和课时计划都交给你');
+  const l = ctx.run('lesson.create', { courseId: ctx.cid, title: 'L', parts: [{ title: 'p', objective: 'o' }] });
+  assert.equal(ctx.state.lessons[l.id].phase, 'plan_pending', 'a new plan is not approved by itself');
+  ctx.run('lesson.approve', { lessonId: l.id, planRevision: 1 }, 'ai');
+  assert.equal(ctx.state.lessons[l.id].phase, 'teaching');
+  ctx.run('course.setApproval', { courseId: ctx.cid, mode: 'learner' }, 'learner');
+  ctx.run('course.editOutline', { courseId: ctx.cid, syllabusRevision: rev(ctx), operations: [{ op: 'renameTopic', topicId: topics(ctx)[0].id, title: 'x' }] }, 'ai');
+  assert.throws(() => ctx.run('course.approve', { courseId: ctx.cid, syllabusRevision: rev(ctx) }, 'ai'), (e) => e.code === 'forbidden');
+  ctx.run('course.setApproval', { courseId: ctx.cid, mode: 'delegated' }, 'learner');
+  assert.match(course(ctx).approvalDelegation.consent, /交给 AI 批准/);
+});
+
+test('#1 tutor_write approves with consent; the workbench RPC approves only the shown revision', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'tutor-review-'));
   try {
     const store = new JsonTutorStore(join(dir, 'state.json'));
@@ -54,14 +91,19 @@ test('#1 tutor_write cannot approve; the workbench RPC approves only the shown r
     const goal = (await w('goal.create', { title: 'g', expectedOutcome: 'o' })).result;
     const c = (await w('course.create', { goalId: goal.id, title: 'c' })).result;
     await w('course.plan', { courseId: c.id, syllabusRevision: 0, topics: [{ title: 'T', subtopics: [{ title: 'x' }] }] });
-    // even bypassing the enum (the host validates it), the core refuses an AI approval
-    await assert.rejects(w('course.approve', { courseId: c.id, syllabusRevision: 1 }), /Only the learner/);
+    await assert.rejects(w('course.approve', { courseId: c.id, syllabusRevision: 1 }), /only when the learner asked/);
     const rpc = (action, input) => dispatch(store, { method: 'mutate', payload: { action, input } });
     await assert.rejects(rpc('course.approve', { courseId: c.id, syllabusRevision: 0 }), (e) => e.code === 'conflict');
     const ok = await rpc('course.approve', { courseId: c.id, syllabusRevision: 1 });
     assert.equal(ok.result.status, 'active');
     const errors = validateArgs(tools.tutor_write.parameters, { action: 'course.approve', payload_json: '{}' });
-    assert.ok(errors.length > 0, 'host schema rejects course.approve as a tutor_write action');
+    assert.deepEqual(errors, [], 'course.approve is a tutor_write action now');
+    // the AI re-plans: a reason is required by the tool, then approves with the learner's words
+    await assert.rejects(w('course.plan', { courseId: c.id, syllabusRevision: 1, topics: [{ title: 'T2', subtopics: [{ title: 'y' }] }] }), /reason is required/);
+    await w('course.plan', { courseId: c.id, syllabusRevision: 1, reason: '学习者说想先学 T2', topics: [{ title: 'T2', subtopics: [{ title: 'y' }] }] });
+    const a = await w('course.approve', { courseId: c.id, syllabusRevision: 2, consent: '你直接批准吧' });
+    assert.equal(a.result.approvedBy, 'ai');
+    assert.ok(a.links.some((l) => l.kind === 'outline' && l.href.startsWith('https://tutor.invalid/outline/')));
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
@@ -134,7 +176,7 @@ test('#8 strict tool schemas: op shapes, no ids on new notes, refs inside one ba
   assert.ok(validateArgs(P, { courseId: 'c', baseRevision: 1, operations: [{ op: 'add', type: 'note', id: 'note-1', text: 'x' }] }).length, 'model-chosen ids are rejected by the host');
   assert.ok(validateArgs(P, { courseId: 'c', baseRevision: 1, operations: [{ op: 'add', type: 'rectangle', text: 'x' }] }).length);
   assert.ok(validateArgs(P, { courseId: 'c', operations: [{ op: 'delete', id: 'x' }] }).length, 'baseRevision required');
-  assert.deepEqual(validateArgs(O, { courseId: 'c', syllabusRevision: 2, operations: [{ op: 'moveSubtopic', subtopicId: 's', beforeId: 't' }] }), []);
+  assert.deepEqual(validateArgs(O, { courseId: 'c', syllabusRevision: 2, reason: 'r', operations: [{ op: 'moveSubtopic', subtopicId: 's', beforeId: 't' }] }), []);
   assert.ok(validateArgs(O, { courseId: 'c', operations: [{ op: 'renameTopic', topicId: 't', title: 'x' }] }).length, 'syllabusRevision required');
   assert.ok(validateArgs(O, { courseId: 'c', syllabusRevision: 1, operations: [{ op: 'addTopic', id: 'x', title: 'x', subtopics: [{ title: 'y' }] }] }).length);
   assert.ok(validateArgs(O, { courseId: 'c', syllabusRevision: 1, operations: [{ op: 'frobnicate' }] }).length);

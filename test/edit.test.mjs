@@ -86,7 +86,7 @@ test('store + tools + rpc share one file; learner and AI edits are both visible 
   const course = (await tools.tutor_write.execute({ action: 'course.create', payload_json: JSON.stringify({ goalId: goal.id, title: 'c' }) })).result;
   await tools.tutor_write.execute({ action: 'course.plan', payload_json: JSON.stringify({ courseId: course.id, syllabusRevision: 0, topics: [{ title: 'T', subtopics: [{ title: 'x' }, { title: 'y' }] }] }) });
   const outline = await tools.tutor_visualize.execute({ courseId: course.id, view: 'outline' });
-  const ai = await tools.tutor_outline_edit.execute({ courseId: course.id, syllabusRevision: outline.syllabusRevision, operations: [{ op: 'renameTopic', topicId: outline.topics[0].id, title: 'T (AI)' }] });
+  const ai = await tools.tutor_outline_edit.execute({ reason: 'test', courseId: course.id, syllabusRevision: outline.syllabusRevision, operations: [{ op: 'renameTopic', topicId: outline.topics[0].id, title: 'T (AI)' }] });
   assert.equal(ai.outline.topics[0].title, 'T (AI)');
   await dispatch(store, { method: 'mutate', payload: { action: 'course.editOutline', input: { courseId: course.id, syllabusRevision: ai.outline.syllabusRevision, operations: [{ op: 'moveSubtopic', subtopicId: outline.topics[0].subtopics[1].id, toIndex: 0 }] } } });
   await assert.rejects(dispatch(store, { method: 'mutate', payload: { action: 'assessment.record', input: {} } }), /not allowed/);
