@@ -3,7 +3,7 @@
 // The plugin runs the same migrations itself on start (SqliteTutorStore.open); this script lets you do it, and keep a
 // copy, before restarting DSH.  Usage: node scripts/migrate-db.mjs [--db ~/.dsh/oh-my-ai-tutor/tutor.db] [--no-backup]
 import { DatabaseSync } from 'node:sqlite';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync, chmodSync } from 'node:fs';
 import { SqliteTutorStore, DB_VERSION, defaultDbPath } from '../src/sqlite-store.mjs';
 
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
@@ -15,6 +15,7 @@ let backup = null;
 if (from < DB_VERSION && !process.argv.includes('--no-backup')) {
   backup = `${path}.bak-v${from}-${new Date().toISOString().replace(/[:.]/g, '-')}`;
   ro.exec(`VACUUM INTO '${backup.replaceAll("'", "''")}'`); // consistent copy, WAL included
+  chmodSync(backup, statSync(path).mode & 0o777); // the copy is as private as the original (tutor.db is 0600)
 }
 ro.close();
 const store = new SqliteTutorStore(path, { legacyJsonPath: null });
