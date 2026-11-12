@@ -259,3 +259,36 @@
 .omt .kg-legend>div{display:flex;align-items:center;gap:6px;margin:2px 0}
 .omt .kg-lg-dot{width:9px;height:9px;border-radius:50%;border:2px solid #6273dd;background:#eef0fb;display:inline-block}.omt .kg-lg-dot.big{width:11px;height:11px;border-width:3px;background:#cfd6f6}
 .omt .kg-lg-line{width:18px;height:0;border-top:2px solid #64748b;display:inline-block}.omt .kg-lg-line.contains{border-top:2px dashed #6273dd}.omt .kg-lg-line.cand{border-top:2px dashed #b8860b}
+/* 数据 tab: tables, knowledge point detail, to-dos (Glide Data Grid / FullCalendar are lazy chunks) */
+.omt .linkbtn{border:0;background:none;padding:2px 4px;margin:0 4px 0 0;font:inherit;font-size:12px;color:#3346b8;cursor:pointer;border-radius:4px;text-decoration:underline;text-underline-offset:2px}
+.omt .linkbtn:hover{background:#eef1fc}
+.omt .muted{color:#8a96aa}
+.omt .dsel{font:inherit;font-size:12px;border:1px solid #dfe5ef;border-radius:7px;padding:3px 6px;background:#fff}
+.omt .dgwrap{border:1px solid #e3e8f1;border-radius:9px;overflow:hidden;background:#fff;margin-bottom:10px}
+.omt .kpdrawer{border-left:3px solid #4256c4}
+.omt .kpdrawer .kphead{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+.omt .kplinks{display:flex;flex-wrap:wrap;gap:4px 6px;align-items:center;margin:6px 0}
+.omt .kpsec{margin-top:8px;border-top:1px dashed #e3e8f1;padding-top:6px}
+.omt .duetoday{padding:8px 10px;margin-bottom:8px}
+.omt .dueitem{display:flex;align-items:center;gap:8px;padding:4px 0;border-top:1px solid #f0f2f7;font-size:12.5px;cursor:pointer}
+.omt .dueitem .grow{flex:1}
+.omt .dueitem.late .small{color:#b4472f;font-weight:600}
+.omt .dueitem.picked{background:#eef1fc}
+.omt .todoform{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.omt .todoform input,.omt .todoform select{font:inherit;font-size:12px;border:1px solid #dfe5ef;border-radius:7px;padding:4px 7px;background:#fff}
+.omt .todoform input[data-testid=todo-title]{flex:1;min-width:150px}
+.omt .todoform .action{margin:0;padding:5px 12px}
+.omt .todo-cal{font-size:12px}
+.omt .todo-cal .fc-event{cursor:pointer}
+.omt .banner.linknote{margin:6px 0;padding:6px 10px;background:#fff8e6;border-color:#f0c56a}
+.omt .banner.linknote .tbtn{margin-left:4px}
+/* a card reached through a link: amber ring that pulses three times, then stays */
+.omt .rf-card.focus{outline:3px solid #f0a020;outline-offset:3px;animation:omtFocusPulse 0.9s ease-in-out 3}
+@keyframes omtFocusPulse{0%,100%{outline-color:#f0a020;outline-offset:3px}50%{outline-color:#ffd27a;outline-offset:7px}}
+.omt .treerow.linkflash{background:#fff3d6;box-shadow:inset 3px 0 0 #f0a020;transition:background .3s}
+.omt .todo-cal{--fc-button-bg-color:#fff;--fc-button-border-color:#e0e6ef;--fc-button-text-color:#5d6c82;--fc-button-hover-bg-color:#f2f5fd;--fc-button-hover-border-color:#a7b3ef;
+  --fc-button-active-bg-color:#e6ecfc;--fc-button-active-border-color:#a7b3ef;--fc-today-bg-color:#fff8e6;--fc-border-color:#e7ebf3;--fc-now-indicator-color:#d64545}
+.omt .todo-cal .fc .fc-button{font-size:12px;padding:3px 9px;color:#5d6c82;box-shadow:none}
+.omt .todo-cal .fc .fc-button-primary:not(:disabled).fc-button-active{color:#354da5}
+.omt .todo-cal .fc .fc-toolbar-title{font-size:15px;font-weight:650;color:#1d2433}
+.omt .todo-cal .fc .fc-toolbar.fc-header-toolbar{margin-bottom:8px}

@@ -2,13 +2,14 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { lazyComponent } from './chunks.jsx';
 import { arrangeOps } from '../board-layout.mjs';
 import { markdownToHtml, MASTERY_LABEL, ACTION_LABEL, relTime } from './layout.mjs';
+import { DataView } from './data-view.jsx';
 
 // heavy views load on first use (DSH: package-local chunks lib/client.flow.js and lib/client.mindmap.js)
 const BoardFlow = lazyComponent('flow', 'BoardFlow');
 const GraphFlow = lazyComponent('flow', 'GraphFlow');
 const MindElixirMap = lazyComponent('mindmap', 'MindElixirMap');
-const ZOOM_TABS = ['mindmap', 'graph', 'board'];
-const TABS = [['outline', '课程大纲'], ['mindmap', '思维导图'], ['graph', '知识图谱'], ['board', '知识白板']];
+const ZOOM_TABS = ['mindmap', 'graph', 'board', 'data'];
+const TABS = [['outline', '课程大纲'], ['mindmap', '思维导图'], ['graph', '知识图谱'], ['board', '知识白板'], ['data', '数据']];
 const PHASES = [['plan_pending', '01 · 课时计划'], ['teaching', '02 · 分段讲解'], ['review_pending', '03 · Review'], ['summary_pending', '04 · 笔记']];
 const PART_STATUS = { not_started: '未开始', in_progress: '讲解中', covered: '已讲完' };
 
@@ -91,6 +92,16 @@ export function Workbench({ api, visible = true, initialView, navRevision, pollM
   const [selected, setSelected] = useState(null); // conceptId
   const [lessonId, setLessonId] = useState(null);
   const [partIndex, setPartIndex] = useState(null);
+  // cross-view links: { id|conceptId, nonce } — a new nonce re-runs the jump even for the same target
+  const [boardFocus, setBoardFocus] = useState(null);
+  const [dataFocus, setDataFocus] = useState(null);
+  const [outlineFocus, setOutlineFocus] = useState(null);
+  const nav = useMemo(() => ({
+    toCard(elementId, conceptId) { if (conceptId) setSelected(conceptId); if (!elementId) return; setTab('board'); setBoardFocus({ id: elementId, nonce: Date.now() }); },
+    toDetail(conceptId) { if (!conceptId) return; setSelected(conceptId); setTab('data'); setDataFocus({ conceptId, nonce: Date.now() }); },
+    toOutline(conceptId) { if (conceptId) setSelected(conceptId); setTab('outline'); setOutlineFocus({ conceptId, nonce: Date.now() }); },
+    toGraph(conceptId) { if (conceptId) setSelected(conceptId); setTab('graph'); },
+  }), []);
   const revRef = useRef(-1);
   const courseRef = useRef(null);
   courseRef.current = courseId;
@@ -146,6 +157,22 @@ export function Workbench({ api, visible = true, initialView, navRevision, pollM
       flash(conflict
         ? (draft ? 'AI 或其他窗口刚改过这里，没有保存。已读到最新版本，你的草稿还在，确认后再保存一次。' : 'AI 或其他窗口刚改过这里，没有保存。已刷新到最新版本，请看一眼再操作。')
         : `未保存：${e.message}`, true);
+      await reload().catch(() => {});
+      return false;
+    } finally { setBusy(false); }
+  }, [api, reload]);
+
+  /** Learner to-do write (row revision CAS); same conflict wording as every other learner write. */
+  const todoWrite = useCallback(async (op, input) => {
+    setBusy(true);
+    try {
+      await api.call('todo', { op, input });
+      await reload();
+      flash(op === 'create' ? '已添加待办' : input.status === 'done' ? '已标为完成' : input.status === 'open' ? '已重新打开' : '已保存待办');
+      return true;
+    } catch (e) {
+      const conflict = e.code === 'tutor/conflict' || /changed|conflict/i.test(e.message);
+      flash(conflict ? 'AI 或其他窗口刚改过这条待办，没有保存。已刷新到最新版本，请看一眼再操作。' : `未保存：${e.message}`, true);
       await reload().catch(() => {});
       return false;
     } finally { setBusy(false); }
@@ -283,15 +310,23 @@ export function Workbench({ api, visible = true, initialView, navRevision, pollM
           {/* zero-height sticky toast: saving/conflict notices never shift the layout under the pointer */}
           <div className="noticebar">{notice && <div className={`notice ${notice.err ? 'err' : ''}`} data-testid="notice" role="status">{notice.text}</div>}</div>
           {(tab === 'outline' || tab === 'mindmap') && <ApprovalBanner course={course} busy={busy} onApprove={() => mutate('course.approve', { courseId: course.id, syllabusRevision }, `学习者批准大纲第 ${syllabusRevision} 版`, '大纲已批准')} />}
-          {tab === 'outline' && <OutlineView topics={topics} busy={busy} edit={outlineEdit} syllabusRevision={syllabusRevision} selected={selectedConcept?.id} onSelect={setSelected} />}
+          {tab === 'outline' && <OutlineView topics={topics} busy={busy} edit={outlineEdit} syllabusRevision={syllabusRevision} selected={selectedConcept?.id} onSelect={setSelected} focus={outlineFocus} nav={nav} />}
           {tab === 'mindmap' && <MindmapView view={views.mindmap} topics={topics} busy={busy} edit={outlineEdit} syllabusRevision={syllabusRevision} selected={selectedConcept?.id} onSelectConcept={setSelected} flash={flash} wide={rightWidth >= 640} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} />}
-          {tab === 'graph' && <GraphView view={views.graph} topics={topics} selected={selectedConcept?.id} onSelect={setSelected} conceptById={conceptById} relations={model.relations} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} wide={rightWidth >= 760} />}
-          {tab === 'board' && <BoardView view={views.board} course={course} topics={topics} concepts={concepts} busy={busy} mutate={mutate} outlineEdit={outlineEdit} syllabusRevision={syllabusRevision} onSelectConcept={setSelected} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} wide={rightWidth >= 760} />}
+          {tab === 'graph' && <GraphView view={views.graph} topics={topics} selected={selectedConcept?.id} onSelect={setSelected} conceptById={conceptById} relations={model.relations} nav={nav} boardElements={views.board.elements} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} wide={rightWidth >= 760} />}
+          {tab === 'board' && <BoardView view={views.board} course={course} topics={topics} concepts={concepts} busy={busy} mutate={mutate} outlineEdit={outlineEdit} syllabusRevision={syllabusRevision} onSelectConcept={setSelected} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} wide={rightWidth >= 760} focus={boardFocus} nav={nav} />}
+          {tab === 'data' && <DataPane api={api} course={course} revision={model.revision} topics={topics} selected={selectedConcept?.id} onSelectConcept={setSelected} nav={nav}
+            todoWrite={todoWrite} busy={busy} focus={dataFocus} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} />}
           <Activity events={model.events} />
         </section>
       </div>
     </div>
   );
+}
+
+function DataPane({ zoom, setZoom, fill, rootRef, ...props }) {
+  const wrapRef = useRef(null);
+  const height = useFillHeight(wrapRef, rootRef, fill, 460, 40);
+  return <div ref={wrapRef}><DataView {...props} height={height} zoomButtons={<ZoomButtons zoom={zoom} setZoom={setZoom} prefix="data" what="数据表" />} /></div>;
 }
 
 function NoteBox({ busy, onSave }) {
@@ -315,7 +350,17 @@ function ApprovalBanner({ course, busy, onApprove }) {
   );
 }
 
-function OutlineView({ topics, busy, edit, syllabusRevision, selected, onSelect }) {
+function OutlineView({ topics, busy, edit, syllabusRevision, selected, onSelect, focus, nav }) {
+  const treeRef = useRef(null);
+  const [flashId, setFlashId] = useState(null);
+  useEffect(() => {
+    if (!focus?.conceptId) return undefined;
+    const row = treeRef.current?.querySelector(`[data-concept-id="${CSS.escape(focus.conceptId)}"]`);
+    row?.scrollIntoView({ block: 'center' });
+    setFlashId(focus.conceptId);
+    const t = setTimeout(() => setFlashId(null), 2600);
+    return () => clearTimeout(t);
+  }, [focus?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
   const [editing, setEditing] = useState(null);
   const [drag, setDrag] = useState(null);
   const [over, setOver] = useState(null);
@@ -354,7 +399,7 @@ function OutlineView({ topics, busy, edit, syllabusRevision, selected, onSelect 
     return edit([kind === 'topic' ? { op: 'moveTopic', topicId: item.id, beforeId } : { op: 'moveSubtopic', subtopicId: item.id, beforeId }], `${dir < 0 ? '上移' : '下移'}${kind === 'topic' ? '主题' : '知识点'}「${item.title}」`);
   };
   return (
-    <div data-testid="outline-view">
+    <div data-testid="outline-view" ref={treeRef}>
       <div className="title2">课程大纲
         <span className="tools"><button className="tbtn" disabled={busy} data-testid="add-topic"
           onClick={() => edit([{ op: 'addTopic', title: '新主题', subtopics: [{ title: '新知识点' }] }], '添加主题')}>＋ 主题</button></span>
@@ -380,7 +425,7 @@ function OutlineView({ topics, busy, edit, syllabusRevision, selected, onSelect 
             </span>
           </div>
           {t.subtopics.map((s, j) => (
-            <div key={s.id} className={`treerow ${selected === s.conceptId ? 'sel' : ''} ${over === s.id ? 'dragover' : ''}`} data-subtopic-id={s.id}
+            <div key={s.id} className={`treerow ${selected === s.conceptId ? 'sel' : ''} ${over === s.id ? 'dragover' : ''} ${flashId === s.conceptId ? 'linkflash' : ''}`} data-subtopic-id={s.id} data-concept-id={s.conceptId}
               draggable={editing == null} onDragStart={(e) => { e.stopPropagation(); setDrag({ kind: 'sub', id: s.id, title: s.title, index: j, rev: syllabusRevision }); }}
               onDragEnd={() => { setDrag(null); setOver(null); }}
               onDragEnter={() => drag?.kind === 'sub' && setOver(s.id)} onDragOver={(e) => drag?.kind === 'sub' && e.preventDefault()}
@@ -392,6 +437,7 @@ function OutlineView({ topics, busy, edit, syllabusRevision, selected, onSelect 
                   : <>{i + 1}.{j + 1} {s.title}　<span className="small">知识点</span></>}
               </span>
               <span className="rowtools">
+                <button className="tbtn" title="打开知识点详情" data-testid="outline-detail" onClick={(e) => { e.stopPropagation(); nav.toDetail(s.conceptId); }}>详情</button>
                 <button className="tbtn" title="上移" disabled={busy || j === 0} onClick={(e) => { e.stopPropagation(); step('sub', t.subtopics, j, -1, s); }}>↑</button>
                 <button className="tbtn" title="下移" disabled={busy || j === t.subtopics.length - 1} onClick={(e) => { e.stopPropagation(); step('sub', t.subtopics, j, 1, s); }}>↓</button>
                 <button className="tbtn danger" title="删除知识点" disabled={busy || t.subtopics.length === 1} onClick={(e) => { e.stopPropagation(); edit([{ op: 'removeSubtopic', subtopicId: s.id }], `删除知识点「${s.title}」`); }}>✕</button>
@@ -496,7 +542,7 @@ function ZoomButtons({ zoom, setZoom, prefix, what }) {
 
 const GRAPH_HINT = '悬停或点击：高亮一跳邻居；双击主题：收起 / 展开它的知识点；双击知识点：展开它关系所在的主题；拖动节点时力导向会带动邻居（只改这次的摆放，不保存）。';
 const GRAPH_LAZY = 60; // same as LAZY_THRESHOLD in graph-flow.jsx: bigger courses start collapsed
-function GraphView({ view, topics, selected, onSelect, conceptById, relations, zoom, setZoom, fill, rootRef, wide }) {
+function GraphView({ view, topics, selected, onSelect, conceptById, relations, zoom, setZoom, fill, rootRef, wide, nav, boardElements = [] }) {
   const c = conceptById.get(selected) ?? (view.nodes[0] && conceptById.get(view.nodes[0].id));
   const related = relations.filter((r) => r.from === c?.id || r.to === c?.id);
   const wrapRef = useRef(null);
@@ -550,6 +596,16 @@ function GraphView({ view, topics, selected, onSelect, conceptById, relations, z
         <div className="card" data-testid="graph-detail">
           <b>{c.title}</b>
           <p className="kmeta">知识点 ID: {c.id}</p>
+          {c.kind !== 'topic' && (() => {
+            const cardIds = boardElements.filter((e) => e.type === 'concept' && e.conceptId === c.id).map((e) => e.id);
+            return (
+              <p className="kplinks">
+                <button className="linkbtn" data-testid="graph-go-detail" onClick={() => nav.toDetail(c.id)}>知识点详情 ›</button>
+                {cardIds.length ? <button className="linkbtn" data-testid="graph-go-card" onClick={() => nav.toCard(cardIds[0], c.id)}>▦ 白板卡片{cardIds.length > 1 ? `（${cardIds.length} 张）` : ''} ›</button>
+                  : <span className="small muted">还没有白板卡片</span>}
+              </p>
+            );
+          })()}
           <p className="small">理解状态：{MASTERY_LABEL[c.mastery]}（{c.mastery}）。{related.length ? `相关候选关系：${related.map((r) => `${conceptById.get(r.from)?.title} —${r.type}→ ${conceptById.get(r.to)?.title}`).join('；')}。` : '暂无候选关系。'}这里只展示候选关系，不把图形箭头误认为已验证知识。</p>
         </div>
       )}
@@ -559,8 +615,9 @@ function GraphView({ view, topics, selected, onSelect, conceptById, relations, z
 }
 
 const BOARD_HINT = '拖动卡片移动；从卡片边上的圆点拖到另一张卡片连线；双击卡片编辑（知识点卡片改名会改课程大纲）；双击空白处加便签；选中后按 Delete 删除；拖动空白处平移，Ctrl+滚轮缩放。';
-function BoardView({ view, course, topics, concepts, busy, mutate, outlineEdit, syllabusRevision, onSelectConcept, zoom, setZoom, fill, rootRef, wide }) {
+function BoardView({ view, course, topics, concepts, busy, mutate, outlineEdit, syllabusRevision, onSelectConcept, zoom, setZoom, fill, rootRef, wide, focus, nav }) {
   const [selection, setSelection] = useState([]);
+  const [focusNote, setFocusNote] = useState(null);
   const [linkMode, setLinkMode] = useState(false);
   const [fitInfo, setFitInfo] = useState({ overflow: false });
   const flowRef = useRef(null);
@@ -578,6 +635,17 @@ function BoardView({ view, course, topics, concepts, busy, mutate, outlineEdit, 
   }, [topics, outlineEdit, syllabusRevision]);
   const arrange = arrangeOps(els, topics, concepts);
   const cards = els.filter((e) => e.type !== 'arrow');
+  // a link from 数据 / 知识点详情: list sibling cards of the same knowledge point (real conceptId, ordered like the data view)
+  useEffect(() => {
+    if (!focus?.id) return undefined;
+    const el = els.find((e) => e.id === focus.id);
+    if (!el) { setFocusNote({ missing: true }); return undefined; }
+    const same = el.conceptId ? cards.filter((e) => e.conceptId === el.conceptId) : [el];
+    setFocusNote({ conceptId: el.conceptId, title: el.text, ids: same.map((e) => e.id), current: el.id });
+    const t = setTimeout(() => wrapRef.current?.scrollIntoView({ block: 'nearest' }), 250); // whole board on screen, card centred in it
+    return () => clearTimeout(t);
+  }, [focus?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
+  const selConcepts = [...new Set(selection.map((id) => els.find((e) => e.id === id)?.conceptId).filter(Boolean))];
   const aiCards = cards.filter((e) => e.createdBy === 'ai').length;
   return (
     <div data-testid="board-view">
@@ -594,14 +662,29 @@ function BoardView({ view, course, topics, concepts, busy, mutate, outlineEdit, 
         <button className="tbtn" disabled={busy || !cards.length} data-testid="board-add-note" onClick={() => flowRef.current?.addNote()}>＋ 便签</button>
         <button className={`tbtn ${linkMode ? 'on' : ''}`} disabled={busy || cards.length < 2} data-testid="board-link" onClick={() => setLinkMode((v) => !v)}>{linkMode ? '连线中：依次点两张卡片' : '连线'}</button>
         <button className="tbtn danger" disabled={busy || !selection.length} data-testid="board-delete" onClick={() => flowRef.current?.deleteSelected()}>删除{selection.length > 1 ? `（${selection.length}）` : ''}</button>
+        {selConcepts.length === 1 && <button className="tbtn" data-testid="board-detail" onClick={() => nav.toDetail(selConcepts[0])} title="在「数据」里打开这个知识点的详情">知识点详情 ›</button>}
         <span className="rflegend"><i className="lg-ai" />AI<i className="lg-me" />你<i className="lg-rel" />候选关系</span>
       </div>
       <div className="small rf-hint" title={BOARD_HINT} data-testid="board-hint">{arrange.length >= 3
         ? '分区已自动排开、互不重叠；卡片在分区里还没对齐，点「按主题整理」可一次排整齐（这一步会保存）。'
         : fitInfo.overflow ? '白板比画布大：拖动空白处或滚轮平移，或点右上角「放大」。' : BOARD_HINT}</div>
+      {focusNote && (
+        <div className="banner linknote" data-testid="board-focus-note">
+          {focusNote.missing ? <span>这张卡片已不在白板上（可能刚被删除）。</span> : (
+            <span>已定位到「{focusNote.title}」的白板卡片{focusNote.ids.length > 1 ? `（这个知识点共有 ${focusNote.ids.length} 张卡片）` : ''}
+              {focusNote.ids.length > 1 && focusNote.ids.map((id, i) => (
+                <button key={id} className={`tbtn ${focusNote.current === id ? 'on' : ''}`} data-testid="board-focus-sibling" data-element={id}
+                  onClick={() => { flowRef.current?.focusCard(id); setFocusNote((n) => ({ ...n, current: id })); }}>{i === 0 ? '主卡片' : `第 ${i + 1} 张`}</button>
+              ))}
+              {focusNote.conceptId && <button className="linkbtn" data-testid="board-focus-detail" onClick={() => nav.toDetail(focusNote.conceptId)}>知识点详情 ›</button>}
+            </span>
+          )}
+          <button className="tbtn" onClick={() => setFocusNote(null)} title="关闭">✕</button>
+        </div>
+      )}
       <div className="rfhost" ref={wrapRef}>
         {els.length ? (
-          <BoardFlow ref={flowRef} elements={els} revision={view.boardRevision} topics={topics} concepts={concepts} height={height} editable
+          <BoardFlow ref={flowRef} focus={focus} elements={els} revision={view.boardRevision} topics={topics} concepts={concepts} height={height} editable
             linkMode={linkMode} onLinkModeDone={() => setLinkMode(false)} onPatch={patch} onRenameConcept={renameConcept} syllabusRevision={syllabusRevision}
             onSelectConcept={onSelectConcept} onSelectionChange={setSelection} minimap={wide} onFit={(f) => setFitInfo((x) => (x.overflow === f.overflow ? x : f))} />
         ) : (

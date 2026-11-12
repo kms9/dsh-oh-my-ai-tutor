@@ -51,7 +51,7 @@ function BoardCardNode({ data, selected }) {
   const note = el.type === 'note';
   const ai = el.createdBy === 'ai';
   const cls = ['rf-card', note ? `note ${ai ? 'note-ai' : 'note-me'}` : 'concept', selected ? 'sel' : '', el.stale ? 'stale' : '',
-    ctx.linkFrom === el.id ? 'linksrc' : '', ctx.fresh.has(el.id) ? 'fresh' : '', el.mastery && el.mastery !== 'unverified' ? el.mastery : ''].filter(Boolean).join(' ');
+    ctx.linkFrom === el.id ? 'linksrc' : '', ctx.fresh.has(el.id) ? 'fresh' : '', ctx.focusId === el.id ? 'focus' : '', el.mastery && el.mastery !== 'unverified' ? el.mastery : ''].filter(Boolean).join(' ');
   const custom = safeColor(el.color);
   return (
     <div className={cls} data-element={el.id} data-type={el.type} data-concept={el.conceptId ?? ''} data-actor={el.createdBy ?? ''}
@@ -91,7 +91,7 @@ const sig = (e) => `${e.updatedAt ?? ''}|${e.x}|${e.y}|${e.text ?? ''}|${e.label
  */
 const BoardFlowInner = forwardRef(function BoardFlowInner(props, ref) {
   const { elements, revision, topics, concepts, height, editable = true, linkMode = false, onLinkModeDone, onPatch, onRenameConcept,
-    syllabusRevision, onSelectConcept, onSelectionChange, onFit, minimap = false } = props;
+    syllabusRevision, onSelectConcept, onSelectionChange, onFit, minimap = false, focus = null } = props;
   const rf = useReactFlow();
   const wrapRef = useRef(null);
   const [nodes, setNodes] = useState([]);
@@ -203,6 +203,7 @@ const BoardFlowInner = forwardRef(function BoardFlowInner(props, ref) {
     return L.groupOffset(best ? best.id : null);
   }, []);
   const onNodeDragStart = useCallback((_e, _n, dragged) => {
+    focusRef.current = null;
     dragRef.current = { rev: revRef.current, ids: dragged.map((n) => n.id) };
     for (const n of dragged) pending.current.set(n.id, n.position);
   }, []);
@@ -250,7 +251,9 @@ const BoardFlowInner = forwardRef(function BoardFlowInner(props, ref) {
     setEditing(ok ? null : { id: el.id, draft: v, rev: undefined, concept: ed.concept });
   }, [onPatch, onRenameConcept, setEditing]);
   const cancelEdit = useCallback(() => setEditing(null), [setEditing]);
-  const ctx = useMemo(() => ({ editing, startEdit, commitEdit, cancelEdit, linkFrom, editable, fresh }), [editing, startEdit, commitEdit, cancelEdit, linkFrom, editable, fresh]);
+  const [focusId, setFocusId] = useState(null); // card reached through a link (数据表 / 知识点详情): highlighted + centred
+  const focusRef = useRef(null);
+  const ctx = useMemo(() => ({ editing, startEdit, commitEdit, cancelEdit, linkFrom, editable, fresh, focusId }), [editing, startEdit, commitEdit, cancelEdit, linkFrom, editable, fresh, focusId]);
 
   useEffect(() => { if (!linkMode) setLinkFrom(null); }, [linkMode]);
   const linkRev = useRef(revision);
@@ -318,21 +321,41 @@ const BoardFlowInner = forwardRef(function BoardFlowInner(props, ref) {
     onFit?.({ overflow: v.overflow, zoom: v.zoom });
   }, [rf, size.w, size.h, onFit]);
   fitRef.current = fit;
+  /** Centre a card (display position = stored + section offset) at a readable zoom and select it. */
+  const centerOn = useCallback((id) => {
+    const c = liveRef.current.find((x) => x.id === id); if (!c) return false;
+    const w = c.width ?? 196, h = c.height ?? 72;
+    rf.setCenter(c.x + w / 2, c.y + h / 2, { zoom: Math.max(1, rf.getViewport().zoom) });
+    setNodes((ns) => ns.map((n) => (n.selected === (n.id === id) ? n : { ...n, selected: n.id === id })));
+    setFitState((f) => ({ ...f, zoom: Math.max(1, rf.getViewport().zoom) }));
+    return true;
+  }, [rf]);
+  const centerRef = useRef(centerOn); centerRef.current = centerOn;
+  // auto layout passes (resize, column change) re-centre a linked card instead of fitting the whole board away from it
+  const refit = useCallback(() => { if (focusRef.current && centerRef.current(focusRef.current)) return; fitRef.current?.(); }, []);
+  useEffect(() => {
+    if (!focus?.id) return undefined;
+    focusRef.current = focus.id; setFocusId(focus.id);
+    const t = setTimeout(() => { if (size.w && size.h) { centerRef.current(focus.id); wrapRef.current?.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } }, 120);
+    return () => clearTimeout(t);
+  }, [focus?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (size.w && size.h) setColumns(size.w / size.h > 1.6 ? 3 : 2); }, [size.w, size.h]);
-  useEffect(() => { if (size.w && size.h && live.length) { const t = setTimeout(() => fitRef.current?.(), 30); return () => clearTimeout(t); } return undefined; }, [columns]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (size.w && size.h && live.length) { const t = setTimeout(refit, 30); return () => clearTimeout(t); } return undefined; }, [columns]); // eslint-disable-line react-hooks/exhaustive-deps
   const hasCards = live.length > 0;
-  useEffect(() => { if (size.w && size.h && hasCards) fit(); }, [size.w, size.h, hasCards]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (size.w && size.h && hasCards) { if (focusRef.current) { const t = setTimeout(refit, 60); return () => clearTimeout(t); } fit(); } return undefined; }, [size.w, size.h, hasCards]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useImperativeHandle(ref, () => ({
-    fit, deleteSelected,
+    fit() { focusRef.current = null; fit(); }, deleteSelected,
+    focusCard(id) { focusRef.current = id; setFocusId(id); return centerOn(id); },
     addNote() { const r = wrapRef.current.getBoundingClientRect(); const p = rf.screenToFlowPosition({ x: r.left + r.width / 2, y: r.top + r.height / 2 }); return addNoteAt({ x: p.x - 98, y: p.y - 36 }); },
     zoomBy(f) { const v = rf.getViewport(); rf.setViewport({ ...v, zoom: Math.min(1.8, Math.max(0.3, v.zoom * f)) }, { duration: 120 }); },
-  }), [fit, deleteSelected, addNoteAt, rf]);
+  }), [fit, deleteSelected, addNoteAt, rf, centerOn]);
 
   return (
     <BoardCtx.Provider value={ctx}>
-      <div className={`rf-wrap rf-board${linkMode ? ' linking' : ''}`} ref={wrapRef} style={{ height }} tabIndex={-1} onKeyDown={onKeyDown} onDoubleClick={onDoubleClick} data-testid="board"
-        data-scale={fitState.zoom.toFixed(2)} data-overflow={String(fitState.overflow)} data-revision={revision}>
+      <div className={`rf-wrap rf-board${linkMode ? ' linking' : ''}`} ref={wrapRef} style={{ height }} tabIndex={-1} onKeyDown={onKeyDown} onDoubleClick={onDoubleClick}
+        onClickCapture={(e) => { if (focusRef.current && e.target.classList?.contains('react-flow__pane')) { focusRef.current = null; setFocusId(null); } }} data-testid="board"
+        data-scale={fitState.zoom.toFixed(2)} data-focus={focusId ?? ''} data-overflow={String(fitState.overflow)} data-revision={revision}>
         <ReactFlow nodes={allNodes} edges={edges} nodeTypes={boardNodeTypes} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
           onNodeDragStart={onNodeDragStart} onNodeDragStop={onNodeDragStop} onNodeClick={onNodeClick}
           onNodeDoubleClick={(_e, n) => n.data?.el && startEdit(n.data.el)}

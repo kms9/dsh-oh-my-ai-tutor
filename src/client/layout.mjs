@@ -174,7 +174,7 @@ export const ACTION_LABEL = {
   'course.plan': '写入大纲', 'course.editOutline': '编辑大纲', 'course.approve': '批准大纲', 'lesson.create': '创建课时计划',
   'lesson.approve': '批准课时计划', 'lesson.partWrite': '写入讲解', 'lesson.cover': '完成一段讲解', 'assessment.record': '记录作答',
   'lesson.reviewEnd': '结束复习', 'note.add': '添加笔记', 'lesson.finish': '结课', 'relation.propose': '提出候选关系',
-  'board.seed': '生成白板', 'board.patch': '编辑白板',
+  'board.seed': '生成白板', 'board.patch': '编辑白板', 'todo.create': '添加待办', 'todo.update': '更新待办',
 };
 export function relTime(iso, now = Date.now()) {
   const d = Math.max(0, now - Date.parse(iso));

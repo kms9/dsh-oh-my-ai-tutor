@@ -5,7 +5,15 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 await mkdir(join(root, 'lib'), { recursive: true });
-const shared = { absWorkingDir: root, bundle: true, logLevel: 'info', legalComments: 'eof', loader: { '.css': 'text' }, jsx: 'transform',
+// CSS files that are only @import lists (Glide Data Grid's dist/index.css) are flattened by esbuild's CSS bundler first,
+// then imported as text like every other stylesheet.
+const flattenCss = { name: 'flatten-css-imports', setup(b) {
+  b.onLoad({ filter: /glide-data-grid[\\/]dist[\\/]index\.css$/ }, async (args) => {
+    const r = await build({ entryPoints: [args.path], bundle: true, write: false, minify: true, logLevel: 'silent' });
+    return { contents: r.outputFiles[0].text, loader: 'text' };
+  });
+} };
+const shared = { plugins: [flattenCss], absWorkingDir: root, bundle: true, logLevel: 'info', legalComments: 'eof', loader: { '.css': 'text' }, jsx: 'transform',
   define: { 'process.env.NODE_ENV': '"production"' }, target: ['chrome120', 'safari17'], minify: !process.argv.includes('--no-minify'), metafile: true };
 // DSH client bundle: CJS wrapped for window.__ModuleLoader__; React comes from the host's shared module table.
 const client = await build({ ...shared, entryPoints: ['src/client/client.jsx'], outfile: 'lib/client.js', format: 'cjs', platform: 'browser',
@@ -14,7 +22,7 @@ const client = await build({ ...shared, entryPoints: ['src/client/client.jsx'], 
   footer: { js: ';return module.exports;}});' } });
 // Package-local chunks (host module loader: require.async("./client.<name>.js")); served from lib/ next to client.js.
 const chunks = {};
-for (const name of ['flow', 'mindmap']) {
+for (const name of ['flow', 'mindmap', 'grid', 'calendar']) {
   chunks[name] = await build({ ...shared, entryPoints: [`src/client/chunk-${name}.jsx`], outfile: `lib/client.${name}.js`, format: 'cjs', platform: 'browser',
     external: ['react', 'react/*', 'react-dom', 'react-dom/*'],
     banner: { js: `window.__ModuleLoader__.load({id:"dsh-oh-my-ai-tutor",chunk:"client.${name}.js",factory:(require)=>{var module={exports:{}};var exports=module.exports;` },
@@ -26,7 +34,7 @@ await build({ ...shared, entryPoints: ['src/client/standalone.jsx'], outfile: 'l
 const { gzipSync } = await import('node:zlib');
 const { readFile } = await import('node:fs/promises');
 const sizes = {};
-for (const [out, result] of [['lib/client.js', client], ['lib/client.flow.js', chunks.flow], ['lib/client.mindmap.js', chunks.mindmap]]) {
+for (const [out, result] of [['lib/client.js', client], ...Object.entries(chunks).map(([n, r]) => [`lib/client.${n}.js`, r])]) {
   const bytes = await readFile(join(root, out));
   const byPkg = {};
   for (const [file, info] of Object.entries(result.metafile.outputs[out].inputs)) {

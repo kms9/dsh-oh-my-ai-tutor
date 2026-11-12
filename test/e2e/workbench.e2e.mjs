@@ -64,7 +64,7 @@ page.on('console', (m) => m.type() === 'error' && !(serverDown && /ERR_CONNECTIO
 const url = `http://127.0.0.1:${port}/`;
 await page.goto(url);
 await page.waitForSelector('[data-testid=tutor-workbench]');
-const VIEW_ID = { outline: 'outline-view', mindmap: 'mindmap-view', graph: 'graph-view', board: 'board-view' };
+const VIEW_ID = { outline: 'outline-view', mindmap: 'mindmap-view', graph: 'graph-view', board: 'board-view', data: 'data-view' };
 const tab = async (k, p = page) => { await p.click(`#omt-tab-${k}`); await p.waitForSelector(`[data-testid=${VIEW_ID[k]}]`); };
 const mmNode = (id) => `[data-testid=mindmap-elixir] [data-nodeid="me${id}"]`;
 const outlineRev = async () => (await course()).syllabus.revision;
@@ -673,6 +673,9 @@ await step('board: toolbar link mode, delete a card (cascade), add + edit a note
   await page.keyboard.press('Enter');
   await eventually(async () => assert.ok((await boardEls()).some((e) => e.type === 'note' && !e.deleted && e.text === '我的复习节奏：1-2-4-8 天' && e.createdBy === 'learner')));
   await page.waitForSelector('[data-testid=board] .rf-card.note-me >> text=我的复习节奏：1-2-4-8 天');
+  // the edited text shows optimistically; wait until the board on screen is at the stored revision before the next gesture
+  const boardRev = (await tools.tutor_board_read.execute({ courseId: cid })).revision;
+  await eventually(async () => assert.equal(await page.getAttribute('[data-testid=board]', 'data-revision'), String(boardRev)));
   // double-click on empty canvas adds a note at that spot
   const spot = await emptyCanvasSpot(page);
   const notes0 = (await boardEls()).filter((e) => e.type === 'note' && !e.deleted).length;
@@ -847,6 +850,183 @@ await step('board: re-seed after deleting a card brings back the card and its re
   });
   await page.keyboard.press('Escape');
   await page.waitForSelector('[data-testid=tutor-workbench][data-mm-zoom=off]');
+});
+
+// ── 数据 tab (SQLite read models, Glide Data Grid chunk) + knowledge point links (real conceptId) + to-dos / calendar ──
+/** Click a Glide (canvas) cell by row key + column id, using the geometry the wrapper exposes. */
+async function gridClick(testId, key, colId) {
+  const g = page.locator(`[data-testid=${testId}]`);
+  await g.locator('canvas').first().waitFor();
+  const geo = await g.evaluate((el) => ({ keys: JSON.parse(el.dataset.rowKeys), cols: JSON.parse(el.dataset.cols), hh: +el.dataset.headerH, rh: +el.dataset.rowH }));
+  const r = geo.keys.indexOf(key); assert.ok(r >= 0, `row ${key} is in ${testId}`);
+  let x = 0; for (const c of geo.cols) { if (c.id === colId) { x += c.w / 2; break; } x += c.w; }
+  const box = await g.boundingBox();
+  const y = geo.hh + r * geo.rh + geo.rh / 2;
+  assert.ok(y < box.height, `row ${r} visible in the grid`);
+  await page.mouse.click(box.x + x, box.y + y);
+}
+const gridRows = (testId) => page.getAttribute(`[data-testid=${testId}]`, 'data-rows').then(Number);
+/** The grid's accessibility table mirrors the visible canvas cells (Glide renders it inside the canvas element). */
+const gridText = (testId) => page.locator(`[data-testid=${testId}] table`).first().textContent();
+const focusedCard = () => page.locator('[data-testid=board] .rf-card.focus');
+async function assertCardInView(id) {
+  const host = await page.locator('[data-testid=board]').boundingBox();
+  const c = await page.locator(`[data-testid=board] .rf-card[data-element="${id}"]`).boundingBox();
+  assert.ok(c && c.x >= host.x && c.x + c.width <= host.x + host.width && c.y >= host.y && c.y + c.height <= host.y + host.height, `card ${id} is inside the visible board`);
+}
+
+await step('data: 数据 tab loads the Glide grid chunk; 知识点总表 has the real SQLite rows, sort + filter', async () => {
+  await tab('data');
+  await page.waitForSelector('[data-testid=grid-kp] canvas');
+  const subs = (await topics()).flatMap((t) => t.subtopics);
+  await eventually(async () => assert.equal(await gridRows('grid-kp'), subs.length));
+  const keys = JSON.parse(await page.getAttribute('[data-testid=grid-kp]', 'data-row-keys'));
+  assert.deepEqual(new Set(keys), new Set(subs.map((s) => s.conceptId)), 'one row per knowledge point, keyed by conceptId');
+  const sqlRows = await store.data('knowledgePoints', { courseId: cid });
+  assert.equal(sqlRows.length, subs.length);
+  const txt = await gridText('grid-kp');
+  assert.ok(txt.includes(subs[0].title), 'first knowledge point title drawn');
+  assert.match(txt, /白板卡片 ›|主卡片/, 'board card link cells');
+  // header click sorts (asc → desc → off)
+  const g = await page.locator('[data-testid=grid-kp]').boundingBox();
+  const cols = JSON.parse(await page.getAttribute('[data-testid=grid-kp]', 'data-cols'));
+  const xOf = (id) => { let x = 0; for (const c of cols) { if (c.id === id) return x + c.w / 2; x += c.w; } return 0; };
+  await page.mouse.click(g.x + xOf('title'), g.y + 17);
+  await eventually(async () => assert.equal(await page.getAttribute('[data-testid=grid-kp]', 'data-sort'), 'title:asc'));
+  await page.mouse.click(g.x + xOf('title'), g.y + 17);
+  await eventually(async () => assert.equal(await page.getAttribute('[data-testid=grid-kp]', 'data-sort'), 'title:desc'));
+  await page.mouse.click(g.x + xOf('title'), g.y + 17);
+  await eventually(async () => assert.equal(await page.getAttribute('[data-testid=grid-kp]', 'data-sort'), ''));
+  await page.fill('[data-testid=data-search]', subs[1].title.slice(0, 4));
+  await eventually(async () => assert.ok((await gridRows('grid-kp')) < subs.length && (await gridRows('grid-kp')) >= 1));
+  await page.fill('[data-testid=data-search]', '');
+  await eventually(async () => assert.equal(await gridRows('grid-kp'), subs.length));
+  for (const [k, id] of [['questions', 'grid-questions'], ['attempts', 'grid-attempts']]) {
+    await page.click(`[data-testid=data-subtabs] [data-sub=${k}]`);
+    await page.waitForSelector(`[data-testid=${id}] canvas`);
+    assert.ok((await gridRows(id)) >= 1, `${k} table has real rows`);
+  }
+  await page.screenshot({ path: join(shots, '11-data-attempts.png') });
+  await page.click('[data-testid=data-subtabs] [data-sub=kp]');
+  await page.waitForSelector('[data-testid=grid-kp] canvas');
+  await page.screenshot({ path: join(shots, '11-data-kp.png') });
+});
+
+await step('data → board: 「白板卡片」 link switches to 知识白板, centres the card and highlights it (conceptId, not title)', async () => {
+  const b = await tools.tutor_board_read.execute({ courseId: cid });
+  const card = b.elements.find((e) => e.type === 'concept' && b.elements.filter((x) => x.conceptId === e.conceptId).length === 1);
+  await gridClick('grid-kp', card.conceptId, 'cards');
+  await page.waitForSelector('[data-testid=board-view]');
+  await eventually(async () => assert.equal(await focusedCard().getAttribute('data-element'), card.id));
+  assert.equal(await page.getAttribute('[data-testid=board]', 'data-focus'), card.id);
+  assert.equal(await focusedCard().getAttribute('data-concept'), card.conceptId);
+  await eventually(() => assertCardInView(card.id));
+  assert.match(await page.textContent('[data-testid=board-focus-note]'), /已定位到/);
+  await page.waitForTimeout(400);
+  await page.screenshot({ path: join(shots, '12-link-board-card.png') });
+  // reverse: the board's 「知识点详情」 opens the same knowledge point in 数据
+  await page.click('[data-testid=board-focus-detail]');
+  await page.waitForSelector(`[data-testid=kp-detail][data-concept="${card.conceptId}"]`);
+});
+
+await step('data: a knowledge point without a board card reads 还没有白板卡片 — no dead link, the detail says so too', async () => {
+  // the core keeps one card per knowledge point (a second add is refused), so "several cards" cannot arise from the tools
+  let b = await tools.tutor_board_read.execute({ courseId: cid });
+  const main = b.elements.find((e) => e.type === 'concept' && !e.stale);
+  await assert.rejects(tools.tutor_board_patch.execute({ courseId: cid, baseRevision: b.revision, operations: [{ op: 'add', type: 'concept', conceptId: main.conceptId, x: main.x, y: main.y + 120 }] }), /already on board/);
+  // the AI removes one knowledge point's card → that row reads 还没有白板卡片 and the link is inert
+  b = await tools.tutor_board_read.execute({ courseId: cid });
+  const lonely = b.elements.find((e) => e.type === 'concept' && e.conceptId !== main.conceptId && !e.stale);
+  await tools.tutor_board_patch.execute({ courseId: cid, baseRevision: b.revision, operations: [{ op: 'delete', id: lonely.id }] });
+  assert.deepEqual((await store.data('knowledgePoints', { courseId: cid })).find((k) => k.concept_id === lonely.conceptId).board_cards, []);
+  await tab('data');
+  await page.waitForSelector('[data-testid=grid-kp] canvas');
+  await eventually(async () => assert.match(await gridText('grid-kp'), /还没有白板卡片/));
+  await gridClick('grid-kp', lonely.conceptId, 'cards');
+  await page.waitForTimeout(300);
+  assert.equal(await page.locator('[data-testid=data-view]').count(), 1, 'an empty link does not leave the data tab');
+  await gridClick('grid-kp', lonely.conceptId, 'detail');
+  await page.waitForSelector(`[data-testid=kp-detail][data-concept="${lonely.conceptId}"] [data-testid=kp-no-card]`);
+  assert.equal(await page.locator('[data-testid=kp-go-card]').count(), 0, 'no dead card link in the detail');
+  // put it back for the steps below (re-seed is idempotent)
+  const b2 = await tools.tutor_board_read.execute({ courseId: cid });
+  await tools.tutor_board_patch.execute({ courseId: cid, baseRevision: b2.revision, seed: true });
+});
+
+await step('data: 「详情」 opens the knowledge point detail (content, attempts) with links to its board card, outline row and graph node', async () => {
+  await tab('data');
+  await page.waitForSelector('[data-testid=grid-kp] canvas');
+  const st = await readState();
+  const a = Object.values(st.assessments).find((x) => x.conceptId);
+  const c = st.concepts[a.conceptId];
+  await gridClick('grid-kp', c.id, 'detail');
+  await page.waitForSelector(`[data-testid=kp-detail][data-concept="${c.id}"]`);
+  assert.equal(await page.textContent('[data-testid=kp-detail-title]'), c.title);
+  const d = await page.textContent('[data-testid=kp-detail]');
+  assert.ok(d.includes(a.question), 'the attempt on this knowledge point is listed');
+  await page.screenshot({ path: join(shots, '13-kp-detail.png') });
+  const cardId = await page.getAttribute('[data-testid=kp-go-card]', 'data-element');
+  await page.click('[data-testid=kp-go-card]');
+  await eventually(async () => assert.equal(await focusedCard().getAttribute('data-element'), cardId));
+  assert.equal(await focusedCard().getAttribute('data-concept'), c.id);
+  // back to the detail via the board toolbar (selected card → 知识点详情)
+  await page.click('[data-testid=board-detail]');
+  await page.waitForSelector(`[data-testid=kp-detail][data-concept="${c.id}"]`);
+  await page.click('[data-testid=kp-go-outline]');
+  await page.waitForSelector(`[data-testid=outline-view] .treerow.linkflash[data-concept-id="${c.id}"]`);
+  assert.ok(await page.locator(`.treerow.sel[data-concept-id="${c.id}"]`).count() === 1);
+  await page.screenshot({ path: join(shots, '13b-kp-outline.png') });
+  // outline row 详情 → detail; detail → graph; graph detail → detail / board card
+  await page.hover(`.treerow[data-concept-id="${c.id}"]`);
+  await page.click(`.treerow[data-concept-id="${c.id}"] [data-testid=outline-detail]`);
+  await page.waitForSelector(`[data-testid=kp-detail][data-concept="${c.id}"]`);
+  await page.click('[data-testid=kp-go-graph]');
+  await page.waitForSelector('[data-testid=graph-detail]');
+  assert.ok((await page.textContent('[data-testid=graph-detail]')).includes(c.title));
+  await page.click('[data-testid=graph-go-card]');
+  await eventually(async () => assert.equal(await focusedCard().getAttribute('data-concept'), c.id));
+  await tab('graph');
+  await page.click('[data-testid=graph-go-detail]');
+  await page.waitForSelector(`[data-testid=kp-detail][data-concept="${c.id}"]`);
+});
+
+await step('to-dos: add one due today linked to a knowledge point → 今天到期 + calendar (FullCalendar chunk); toggle; stale toggle conflicts', async () => {
+  await tab('data');
+  await page.click('[data-testid=data-subtabs] [data-sub=todos]');
+  await page.waitForSelector('[data-testid=todo-form]');
+  const c = Object.values((await readState()).concepts).find((x) => x.courseId === cid && x.status === 'active');
+  // due later today in the learner's zone (America/Phoenix in this browser context)
+  const due = await page.evaluate(() => { const d = new Date(); d.setHours(Math.min(23, d.getHours() + 1), 30, 0, 0); const p = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; });
+  await page.fill('[data-testid=todo-title]', 'e2e：复习这个知识点');
+  await page.fill('[data-testid=todo-due]', due);
+  await page.selectOption('[data-testid=todo-concept]', c.id);
+  await page.click('[data-testid=todo-add]');
+  await page.waitForSelector('[data-testid=due-today] >> text=e2e：复习这个知识点');
+  const [t] = (await store.data('todos', { courseId: cid })).filter((x) => x.title === 'e2e：复习这个知识点');
+  assert.equal(t.concept_id, c.id); assert.equal(t.created_by, 'learner'); const phx = new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Phoenix', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(t.due_at)).replace(' ', 'T');
+  assert.equal(phx, due, 'the instant stored is the wall-clock time the learner typed, in America/Phoenix');
+  await page.waitForSelector('[data-testid=grid-todos] canvas');
+  await page.screenshot({ path: join(shots, '14-todos-due-today.png') });
+  await page.click('[data-testid=data-subtabs] [data-sub=calendar]');
+  await page.waitForSelector('[data-testid=todo-calendar] .fc-event');
+  assert.ok((await page.textContent('[data-testid=todo-calendar]')).includes('e2e：复习这个知识点'));
+  await page.click('[data-testid=todo-calendar] .fc-timeGridWeek-button');
+  await page.waitForSelector('[data-testid=todo-calendar] .fc-timegrid-event');
+  await page.screenshot({ path: join(shots, '14b-calendar-week.png') });
+  await page.click('[data-testid=todo-calendar] .fc-dayGridMonth-button');
+  await page.waitForSelector('[data-testid=todo-calendar] .fc-daygrid-event');
+  await page.screenshot({ path: join(shots, '14c-calendar-month.png') });
+  // the AI updates the same to-do meanwhile; the learner's stale toggle is refused with the Chinese notice
+  await store.todo('update', { id: t.id, baseRevision: t.revision, note: 'AI 补充：先做两道迁移题' }, { actor: 'ai' });
+  await page.click(`[data-testid=due-today] [data-todo-id="${t.id}"] .tbtn`);
+  await page.waitForSelector('[data-testid=notice] >> text=AI 或其他窗口刚改过这条待办，没有保存');
+  await page.waitForTimeout(1300);
+  await page.click(`[data-testid=due-today] [data-todo-id="${t.id}"] .tbtn`);
+  await page.waitForSelector('[data-testid=notice] >> text=已标为完成');
+  const [t2] = (await store.data('todos', { courseId: cid })).filter((x) => x.id === t.id);
+  assert.equal(t2.status, 'done'); assert.equal(t2.revision, t.revision + 2);
+  const ev = (await readState()).events.filter((e) => e.action?.startsWith('todo.'));
+  assert.deepEqual(ev.map((e) => e.actor), ['learner', 'ai', 'learner']);
 });
 
 await step('chat tool cards render tool results as graphics (outline/mindmap/graph/board)', async () => {
