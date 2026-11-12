@@ -163,6 +163,23 @@ export function toolSpecs(store) {
         return store.readOnlyQuery(args.sql, { limit: args.limit });
       },
     }] : []),
+    ...(typeof store.review === 'function' ? [{
+      name: 'tutor_review_rate',
+      description: 'Record how well the learner recalled a knowledge point in a spaced-repetition (FSRS) review, which reschedules its next review. '
+        + 'Use ONLY after the learner actually answered a review question in this conversation; never guess or rate on their behalf without an answer (recorded attempts via tutor_write assessment.record already reschedule automatically — do not rate the same answer twice). '
+        + 'rating: 1 忘了 (Again) | 2 吃力 (Hard) | 3 想起来了 (Good) | 4 轻松 (Easy). Read the card first with tutor_table_query (SELECT id, concept_id, concept_title, state, due_at, revision FROM v_review_cards …) and pass its revision as baseRevision; '
+        + 'on conflict the learner may have just rated it in the workbench — read again and do not retry blindly. Logged with actor ai.',
+      parameters: {
+        conceptId: { type: 'string', required: true, description: 'Knowledge point id (v_review_cards.concept_id).' },
+        rating: { type: 'integer', required: true, description: '1 忘了 | 2 吃力 | 3 想起来了 | 4 轻松' },
+        baseRevision: { type: 'integer', required: true, description: 'v_review_cards.revision you read.' },
+        evidence: { type: 'string', required: true, description: 'One sentence: what the learner answered that justifies the rating (kept in the event summary).' },
+      },
+      async execute(args) {
+        if (typeof args.evidence !== 'string' || args.evidence.trim().length < 4) throw new Error('evidence (what the learner actually answered) is required');
+        return store.review({ conceptId: args.conceptId, rating: args.rating, baseRevision: args.baseRevision, note: args.evidence }, { actor: 'ai' });
+      },
+    }] : []),
     ...(typeof store.todo === 'function' ? [{
       name: 'tutor_todo',
       description: 'Create or update a learner to-do with a due date (shown in the workbench 数据 tab: 待办, 今天到期, calendar). '

@@ -55,6 +55,7 @@ export function createRpcHandler(store) {
         ...(Number.isInteger(error.syllabusRevision) ? { syllabusRevision: error.syllabusRevision } : {}),
         ...(Number.isInteger(error.boardRevision) ? { boardRevision: error.boardRevision } : {}),
         ...(Number.isInteger(error.todoRevision) ? { todoRevision: error.todoRevision } : {}),
+        ...(Number.isInteger(error.reviewRevision) ? { reviewRevision: error.reviewRevision } : {}),
       };
       return reply({ ok: false, error: { code, message: String(error.message ?? 'request failed'), details, ...details } });
     }
@@ -67,6 +68,11 @@ export async function dispatch(store, { method, payload = {} }) {
   if (method === 'data') {
     if (typeof store.data !== 'function') throw new Error('数据面板需要 SQLite 存储（当前是 JSON 存储）');
     return store.data(String(payload.query ?? ''), payload.params ?? {});
+  }
+  if (method === 'review') {
+    if (typeof store.review !== 'function') throw new Error('复习排期需要 SQLite 存储（当前是 JSON 存储）');
+    const { conceptId, cardId, rating, baseRevision } = payload.input ?? {};
+    return store.review({ conceptId, cardId, rating, baseRevision }, { actor: 'learner' });
   }
   if (method === 'todo') {
     if (typeof store.todo !== 'function') throw new Error('待办需要 SQLite 存储（当前是 JSON 存储）');

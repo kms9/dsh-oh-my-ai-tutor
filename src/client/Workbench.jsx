@@ -178,6 +178,23 @@ export function Workbench({ api, visible = true, initialView, navRevision, pollM
     } finally { setBusy(false); }
   }, [api, reload]);
 
+  /** Learner FSRS rating (review card revision CAS). */
+  const reviewRate = useCallback(async (input) => {
+    setBusy(true);
+    try {
+      const out = await api.call('review', { input });
+      await reload();
+      const d = new Date(out.card.due_at);
+      flash(`已记录复习，下次复习：${d.getMonth() + 1}月${d.getDate()}日`);
+      return true;
+    } catch (e) {
+      const conflict = e.code === 'tutor/conflict' || /changed|conflict/i.test(e.message);
+      flash(conflict ? 'AI 或其他窗口刚给这个知识点评过分，没有保存。已刷新到最新排期，请看一眼再评分。' : `未保存：${e.message}`, true);
+      await reload().catch(() => {});
+      return false;
+    } finally { setBusy(false); }
+  }, [api, reload]);
+
   if (error && !model) return <div className="omt" ref={rootRef}><div className="empty" style={{ padding: 28 }}>无法读取学习状态：{error}</div></div>;
   if (!model) return <div className="omt" ref={rootRef}><div className="empty" style={{ padding: 28 }}>正在读取学习状态…</div></div>;
   if (!model.course) return (
@@ -315,7 +332,7 @@ export function Workbench({ api, visible = true, initialView, navRevision, pollM
           {tab === 'graph' && <GraphView view={views.graph} topics={topics} selected={selectedConcept?.id} onSelect={setSelected} conceptById={conceptById} relations={model.relations} nav={nav} boardElements={views.board.elements} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} wide={rightWidth >= 760} />}
           {tab === 'board' && <BoardView view={views.board} course={course} topics={topics} concepts={concepts} busy={busy} mutate={mutate} outlineEdit={outlineEdit} syllabusRevision={syllabusRevision} onSelectConcept={setSelected} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} wide={rightWidth >= 760} focus={boardFocus} nav={nav} />}
           {tab === 'data' && <DataPane api={api} course={course} revision={model.revision} topics={topics} selected={selectedConcept?.id} onSelectConcept={setSelected} nav={nav}
-            todoWrite={todoWrite} busy={busy} focus={dataFocus} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} />}
+            todoWrite={todoWrite} reviewRate={reviewRate} busy={busy} focus={dataFocus} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} />}
           <Activity events={model.events} />
         </section>
       </div>

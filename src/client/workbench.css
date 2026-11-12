@@ -292,3 +292,11 @@
 .omt .todo-cal .fc .fc-button-primary:not(:disabled).fc-button-active{color:#354da5}
 .omt .todo-cal .fc .fc-toolbar-title{font-size:15px;font-weight:650;color:#1d2433}
 .omt .todo-cal .fc .fc-toolbar.fc-header-toolbar{margin-bottom:8px}
+/* FSRS reviews (purple) next to to-dos (blue) */
+.omt .dueitem .kind{flex:none;font-size:10.5px;font-weight:650;border-radius:4px;padding:1px 5px;color:#fff}
+.omt .dueitem .kind.review{background:#7c4dcc}.omt .dueitem .kind.todo{background:#2f5bd3}
+.omt .dueitem.review{flex-wrap:wrap}
+.omt .rates{display:inline-flex;flex-wrap:wrap;gap:4px}
+.omt .tbtn.rate.r1{color:#b4472f;border-color:#efc7bb}.omt .tbtn.rate.r2{color:#8a5300;border-color:#f0d29a}
+.omt .tbtn.rate.r3{color:#2f6b45;border-color:#cfe5d6}.omt .tbtn.rate.r4{color:#3346b8;border-color:#c9d2f3}
+.omt .reviewsec{border-left:3px solid #7c4dcc;padding-left:8px}

@@ -1029,6 +1029,60 @@ await step('to-dos: add one due today linked to a knowledge point → 今天到�
   assert.deepEqual(ev.map((e) => e.actor), ['learner', 'ai', 'learner']);
 });
 
+await step('reviews (FSRS): a due review is purple in 今天到期 + the calendar; rating moves the next date (learner event); detail drawer; stale rating conflicts', async () => {
+  const cards = await store.data('reviews', { courseId: cid });
+  assert.equal(cards.length, (await store.data('knowledgePoints', { courseId: cid })).length, 'one review card per knowledge point');
+  const card = cards.find((c) => c.source === 'attempts');
+  assert.ok(card?.due_at, 'knowledge points with attempts got a scheduled card on migration');
+  // simulate the passage of time: this card's review falls due now (test-only write to the card row)
+  store.db.prepare('UPDATE review_cards SET due_at = ? WHERE id = ?').run(new Date(Date.now() - 60000).toISOString(), card.id);
+  await tab('graph'); await tab('data');
+  await page.click('[data-testid=data-subtabs] [data-sub=reviews]');
+  await page.waitForSelector('[data-testid=grid-reviews] canvas');
+  const item = `[data-testid=due-today] [data-review-id="${card.id}"]`;
+  await page.waitForSelector(item);
+  assert.match(await page.textContent(item), new RegExp(card.concept_title.slice(0, 6)));
+  assert.equal(await page.locator(`${item} .kind.review`).evaluate((e) => getComputedStyle(e).backgroundColor), 'rgb(124, 77, 204)', 'review tag is purple');
+  assert.match(await page.textContent('[data-testid=data-subtabs] [data-sub=reviews]'), /到期 \d/);
+  await page.screenshot({ path: join(shots, '15-review-due.png') });
+  // calendar: purple review event next to blue to-dos
+  await page.click('[data-testid=data-subtabs] [data-sub=calendar]');
+  await page.waitForSelector('[data-testid=todo-calendar] .review-event');
+  const ev = page.locator('[data-testid=todo-calendar] .review-event').filter({ hasText: card.concept_title.slice(0, 4) }).first();
+  assert.equal(await ev.evaluate((e) => getComputedStyle(e).backgroundColor), 'rgb(124, 77, 204)');
+  await page.screenshot({ path: join(shots, '15b-review-calendar.png') });
+  // rate 想起来了 from 今天到期 → next date moves out of today, card revision +1, event actor learner
+  await page.click(`${item} [data-rating="3"]`);
+  await page.waitForSelector('[data-testid=notice] >> text=已记录复习，下次复习');
+  const after = (await store.data('reviews', { courseId: cid })).find((c) => c.id === card.id);
+  assert.equal(after.revision, card.revision + 1);
+  assert.ok(Date.parse(after.due_at) > Date.now() + 12 * 3600e3, 'the next review is days away, not today');
+  const e1 = (await readState()).events.at(-1);
+  assert.equal(e1.action, 'review.rate'); assert.equal(e1.actor, 'learner');
+  await eventually(async () => assert.equal(await page.locator(item).count(), 0));
+  // the click on the calendar event opens the knowledge point detail with the new date
+  await page.click('[data-testid=data-subtabs] [data-sub=reviews]');
+  await page.waitForSelector('[data-testid=grid-reviews] canvas');
+  await gridClick('grid-reviews', card.concept_id, 'kp');
+  await page.waitForSelector(`[data-testid=kp-detail][data-concept="${card.concept_id}"] [data-testid=kp-review]`);
+  const d = new Date(after.due_at);
+  await eventually(async () => assert.equal(await page.textContent('[data-testid=kp-next-review]'), `${d.getMonth() + 1}月${d.getDate()}日`));
+  assert.match(await page.textContent('[data-testid=kp-rate]'), /忘了 · 明天/);
+  await page.screenshot({ path: join(shots, '15c-review-detail.png') });
+  // knowledge point table shows the same date in 下次复习
+  // AI rates meanwhile (tutor_review_rate) → the learner's click from the old drawer is refused, schedule kept
+  const ai = await tools.tutor_review_rate.execute({ conceptId: card.concept_id, rating: 2, baseRevision: after.revision, evidence: 'e2e：学习者答对但用了很久' });
+  await page.click('[data-testid=kp-rate] [data-rating="1"]');
+  await page.waitForSelector('[data-testid=notice] >> text=AI 或其他窗口刚给这个知识点评过分，没有保存');
+  const kept = (await store.data('reviews', { courseId: cid })).find((c) => c.id === card.id);
+  assert.equal(kept.due_at, ai.card.due_at); assert.equal(kept.revision, ai.card.revision);
+  await eventually(async () => assert.equal(await page.getAttribute('[data-testid=kp-review]', 'data-revision'), String(ai.card.revision)));
+  await page.click('[data-testid=data-subtabs] [data-sub=kp]');
+  await page.waitForSelector('[data-testid=grid-kp] canvas');
+  assert.ok(JSON.parse(await page.getAttribute('[data-testid=grid-kp]', 'data-cols')).some((c) => c.id === 'review'), '知识点总表 has a 下次复习 column');
+  assert.equal((await store.data('knowledgePoints', { courseId: cid })).find((r) => r.concept_id === card.concept_id).next_review_at, ai.card.due_at);
+});
+
 await step('chat tool cards render tool results as graphics (outline/mindmap/graph/board)', async () => {
   const cards = await Promise.all(['outline', 'mindmap', 'graph', 'board'].map(async (view) => ({ view, value: await tools.tutor_visualize.execute({ courseId: cid, view }) })));
   const p2 = await context.newPage();

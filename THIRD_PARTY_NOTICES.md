@@ -47,3 +47,10 @@ No React Flow Pro code (xyflow Pro examples are under the xyflow Pro License) wa
 | mind-elixir | 6.0.0 | MIT — Copyright (c) 2019 DjZhou (SSShooter) |
 
 React and React DOM are not bundled: the DSH host provides them.
+
+## Runtime dependencies (server side, installed from npm, not bundled)
+
+| Package | Version | License |
+|---|---|---|
+| ts-fsrs (FSRS review scheduling, `src/review.mjs`) | 6.0.0 | MIT — Copyright (c) 2026 Open Spaced Repetition |
+| @open-spaced-repetition/srs-kit (ts-fsrs dependency) | 1.0.0 | BSD-3-Clause — Copyright Open Spaced Repetition |

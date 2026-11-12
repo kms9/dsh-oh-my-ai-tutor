@@ -11,9 +11,10 @@ import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { newState, validateState, transition, SCHEMA_VERSION, MAX_EVENTS, ACTORS } from './core.mjs';
+import { cardFromRow, rowFromCard, review as fsrsReview, preview as fsrsPreview, replay, spreadOverdue, ratingFromAttempt, RATING_LABEL, STATE_NAME } from './review.mjs';
 
 /** Physical layout version of this database (PRAGMA user_version). Bump only with a migration step below. */
-export const DB_VERSION = 1;
+export const DB_VERSION = 2;
 const APPLICATION_ID = 0x4f4d5454; // "OMTT": never adopt or reset an unrelated SQLite file
 export const TODO_STATUS = Object.freeze(['open', 'done', 'dropped']);
 
@@ -21,7 +22,8 @@ export function defaultDbPath() {
   return join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'oh-my-ai-tutor', 'tutor.db');
 }
 
-const SCHEMA = `
+/** Version-1 layout; a new database is created from it and then migrated (see MIGRATIONS). Exported for migration tests. */
+export const SCHEMA_V1 = `
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE goals (id TEXT PRIMARY KEY, doc TEXT NOT NULL CHECK (json_valid(doc)));
 CREATE TABLE courses (id TEXT PRIMARY KEY, goal_id TEXT, title TEXT, status TEXT, syllabus_revision INTEGER, updated_at TEXT,
@@ -58,7 +60,7 @@ CREATE TABLE todos (id TEXT PRIMARY KEY, course_id TEXT, concept_id TEXT, title 
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1);
 CREATE INDEX todos_due ON todos(status, due_at);
 CREATE INDEX todos_course ON todos(course_id);
--- reserved for spaced repetition (FSRS); not written yet
+-- spaced repetition (FSRS); version 1 only reserved these, version 2 (MIGRATIONS[2]) adds the columns it writes
 CREATE TABLE review_cards (id TEXT PRIMARY KEY, course_id TEXT, concept_id TEXT, due_at TEXT NOT NULL, stability REAL, difficulty REAL,
   reps INTEGER NOT NULL DEFAULT 0, lapses INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT 'new', last_review_at TEXT);
 CREATE INDEX review_cards_due ON review_cards(due_at);
@@ -102,6 +104,54 @@ CREATE VIEW v_todos AS
   FROM todos t LEFT JOIN concepts k ON k.id = t.concept_id;
 CREATE VIEW v_events AS SELECT seq, revision, at, actor, action, entity_id, summary FROM events;
 `;
+
+/**
+ * Ordered, additive migrations: MIGRATIONS[n] takes a database at user_version n-1 to n. Each runs inside the open()
+ * transaction together with the user_version bump, so a failure leaves the file at the old version, untouched.
+ * A fresh database is created with SCHEMA (= version 1) and then walks the same steps.
+ */
+const MIGRATIONS = {
+  // 2: FSRS review cards (ts-fsrs). Version 1 reserved review_cards / review_logs but never wrote them; only ADD COLUMN,
+  // so even a file where someone did write rows keeps them.
+  2: `
+ALTER TABLE review_cards ADD COLUMN scheduled_days INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE review_cards ADD COLUMN learning_steps INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE review_cards ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE review_cards ADD COLUMN source TEXT;
+ALTER TABLE review_cards ADD COLUMN created_at TEXT;
+ALTER TABLE review_cards ADD COLUMN updated_at TEXT;
+CREATE UNIQUE INDEX review_cards_concept ON review_cards(concept_id);
+ALTER TABLE review_logs ADD COLUMN concept_id TEXT;
+ALTER TABLE review_logs ADD COLUMN actor TEXT;
+ALTER TABLE review_logs ADD COLUMN state_before TEXT;
+ALTER TABLE review_logs ADD COLUMN prev_due TEXT;
+ALTER TABLE review_logs ADD COLUMN next_due TEXT;
+ALTER TABLE review_logs ADD COLUMN scheduled_days INTEGER;
+CREATE INDEX review_logs_card ON review_logs(card_id, reviewed_at);
+DROP VIEW v_knowledge_points;
+CREATE VIEW v_knowledge_points AS
+  SELECT o.course_id, o.concept_id, o.title, o.topic_id, o.topic_title, o.topic_index, o.sub_index, o.subtopic_id, o.description,
+    k.mastery,
+    (SELECT count(*) FROM assessments a WHERE a.concept_id = o.concept_id) AS attempts,
+    (SELECT round(avg(a.score), 2) FROM assessments a WHERE a.concept_id = o.concept_id) AS avg_score,
+    (SELECT max(a.recorded_at) FROM assessments a WHERE a.concept_id = o.concept_id) AS last_attempt_at,
+    (SELECT count(*) FROM relations r WHERE r.from_id = o.concept_id OR r.to_id = o.concept_id) AS relations,
+    (SELECT json_group_array(element_id) FROM (SELECT element_id FROM v_board_cards b WHERE b.concept_id = o.concept_id AND b.course_id = o.course_id ORDER BY b.ord)) AS board_cards,
+    (SELECT count(*) FROM todos t WHERE t.concept_id = o.concept_id AND t.status = 'open') AS open_todos,
+    rc.id AS review_card_id, rc.state AS review_state, CASE WHEN rc.state = 'new' THEN NULL ELSE rc.due_at END AS next_review_at,
+    rc.reps AS review_reps, rc.revision AS review_revision
+  FROM v_outline o LEFT JOIN concepts k ON k.id = o.concept_id LEFT JOIN review_cards rc ON rc.concept_id = o.concept_id;
+CREATE VIEW v_review_cards AS
+  SELECT r.id, o.course_id, r.concept_id, o.title AS concept_title, o.topic_title, o.topic_index, o.sub_index, r.state,
+    CASE WHEN r.state = 'new' THEN NULL ELSE r.due_at END AS due_at, r.last_review_at, r.reps, r.lapses, r.stability, r.difficulty,
+    r.scheduled_days, r.source, r.revision, r.updated_at
+  FROM review_cards r JOIN v_outline o ON o.concept_id = r.concept_id;
+CREATE VIEW v_review_logs AS
+  SELECT l.id, l.card_id, l.concept_id, k.title AS concept_title, l.rating, l.actor, l.reviewed_at, l.state_before, l.prev_due, l.next_due,
+    l.scheduled_days, l.assessment_id
+  FROM review_logs l LEFT JOIN concepts k ON k.id = l.concept_id;
+`,
+};
 
 // collection → table, column extractors (doc is always the full entity)
 const ENTITY = {
@@ -152,21 +202,30 @@ export class SqliteTutorStore {
         if (v === 0) {
           const tables = db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE type = 'table'").get().n;
           if (tables) throw new Error(`${this.path}: unversioned database with tables; refusing to adopt it`);
-          db.exec(SCHEMA);
+          db.exec(SCHEMA_V1);
           db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run('revision', '0');
           db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run('stateSchemaVersion', String(SCHEMA_VERSION));
           db.exec(`PRAGMA application_id = ${APPLICATION_ID}`);
-          db.exec(`PRAGMA user_version = ${DB_VERSION}`);
+          db.exec('PRAGMA user_version = 1');
         } else if (v > DB_VERSION) {
           throw new Error(`${this.path} has database version ${v}, newer than this plugin understands (${DB_VERSION}); update the plugin`);
         }
-        // (future: `else if (v < DB_VERSION)` runs ordered migrations here, inside this transaction — never drops data)
+        const from = db.prepare('PRAGMA user_version').get().user_version;
+        for (let n = from + 1; n <= DB_VERSION; n++) {
+          db.exec(MIGRATIONS[n]);
+          db.exec(`PRAGMA user_version = ${n}`);
+        }
+        if (from < DB_VERSION && v !== 0) {
+          db.prepare("INSERT INTO meta (key, value) VALUES ('dbMigrations', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+            .run(JSON.stringify({ from, to: DB_VERSION, at: this.now() }));
+        }
         db.exec('COMMIT');
       } catch (e) { db.exec('ROLLBACK'); throw e; }
       void version;
     } catch (e) { db.close(); throw e; }
     this.db = db;
     this.#importLegacyOnce();
+    this.reviewInit = this.#tx(() => this.#reconcileReviewCards({ spread: true }));
     return db;
   }
   close() { this.db?.close(); this.db = null; }
@@ -288,6 +347,15 @@ export class SqliteTutorStore {
       const next = transition(state, action, payload, { actor: opts.actor, summary: opts.summary });
       this.#writeDiff(state, next.state, state.revision);
       this.db.prepare("UPDATE meta SET value = ? WHERE key = 'revision'").run(String(next.state.revision));
+      // review cards follow the evidence: a newly recorded attempt is an FSRS review of its knowledge point; new
+      // knowledge points get a card. Same transaction, so a rejected write changes no schedule either.
+      this.#reconcileReviewCards({ spread: false });
+      for (const [id, a] of Object.entries(next.state.assessments)) {
+        if (state.assessments[id] || !a.conceptId) continue;
+        const rating = ratingFromAttempt(a);
+        if (this.db.prepare('SELECT 1 FROM review_logs WHERE assessment_id = ?').get(id)) continue; // already replayed into a new card
+        if (rating) this.#applyReview(a.conceptId, rating, new Date(a.recordedAt ?? this.now()), opts.actor ?? 'ai', id);
+      }
       return { revision: next.state.revision, result: next.result };
     });
   }
@@ -363,6 +431,87 @@ export class SqliteTutorStore {
   }
   #todoRow(id) { return { ...this.db.prepare('SELECT * FROM v_todos WHERE id = ?').get(id) }; }
 
+  // ---------- FSRS review cards ----------
+  /**
+   * Make sure every live knowledge point has exactly one review card. A knowledge point with evidence (scored attempts,
+   * or a mastery label) gets a card replayed from that evidence; others start as 'new' (not scheduled until the first
+   * attempt or rating). `spread`: cards that come out overdue from old evidence are spread over the next days
+   * (at most 3 a day, most overdue first) instead of all landing on today. Caller holds the transaction.
+   */
+  #reconcileReviewCards({ spread }) {
+    const db = this.db;
+    const missing = db.prepare(`SELECT k.id, k.course_id, k.mastery, k.doc FROM concepts k
+      WHERE k.status = 'active' AND NOT EXISTS (SELECT 1 FROM review_cards r WHERE r.concept_id = k.id)`).all();
+    if (!missing.length) return { created: 0, fromEvidence: 0, spread: 0 };
+    const now = new Date(this.now());
+    const attemptsOf = db.prepare('SELECT a.id, a.score, a.recorded_at, json_extract(a.doc, \'$.hintCount\') AS hint_count FROM assessments a WHERE a.concept_id = ?');
+    const made = missing.map((k) => {
+      const doc = JSON.parse(k.doc);
+      const r = replay(attemptsOf.all(k.id), { mastery: k.mastery, createdAt: doc.createdAt, masteryAt: doc.updatedAt });
+      return { k, ...(r ?? { card: null, logs: [], source: 'new' }) };
+    });
+    const withEvidence = made.filter((m) => m.card);
+    if (spread) spreadOverdue(withEvidence, now, 3);
+    const insCard = db.prepare(`INSERT INTO review_cards (id, course_id, concept_id, due_at, stability, difficulty, reps, lapses, state, last_review_at,
+      scheduled_days, learning_steps, revision, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`);
+    const insLog = db.prepare(`INSERT INTO review_logs (id, card_id, concept_id, rating, reviewed_at, assessment_id, actor, state_before, prev_due, next_due, scheduled_days)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const at = now.toISOString();
+    for (const m of made) {
+      const id = `rc-${m.k.id}`;
+      if (m.card) {
+        const c = rowFromCard(m.card);
+        insCard.run(id, m.k.course_id, m.k.id, c.due_at, c.stability, c.difficulty, c.reps, c.lapses, c.state, c.last_review_at, c.scheduled_days, c.learning_steps, m.source, at, at);
+        m.logs.forEach((l, i) => insLog.run(`rl-${randomUUID()}`, id, m.k.id, l.rating, l.review.toISOString(), l.assessmentId ?? null, 'system',
+          STATE_NAME[l.state] ?? null, null, i === m.logs.length - 1 ? c.due_at : null, l.scheduled_days ?? null));
+      } else {
+        insCard.run(id, m.k.course_id, m.k.id, at, null, null, 0, 0, 'new', null, 0, 0, 'new', at, at);
+      }
+    }
+    return { created: made.length, fromEvidence: withEvidence.length, spread: withEvidence.filter((m) => m.spread > 0).length };
+  }
+  /** One FSRS review of a knowledge point's card (caller holds the transaction). Returns the updated row. */
+  #applyReview(conceptId, rating, at, actor, assessmentId = null) {
+    const db = this.db;
+    const cur = db.prepare('SELECT * FROM review_cards WHERE concept_id = ?').get(conceptId);
+    if (!cur) throw new Error(`No review card for knowledge point ${conceptId}`);
+    const { card } = fsrsReview(cardFromRow(cur), rating, at);
+    const c = rowFromCard(card);
+    db.prepare(`UPDATE review_cards SET due_at = ?, stability = ?, difficulty = ?, reps = ?, lapses = ?, state = ?, last_review_at = ?, scheduled_days = ?,
+      learning_steps = ?, revision = revision + 1, updated_at = ?, source = COALESCE(source, 'review') WHERE id = ? AND revision = ?`)
+      .run(c.due_at, c.stability, c.difficulty, c.reps, c.lapses, c.state, c.last_review_at, c.scheduled_days, c.learning_steps, this.now(), cur.id, cur.revision);
+    db.prepare(`INSERT INTO review_logs (id, card_id, concept_id, rating, reviewed_at, assessment_id, actor, state_before, prev_due, next_due, scheduled_days)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(`rl-${randomUUID()}`, cur.id, conceptId, rating, at.toISOString(), assessmentId, actor, cur.state,
+      cur.state === 'new' ? null : cur.due_at, c.due_at, c.scheduled_days);
+    return db.prepare('SELECT * FROM v_review_cards WHERE id = ?').get(cur.id);
+  }
+  /**
+   * Rate a review card (learner from the workbench, or the AI after a real learner answer).
+   * input: { conceptId | cardId, rating 1..4, baseRevision (the card's own revision) }. A stale baseRevision is a
+   * conflict (the schedule is never overwritten from an old screen). Bumps the global revision and logs review.rate.
+   */
+  async review(input = {}, { actor = 'learner' } = {}) {
+    this.open();
+    if (!ACTORS.includes(actor)) throw new Error('actor must be learner or ai');
+    const db = this.db;
+    return this.#tx(() => {
+      const cur = input.cardId ? db.prepare('SELECT * FROM review_cards WHERE id = ?').get(String(input.cardId))
+        : db.prepare('SELECT * FROM review_cards WHERE concept_id = ?').get(String(input.conceptId ?? ''));
+      if (!cur) throw new Error(`Unknown review card for ${input.cardId ?? input.conceptId}`);
+      const live = db.prepare('SELECT concept_title AS title FROM v_review_cards WHERE id = ?').get(cur.id);
+      if (!live) throw new Error('This knowledge point is no longer in the outline');
+      if (!Number.isInteger(input.baseRevision)) throw new Error('baseRevision (the review card revision you read) is required');
+      if (input.baseRevision !== cur.revision) throw conflict(`Review card changed (revision ${cur.revision}); read it again`, { reviewRevision: cur.revision });
+      const rating = Number(input.rating);
+      if (![1, 2, 3, 4].includes(rating)) throw new Error('rating must be 1 (忘了) | 2 (吃力) | 3 (想起来了) | 4 (轻松)');
+      const row = this.#applyReview(cur.concept_id, rating, new Date(this.now()), actor);
+      const d = new Date(row.due_at);
+      const revision = this.#bump('review.rate', actor, cur.id,
+        `${actor === 'learner' ? '你' : 'AI'}复习「${live.title}」：${RATING_LABEL[rating]}（下次 ${d.getMonth() + 1}月${d.getDate()}日）${typeof input.note === 'string' && input.note.trim() ? ` · 依据：${input.note.trim().slice(0, 80)}` : ''}`);
+      return { revision, card: { ...row } };
+    });
+  }
+
   // ---------- read-only queries for the data panel ----------
   /** Named, parameterised queries only (the UI never sends SQL). */
   async data(name, params = {}) {
@@ -377,6 +526,7 @@ export class SqliteTutorStore {
           .map((r) => ({ ...r, board_cards: JSON.parse(r.board_cards ?? '[]') }));
       case 'questions': return plain(db.prepare('SELECT * FROM v_questions WHERE course_id = ? ORDER BY last_at DESC').all(courseId));
       case 'attempts': return plain(db.prepare('SELECT * FROM v_attempts WHERE course_id = ? ORDER BY recorded_at DESC').all(courseId));
+      case 'reviews': return plain(db.prepare("SELECT * FROM v_review_cards WHERE course_id = ? ORDER BY state = 'new', due_at, topic_index, sub_index").all(courseId));
       case 'todos': return plain(db.prepare("SELECT * FROM v_todos WHERE course_id = ? ORDER BY status = 'open' DESC, due_at IS NULL, due_at, created_at").all(courseId));
       case 'concept': {
         const id = String(params.conceptId ?? '');
@@ -387,14 +537,23 @@ export class SqliteTutorStore {
           FROM relations r LEFT JOIN concepts f ON f.id = r.from_id LEFT JOIN concepts t ON t.id = r.to_id WHERE r.from_id = ? OR r.to_id = ? ORDER BY r.rowid`).all(id, id));
         const attempts = plain(db.prepare('SELECT * FROM v_attempts WHERE concept_id = ? ORDER BY recorded_at DESC').all(id));
         const todos = plain(db.prepare("SELECT * FROM v_todos WHERE concept_id = ? ORDER BY status = 'open' DESC, due_at").all(id));
-        return { ...kp, board_cards: JSON.parse(kp.board_cards ?? '[]'), concept, relations, attempts, todos };
+        return { ...kp, board_cards: JSON.parse(kp.board_cards ?? '[]'), concept, relations, attempts, todos, review: this.#reviewDetail(id) };
       }
       default: throw new Error(`Unknown data query: ${name}`);
     }
   }
 
+  #reviewDetail(conceptId) {
+    const db = this.db;
+    const raw = db.prepare('SELECT * FROM review_cards WHERE concept_id = ?').get(conceptId);
+    if (!raw) return null;
+    const card = { ...db.prepare('SELECT * FROM v_review_cards WHERE id = ?').get(raw.id) };
+    const logs = db.prepare('SELECT * FROM v_review_logs WHERE card_id = ? ORDER BY reviewed_at DESC LIMIT 20').all(raw.id).map((r) => ({ ...r }));
+    return { card, logs, preview: fsrsPreview(cardFromRow(raw), new Date(this.now())) };
+  }
+
   // ---------- model-facing read-only SQL (tutor_table_query) ----------
-  static QUERYABLE = Object.freeze(['v_knowledge_points', 'v_outline', 'v_board_cards', 'v_attempts', 'v_questions', 'v_todos', 'v_events']);
+  static QUERYABLE = Object.freeze(['v_knowledge_points', 'v_outline', 'v_board_cards', 'v_attempts', 'v_questions', 'v_todos', 'v_events', 'v_review_cards', 'v_review_logs']);
   /**
    * One SELECT/WITH statement on a separate read-only connection. No RECURSIVE (cannot be interrupted once running),
    * no ATTACH/PRAGMA, only the documented views; at most `limit` (<= 200) rows, truncation reported.
