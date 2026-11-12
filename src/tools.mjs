@@ -71,16 +71,22 @@ export const OUTLINE_OP_SCHEMA = { oneOf: [
   op('moveSubtopic', { subtopicId: req(str()), toTopicId: str('Target topic id (default: same topic).'), beforeId: str('Place before this knowledge point id (resolved after removal, so it never lands one slot late).'), toIndex: int('0-based position in the resulting list (prefer beforeId).') }),
   op('removeSubtopic', { subtopicId: req(str()) }),
 ] };
+const BELONGS_TO = {
+  type: 'object',
+  additionalProperties: false,
+  description: 'Optional affiliation: {type:"topic"|"concept", id}.',
+  properties: { type: { type: 'string', enum: ['topic', 'concept'] }, id: { type: 'string' } },
+};
 const mmOp = (name, properties, description) => ({ type: 'object', additionalProperties: false, ...(description ? { description } : {}),
   properties: { op: { type: 'string', const: name, required: true }, ...properties } });
 export const MINDMAP_OP_SCHEMA = { oneOf: [
-  mmOp('addChild', { parentId: req(str()), title: str(), belongsTo: { type: 'object' }, index: int() }),
-  mmOp('insertSibling', { id: req(str()), position: str(), title: str(), belongsTo: { type: 'object' } }),
-  mmOp('insertParent', { id: req(str()), title: str(), belongsTo: { type: 'object' } }),
+  mmOp('addChild', { parentId: req(str()), title: str(), belongsTo: BELONGS_TO, index: int() }),
+  mmOp('insertSibling', { id: req(str()), position: str(), title: str(), belongsTo: BELONGS_TO }),
+  mmOp('insertParent', { id: req(str()), title: str(), belongsTo: BELONGS_TO }),
   mmOp('remove', { ids: { type: 'array', items: { type: 'string' } }, id: str() }),
   mmOp('move', { ids: { type: 'array', items: { type: 'string' } }, id: str(), target: req(str()), where: req(str()) }),
   mmOp('rename', { id: req(str()), title: req(str()) }),
-  mmOp('setBelongsTo', { id: req(str()), belongsTo: { type: 'object' } }),
+  mmOp('setBelongsTo', { id: req(str()), belongsTo: BELONGS_TO }),
 ] };
 
 const coord = { type: 'number', description: 'Canvas pixels; clamped to [0, 20000].' };
@@ -220,7 +226,7 @@ export function toolSpecs(storeOrResolve) {
         nodes: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
           parentId: { type: 'string', description: 'Existing node id, or "root".' },
           title: { type: 'string' },
-          belongsTo: { type: 'object', additionalProperties: false, properties: { type: { type: 'string', enum: ['topic', 'concept'] }, id: { type: 'string' } } },
+          belongsTo: BELONGS_TO,
         } }, description: 'Children to add; at most 100. Duplicates under the same parent are skipped.' },
       },
       execute: run(async (store, args) => {
@@ -242,7 +248,7 @@ export function toolSpecs(storeOrResolve) {
         nodes: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
           title: { type: 'string' }, description: { type: 'string' }, refersTo: { type: 'string' },
           ref: { type: 'string', description: 'Batch-local name; point at this node as "$ref" in relations.' },
-          belongsTo: { type: 'object', additionalProperties: false, properties: { type: { type: 'string', enum: ['topic', 'concept'] }, id: { type: 'string' } } },
+          belongsTo: BELONGS_TO,
         } } },
         relations: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
           from: { type: 'string' }, to: { type: 'string' },
