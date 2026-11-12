@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { SqliteTutorStore, DB_VERSION } from '../src/sqlite-store.mjs';
 import { JsonTutorStore } from '../src/store.mjs';
 import { dispatch } from '../src/rpc.mjs';
+import { toolSpecs } from '../src/tools.mjs';
 
 const FIXTURE = new URL('./fixtures/spaced-repetition.state.json', import.meta.url);
 async function tmp(fn) {
@@ -206,3 +207,49 @@ test('read-only SQL for the model: views only, one SELECT, no writes / RECURSIVE
   store.close();
 }));
 
+test('RPC + tools: data / todo methods (learner) and tutor_table_query / tutor_todo (ai) share the same store', () => tmp(async (dir) => {
+  const store = await migrated(dir);
+  const s = await store.read(); const course = Object.values(s.courses)[0];
+  const rows = await dispatch(store, { method: 'data', payload: { query: 'knowledgePoints', params: { courseId: course.id } } });
+  assert.equal(rows.length, 15);
+  const t = await dispatch(store, { method: 'todo', payload: { op: 'create', input: { courseId: course.id, title: '做 3 道题', dueAt: '2026-11-11T18:00:00-07:00' } } });
+  assert.equal(t.todo.created_by, 'learner');
+  const tools = Object.fromEntries(toolSpecs(store).map((x) => [x.name, x]));
+  const q = await tools.tutor_table_query.execute({ sql: 'SELECT title, due_at, created_by FROM v_todos' });
+  assert.deepEqual(q.rows.map((r) => r.created_by), ['learner']);
+  const up = await tools.tutor_todo.execute({ op: 'update', id: t.todo.id, baseRevision: t.todo.revision, status: 'done' });
+  assert.equal(up.todo.status, 'done');
+  await assert.rejects(() => tools.tutor_todo.execute({ op: 'update', id: t.todo.id, baseRevision: t.todo.revision, status: 'open' }), (e) => e.code === 'conflict');
+  await assert.rejects(() => tools.tutor_table_query.execute({ sql: "UPDATE todos SET status='open'" }));
+  assert.equal((await store.data('todos', { courseId: course.id }))[0].status, 'done');
+  store.close();
+}));
+
+test('tools: the model cannot lift read-only, reach base tables, stack statements or exceed the row cap; tutor_todo validates', () => tmp(async (dir) => {
+  const store = await migrated(dir);
+  const course = Object.values((await store.read()).courses)[0];
+  const tools = Object.fromEntries(toolSpecs(store).map((x) => [x.name, x]));
+  for (const sql of ['SELECT * FROM todos', 'SELECT doc FROM concepts', 'PRAGMA query_only=0', "ATTACH DATABASE '/tmp/x.db' AS x",
+    'SELECT 1; DELETE FROM todos', 'DELETE FROM todos', "INSERT INTO todos(id) VALUES ('x')", 'WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c) SELECT x FROM c',
+    'SELECT * FROM v_todos, sqlite_master']) {
+    await assert.rejects(() => tools.tutor_table_query.execute({ sql }), undefined, sql);
+  }
+  const big = await tools.tutor_table_query.execute({ sql: 'SELECT a.concept_id FROM v_knowledge_points a, v_knowledge_points b', limit: 5000 });
+  assert.equal(big.rows.length, 200); assert.equal(big.truncated, true);
+  const ok = await tools.tutor_table_query.execute({ sql: 'SELECT title, avg_score FROM v_knowledge_points WHERE attempts > 0 ORDER BY avg_score', limit: 3 });
+  assert.ok(ok.rows.length >= 1 && ok.rows.length <= 3);
+  await assert.rejects(() => tools.tutor_todo.execute({ op: 'create', courseId: course.id, title: 'x', dueAt: '明天' }));
+  await assert.rejects(() => tools.tutor_todo.execute({ op: 'create', courseId: course.id, title: 'x', conceptId: 'kp-not-in-course' }));
+  await assert.rejects(() => tools.tutor_todo.execute({ op: 'delete', id: 'x' }));
+  const t = await tools.tutor_todo.execute({ op: 'create', courseId: course.id, title: '复习', dueAt: '2026-11-12T19:00:00-07:00' });
+  assert.equal(t.todo.created_by, 'ai');
+  await assert.rejects(() => tools.tutor_todo.execute({ op: 'update', id: t.todo.id, status: 'done' }), 'baseRevision is required');
+  const names = toolSpecs(store).map((x) => x.name);
+  assert.ok(!names.some((n) => /approve/.test(n)), 'no approve tool');
+  store.close();
+}));
+
+test('tools: the JSON store (storage=json) does not offer the SQLite-only tools', async () => {
+  const names = toolSpecs(new JsonTutorStore('/tmp/never-written.json')).map((x) => x.name);
+  assert.ok(!names.includes('tutor_table_query') && !names.includes('tutor_todo'));
+});

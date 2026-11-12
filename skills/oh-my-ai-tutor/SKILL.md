@@ -16,7 +16,8 @@ summary: DSH 中通过明确教学状态和学习证据管理 Goal、Course、Le
 8. 最后调用 `lesson.reviewEnd({lessonId,skipped?:boolean})`。按学习者选择，写 `note.add` 或在 `lesson.finish` 显式 `skipNotes:true`。
 9. 调整大纲 / 思维导图（两者是同一份层级数据）：优先用 `tutor_outline_edit`，先 `tutor_visualize(outline)` 取 id 和 `syllabusRevision`（**必填**），再提交原子操作（addTopic / renameTopic / moveTopic / removeTopic / addSubtopic / renameSubtopic / moveSubtopic / removeSubtopic）。**新建主题或知识点不要自带 id**，id 由内核分配；只回传内核给出的 id。移动优先用 `beforeId`。大纲只有两层（主题 → 知识点）。任何修改都会让大纲回到待批准，需学习者在工作台重新点「批准大纲」。删除知识点只会退役，不删除答题记录。学习者也可能在工作台里手动改过，冲突时重新读取再判断。
 10. 课程白板：先 `tutor_board_read` 取 `revision` 和元素 id，再 `tutor_board_patch({courseId, baseRevision, operations})`（`baseRevision` 必填）。元素 id 只来自 `tutor_board_read`；新卡片/便签/箭头**不带 id**，由内核分配，同一批里要引用新卡片时给它 `ref:"n1"`，再用 `"$n1"` 指向它。`seed:true` 补齐缺失的知识点卡片和候选关系箭头；被人手动删掉的关系箭头不会被补回，随卡片级联删除的会随卡片一起补回。从大纲删掉的知识点，卡片保留为虚线（stale），需要时手动删。颜色只接受 `#rgb` / `#rrggbb`。白板箭头只是视觉连线，语义关系要另用 `relation.propose`。禁止从坐标远近推断关系。外部 `dsh-whiteboard`（Excalidraw）若已安装，仍需 `whiteboard_list`/`whiteboard_read` 后再 patch，不会与课程白板自动同步。
-11. 来源读取/学习者同意/外部插件操作在此原型中没有硬门禁；如环境未配置，明确告知而非宣称执行成功。
+11. 数据查询与待办：学习数据存在 SQLite（`tutor.db`），工作台「数据」标签页直接查它。统计类问题（哪些知识点平均分最低、这周有什么到期）用 `tutor_table_query({sql, limit?})`：只读、只能一条 SELECT、只能查 `v_*` 视图、最多 200 行，写语句会被拒绝。待办用 `tutor_todo`：`op:"create"` 传 `{courseId,title,dueAt?,conceptId?,note?}`，`op:"update"` 传 `{id,baseRevision,status?/dueAt?/…}`，`baseRevision` 是这条待办自己的 revision；冲突时重新查询（学习者可能刚勾掉），不要盲目重试。时间用带时区偏移的 ISO（学习者默认在 America/Phoenix，如 `2026-11-12T19:00:00-07:00`）。只建学习者要求或同意的待办；不会发系统通知，也不会同步到滴答清单。若学习者要对话里的提醒，可以另用 `schedule_create`，提醒可能重复送达，措辞要能容忍重复（如「如果已经完成可以忽略」）。
+12. 来源读取/学习者同意/外部插件操作在此原型中没有硬门禁；如环境未配置，明确告知而非宣称执行成功。
 
 ## tutor_write 动作清单及 JSON payload
 
