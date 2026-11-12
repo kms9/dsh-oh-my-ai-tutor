@@ -40,8 +40,10 @@ const openWorkbench = (view, focus) => { nav = { view: view ?? nav.view, focus: 
 window.__tutorOpenWorkbench = openWorkbench;
 window.__tutorExternal = [];
 const openExternal = (url) => { window.__tutorExternal.push(url); };
+window.__tutorAdded = [];
+const onAddToChat = (resource) => { window.__tutorAdded.push(resource); return true; };
 function render() {
-  root.render(<Workbench api={api} initialView={nav.view} focus={nav.focus} navRevision={nav.revision} pollMs={Number(params.get('poll') ?? 1000)} openExternal={openExternal} />);
+  root.render(<Workbench api={api} initialView={nav.view} focus={nav.focus} navRevision={nav.revision} pollMs={Number(params.get('poll') ?? 1000)} openExternal={openExternal} onAddToChat={onAddToChat} />);
 }
 installTutorLinks((link) => openWorkbench(viewFor(link), link));
 render();

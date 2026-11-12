@@ -6,12 +6,12 @@
 // So:
 //   - an external source links to its registered URI, with the locator folded in where the URL format allows
 //     (PDF `#page=12`, YouTube / Bilibili `t=`, other media `#t=`);
-//   - an internal object (knowledge point, board card, note, lesson, outline row) links to a reserved https address
+//   - an internal object (knowledge point, mind-map / graph node, relation, board card, note, lesson, to-do, review card, outline row) links to a reserved https address
 //     under TUTOR_LINK_ORIGIN (`.invalid` never resolves, RFC 2606). The tutor's browser plugin intercepts clicks on
 //     those links (capture phase, before DSH's own handler) and opens the AI 学习工作台 at that object.
 export const TUTOR_LINK_ORIGIN = 'https://tutor.invalid';
-export const LINK_KINDS = Object.freeze(['concept', 'card', 'note', 'lesson', 'topic', 'outline', 'source']);
-const KIND_LABEL = { concept: '知识点', card: '白板卡片', note: '笔记', lesson: '课时', topic: '主题', outline: '大纲', source: '资料' };
+export const LINK_KINDS = Object.freeze(['concept', 'card', 'note', 'lesson', 'topic', 'outline', 'source', 'mindmapNode', 'graphNode', 'relation', 'todo', 'review']);
+const KIND_LABEL = { concept: '知识点', card: '白板卡片', note: '笔记', lesson: '课时', topic: '主题', outline: '大纲', source: '资料', mindmapNode: '导图节点', graphNode: '图谱节点', relation: '关系', todo: '待办', review: '复习卡片' };
 const ID_RE = /^[A-Za-z0-9_-]{1,160}$/;
 
 /** https://tutor.invalid/<kind>/<id>?course=<courseId>[&part=<n>] */
@@ -110,7 +110,7 @@ export function refView(state, ref) {
  * Clickable links for the named objects of one course. `want`: { conceptIds, noteIds, lessonIds, elementIds, topicIds,
  * sourceIds, sourceRefs, outline }. Unknown ids are skipped (never invented).
  */
-export function linksFor(state, courseId, want = {}) {
+export function linksFor(state, courseId, want = {}, extras = {}) {
   const course = state.courses?.[courseId];
   const out = [];
   const seen = new Set();
@@ -147,6 +147,29 @@ export function linksFor(state, courseId, want = {}) {
     push(link('source', v.sourceId, `资料：${v.label}`, v.href, { external: true, locator: v.locator }));
   }
   if (want.outline && course) push(link('outline', courseId, `大纲（第 ${course.syllabus.revision} 版）`, internalHref('outline', courseId, courseId)));
+  const mm = state.mindmaps?.[courseId];
+  for (const id of want.mindmapNodeIds ?? []) {
+    const n = mm?.nodes?.[id]; if (!n) continue;
+    push(link('mindmapNode', id, `导图节点：${n.title}`, internalHref('mindmapNode', id, courseId)));
+  }
+  for (const id of want.graphNodeIds ?? []) {
+    const n = state.graphNodes?.[id]; if (!n || n.courseId !== courseId) continue;
+    push(link('graphNode', id, `图谱节点：${n.title}`, internalHref('graphNode', id, courseId)));
+  }
+  for (const id of want.relationIds ?? []) {
+    const r = state.relations?.[id]; if (!r || r.courseId !== courseId) continue;
+    const from = state.graphNodes?.[r.from]?.title ?? state.concepts?.[r.fromConceptId ?? r.from]?.title ?? r.from;
+    const to = state.graphNodes?.[r.to]?.title ?? state.concepts?.[r.toConceptId ?? r.to]?.title ?? r.to;
+    push(link('relation', id, `关系：${from} —${r.type}→ ${to}`, internalHref('relation', id, courseId)));
+  }
+  for (const id of want.todoIds ?? []) {
+    const t = (extras.todos ?? []).find((x) => x.id === id); if (!t) continue;
+    push(link('todo', id, `待办：${t.title}`, internalHref('todo', id, courseId)));
+  }
+  for (const id of want.reviewIds ?? []) {
+    const r = (extras.reviews ?? []).find((x) => x.id === id); if (!r) continue;
+    push(link('review', id, `复习卡片：${r.concept_title ?? id}`, internalHref('review', id, courseId)));
+  }
   return out;
 }
 export { KIND_LABEL };

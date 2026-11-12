@@ -2,6 +2,7 @@ import { snapshot, SOURCE_KINDS, OUTLINE_OPS, liveBoard, sinceApproved, refsView
 import { MINDMAP_OPS } from './resources.mjs';
 import { projectCourse } from './projections.mjs';
 import { linksFor, parseLocator } from './links.mjs';
+import { loadCatalogExtras } from './context-ref.mjs';
 import { SqliteTutorStore } from './sqlite-store.mjs';
 
 /**
@@ -14,7 +15,7 @@ export const WRITE_ACTIONS = Object.freeze([
   'course.approve', 'course.setApproval',
   'lesson.create', 'lesson.updatePlan', 'lesson.link', 'lesson.approve', 'lesson.partWrite', 'lesson.cover',
   'lesson.ask', 'lesson.hint', 'lesson.dropQuestion', 'lesson.checkpoint', 'assessment.record',
-  'lesson.reviewEnd', 'note.add', 'note.link', 'lesson.finish', 'lesson.feedback', 'lesson.adjustDone',
+  'lesson.reviewEnd', 'note.add', 'note.link', 'note.update', 'lesson.finish', 'lesson.feedback', 'lesson.adjustDone',
   'relation.propose', 'board.seed', 'board.generate', 'board.patch',
   'mindmap.ensure', 'mindmap.edit', 'mindmap.generate', 'graphNode.add', 'graphNode.rename', 'graphNode.remove',
   'graph.generate',
@@ -43,7 +44,7 @@ export function linksForWrite(state, action, payload, result) {
     want.conceptIds = [...(want.conceptIds ?? []), ...(payload?.conceptId ? [payload.conceptId] : []), ...(lesson.conceptIds ?? [])].slice(0, 10);
     if (action === 'lesson.partWrite') want.sourceRefs = lesson.parts[payload.partIndex]?.sourceRefs ?? [];
   }
-  if (note && (action === 'note.add' || action === 'note.link')) { want.noteIds = [note.id]; want.conceptIds = note.conceptIds; want.sourceRefs = note.sourceRefs; }
+  if (note && (action === 'note.add' || action === 'note.link' || action === 'note.update')) { want.noteIds = [note.id]; want.conceptIds = note.conceptIds; want.sourceRefs = note.sourceRefs; }
   if (action === 'relation.propose') want.conceptIds = [payload.from, payload.to].filter(Boolean);
   if (action === 'concept.promote' || action === 'concept.create') want.conceptIds = [result?.conceptId ?? result?.id].filter(Boolean);
   if (action.startsWith('mindmap.')) want.outline = false;
@@ -317,8 +318,8 @@ export function toolSpecs(storeOrResolve) {
     },
     {
       name: 'tutor_links',
-      description: 'Clickable links for tutor objects you want to mention in your reply: knowledge points, topics, lessons, notes, board cards, sources (optionally with a locator) or the outline. '
-        + 'Returns links[] with markdown like [知识点：顶点式](https://tutor.invalid/concept/…) — paste it as is. Internal links open the AI 学习工作台 at that object (knowledge point detail, centred board card, lesson, note, outline row); source links open the registered URL at the cited page / time. Unknown ids are skipped; never write these URLs by hand.',
+      description: 'Clickable links for tutor objects you want to mention in your reply: knowledge points, mind-map nodes, graph nodes, relations, topics, lessons, notes, board cards, to-dos, review cards, sources (optionally with a locator) or the outline. '
+        + 'Returns links[] with markdown like [知识点：顶点式](https://tutor.invalid/concept/…) — paste it as is. Internal links open the AI 学习工作台 at that object; source links open the registered URL at the cited page / time. Unknown ids are skipped; never write these URLs by hand.',
       parameters: {
         courseId: { type: 'string', required: true },
         conceptIds: { type: 'array', items: { type: 'string' } },
@@ -326,6 +327,11 @@ export function toolSpecs(storeOrResolve) {
         lessonIds: { type: 'array', items: { type: 'string' } },
         noteIds: { type: 'array', items: { type: 'string' } },
         elementIds: { type: 'array', items: { type: 'string' }, description: 'Board element ids from tutor_board_read.' },
+        mindmapNodeIds: { type: 'array', items: { type: 'string' }, description: 'Mind-map node ids from tutor_visualize(mindmap).' },
+        graphNodeIds: { type: 'array', items: { type: 'string' }, description: 'Graph node ids from tutor_visualize(graph).' },
+        relationIds: { type: 'array', items: { type: 'string' } },
+        todoIds: { type: 'array', items: { type: 'string' } },
+        reviewIds: { type: 'array', items: { type: 'string' }, description: 'Review card ids from v_review_cards.' },
         sourceRefs: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { sourceId: req(str()), locator: str('e.g. "p.12", "01:30"') } } },
         outline: { type: 'boolean', description: 'Include a link to the outline.' },
       },
@@ -334,7 +340,8 @@ export function toolSpecs(storeOrResolve) {
         const courseId = requireCourseId(args);
         if (!state.courses[courseId]) throw new Error(`Unknown courses id: ${courseId}`);
         const refs = (args.sourceRefs ?? []).filter((r) => state.sources[r?.sourceId]).map((r) => ({ sourceId: r.sourceId, ...parseLocatorSafe(r.locator) }));
-        return { courseId, links: linksFor(state, courseId, { ...args, sourceRefs: refs }) };
+        const extras = (args.todoIds?.length || args.reviewIds?.length) ? await loadCatalogExtras(store, courseId) : {};
+        return { courseId, links: linksFor(state, courseId, { ...args, sourceRefs: refs }, extras) };
       }),
     },
     ...((typeof storeOrResolve === 'function' || typeof storeOrResolve.readOnlyQuery === 'function') ? [{

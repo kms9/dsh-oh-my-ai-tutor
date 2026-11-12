@@ -75,6 +75,7 @@ summary: DSH 中通过明确教学状态和学习证据管理 Goal、Course、Le
 | `lesson.reviewEnd` | `{lessonId,skipped?}` |
 | `note.add` | `{lessonId?,courseId?,title,content,conceptIds?,anchors?,sourceRefs?}`；anchors 为 `[{type,id}]`（concept|topic|mindmapNode|graphNode|relation|lesson）；作者由调用方决定 |
 | `note.link` | `{noteId,conceptIds?,anchors?}` |
+| `note.update` | `{noteId,title?,content?}`；至少提供 title 或 content，用于改已有笔记 |
 | `mindmap.edit` | `{courseId,mindmapRevision,operations}`，同 `tutor_mindmap_edit` |
 | `mindmap.generate` | `{courseId,mindmapRevision,nodes:[{parentId,title,belongsTo?}]}`，同 `tutor_mindmap_generate`（只新增） |
 | `concept.promote` | `{courseId,from:{type:"mindmapNode"|"graphNode",id},title?,description?}`，同 `tutor_concept_promote` |
@@ -90,6 +91,13 @@ summary: DSH 中通过明确教学状态和学习证据管理 Goal、Course、Le
 | `board.generate` | `{courseId,baseRevision,lessonId?,notes:[{text,anchors?,nearConceptId?}]}`；在 seed 之上可加本课注释，不覆盖已有布局 |
 | `board.patch` | `{courseId,baseRevision,operations}`，同 `tutor_board_patch` |
 
-工具回执带 `links[]`（label、href、markdown）：提到知识点、笔记、课时、白板卡片、大纲或资料时，把 markdown 链接贴给学习者（内部链接打开工作台对应对象；资料打开其 URL 并尽量带页码/时间）。不要自己拼这些 URL。另有 `tutor_links` 可按 id 取链接。
+工具回执带 `links[]`（label、href、markdown）：提到知识点、导图节点、图谱节点、关系、笔记、课时、白板卡片、待办、复习卡片、大纲或资料时，把 markdown 链接贴给学习者（内部链接打开工作台对应对象；资料打开其 URL 并尽量带页码/时间）。不要自己拼这些 URL。另有 `tutor_links` 可按 id 取链接。
+
+## 对话中引用的学习资源
+
+学习者可以用 @ 或工作台的「添加到对话」，把某个知识点、导图节点、图谱节点、关系、大纲主题、白板卡片、笔记、课时、待办或复习卡片放进输入框。发送后，用户消息里会出现 `[学习资源 kind=… id=… courseId=…]` 块，其中是该对象的**当前**内容（不是插入时的旧副本）。
+
+若消息里有这样的块：把它们当作本轮焦点；讨论它们；在学习者要求修改或向下扩展时，用块里的 id 调用已有工具，不要先满库搜寻。不要把扩展自动写入大纲，除非学习者明确要求改大纲（`tutor_outline_edit`，仍须批准）。知识点不是树：向下扩展 = 在对应思维导图节点下 `addChild`，或在图谱中增加关联节点 / candidate 关系。已有笔记正文用 `note.update`，不要用 `note.add` 覆盖。
+
 
 不要用本 Skill 的自然语言要求替代工具回执；关键状态保存后应 `tutor_read` 检查。

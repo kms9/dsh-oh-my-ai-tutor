@@ -6,6 +6,7 @@ import { setChunkLoader } from './chunks.jsx';
 /* global __omtRequireAsync -- the host module loader's require.async, captured by the bundle banner (scripts/build.mjs) */
 import { TutorToolCard } from './ToolCard.jsx';
 import { installTutorLinks, viewFor } from './link-intercept.mjs';
+import { insertTutorReference, registerTutorInputSource, setActiveCourseId } from './context-source.mjs';
 
 export const name = 'dsh-oh-my-ai-tutor';
 export const inject = ['slots', 'sidebarRightTabs', 'sidebarRight', 'connection'];
@@ -35,14 +36,19 @@ export function apply(ctx) {
   // immutable header.cwd (the same file headless tools would open). Updated whenever the tab renders.
   let sessionId = undefined;
   const apiFor = (sid) => ({
-    async call(method, payload) {
+    async call(method, payload, signal) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(new Error('学习状态请求超时（10 秒）')), 10000);
+      const onAbort = () => controller.abort(signal?.reason ?? new Error('已取消'));
+      if (signal) {
+        if (signal.aborted) onAbort();
+        else signal.addEventListener('abort', onAbort, { once: true });
+      }
       try {
         const result = await ctx.connection.rpc.call('/api', 'dsh-oh-my-ai-tutor', { method, payload: { ...payload, sessionId: sid ?? sessionId }, sessionId: sid ?? sessionId }, controller.signal);
         if (!result.ok) { const e = new Error(result.error.message); e.code = result.error.code; throw e; }
         return result.value;
-      } finally { clearTimeout(timer); }
+      } finally { clearTimeout(timer); signal?.removeEventListener?.('abort', onAbort); }
     },
   });
   const api = apiFor();
@@ -56,6 +62,17 @@ export function apply(ctx) {
   };
   // Internal tutor links anywhere in the page (chat Markdown included) open the workbench at the object.
   ctx.effect(() => installTutorLinks((link) => openWorkbench(viewFor(link), link)));
+  // @ 学习资源 + workbench 「添加到对话」. Optional: standalone / headless hosts have no inputTriggers.
+  // Insert must use the injected context (sessions / conversation live there, not on this plugin's inject list).
+  let services = ctx;
+  const addToChat = (resource, sid) => insertTutorReference(services, sid ?? sessionId, resource);
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['inputTriggers', 'sessions', 'conversation'], (sub) => {
+      services = sub;
+      sub.effect(() => registerTutorInputSource(sub, { apiFor, openWorkbench, getSessionId: () => sessionId }));
+    });
+  }
+
 
   function Body({ useTabInfo, sessionId: slotSessionId, useSession }) {
     const info = useTabInfo();
@@ -63,7 +80,9 @@ export function apply(ctx) {
     let sid = slotSessionId;
     try { sid = sid ?? useSession?.((s) => s?.id ?? s?.sessionId); } catch { /* tab is not session-scoped */ }
     sessionId = sid ?? sessionId;
-    return <Workbench api={apiFor(sid)} visible={info.tab.visible !== false} initialView={params.view} focus={params.focus} navRevision={info.tab.navigation?.revision} openExternal={openExternal} />;
+    const onAddToChat = async (resource) => addToChat(resource, sid);
+    const onCourseChange = (id) => setActiveCourseId(id);
+    return <Workbench api={apiFor(sid)} visible={info.tab.visible !== false} initialView={params.view} focus={params.focus} navRevision={info.tab.navigation?.revision} openExternal={openExternal} onAddToChat={onAddToChat} onCourseChange={onCourseChange} />;
   }
   function Title() { return 'AI 学习工作台'; }
   ctx.effect(() => ctx.sidebarRightTabs.register({

@@ -1,5 +1,6 @@
 import { snapshot } from './core.mjs';
 import { projectCourse } from './projections.mjs';
+import { contextCatalog, contextSerialize } from './context-ref.mjs';
 
 export const ENDPOINT = 'dsh-oh-my-ai-tutor';
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -74,6 +75,8 @@ export function createRpcHandler(storeOrResolve) {
 export async function dispatch(store, { method, payload = {} }) {
   if (method === 'head') { const h = await store.head(); return store.workspace ? { ...h, workspace: store.workspace } : h; }
   if (method === 'workbench') return workbenchModel(await store.read(), payload.courseId, { workspace: store.workspace ?? null });
+  if (method === 'contextCatalog') return contextCatalog(store, payload.courseId);
+  if (method === 'contextSerialize') return contextSerialize(store, payload.ref);
   if (method === 'data') {
     if (typeof store.data !== 'function') throw new Error('数据面板需要 SQLite 存储（当前是 JSON 存储）');
     return store.data(String(payload.query ?? ''), payload.params ?? {});

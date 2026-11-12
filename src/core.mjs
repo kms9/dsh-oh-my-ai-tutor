@@ -787,6 +787,14 @@ export function transition(original, action, input = {}, opts = {}) {
       note.updatedAt = now;
       result = { id: note.id, noteId: note.id, conceptIds: note.conceptIds, anchors: note.anchors, lessonId: note.lessonId }; break;
     }
+    case 'note.update': {
+      const note = requireId(s, 'notes', payload.noteId);
+      if (payload.title === undefined && payload.content === undefined) throw new Error('note.update needs title or content');
+      if (payload.title !== undefined) note.title = requireText(payload.title, 'note.title', 160);
+      if (payload.content !== undefined) note.content = requireText(payload.content, 'note.content', 50_000);
+      note.updatedAt = now;
+      result = { id: note.id, noteId: note.id, title: note.title, content: note.content }; break;
+    }
     case 'lesson.finish': {
       const lesson = requireId(s, 'lessons', payload.lessonId);
       if (lesson.phase !== 'summary_pending') throw new Error('Finish only after review choice');

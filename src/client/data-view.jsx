@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { lazyComponent } from './chunks.jsx';
 import { MASTERY_LABEL } from './layout.mjs';
+import { AddToChatButton } from './AddToChat.jsx';
 
 // heavy parts load on first use: lib/client.grid.js (Glide Data Grid), lib/client.calendar.js (FullCalendar)
 const DataGrid = lazyComponent('grid', 'DataGrid', 200);
@@ -42,7 +43,7 @@ const defaultDue = () => { const d = new Date(); d.setHours(d.getHours() + 2, 0,
  * the board card / outline / graph, to-dos with due dates, 今天到期 and a calendar.
  * `focus` = { conceptId, nonce } opens the drawer for that knowledge point (from the board or the graph).
  */
-export function DataView({ api, course, revision, topics, selected, onSelectConcept, nav, todoWrite, reviewRate, busy, height, zoomButtons, focus }) {
+export function DataView({ api, course, revision, topics, selected, onSelectConcept, nav, todoWrite, reviewRate, busy, height, zoomButtons, focus, onAddToChat }) {
   const [sub, setSub] = useState('kp');
   const [data, setData] = useState({});
   const [err, setErr] = useState('');
@@ -61,7 +62,11 @@ export function DataView({ api, course, revision, topics, selected, onSelectConc
   }, [api, course.id]);
   // reload whenever the shared revision changes (AI or another window wrote) or the sub-tab changes
   useEffect(() => { load([...new Set([...want, 'todos', 'reviews'])]); }, [load, revision, sub]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { if (focus?.conceptId) { setDetailId(focus.conceptId); setSub((s) => (s === 'calendar' ? 'kp' : s)); } }, [focus?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (focus?.conceptId) { setDetailId(focus.conceptId); setSub((s) => (s === 'calendar' ? 'kp' : s)); }
+    if (focus?.todoId) { setPicked(focus.todoId); setSub('todos'); }
+    if (focus?.reviewId) { setSub('reviews'); }
+  }, [focus?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!detailId) { setDetail(null); return undefined; }
     let alive = true;
@@ -75,7 +80,10 @@ export function DataView({ api, course, revision, topics, selected, onSelectConc
     if (action === 'card') nav.toCard(row.board_cards[0], row.concept_id);
     else if (action === 'detail') openDetail(row.concept_id);
     else if (action === 'toggle') todoWrite('update', { id: row.id, baseRevision: row.revision, status: row.status === 'done' ? 'open' : 'done' });
-  }, [nav, openDetail, todoWrite]);
+    else if (action === 'chat-concept') onAddToChat?.({ kind: 'concept', id: row.concept_id, title: row.title ?? row.concept_title, courseId: course.id });
+    else if (action === 'chat-todo') onAddToChat?.({ kind: 'todo', id: row.id, title: row.title, courseId: course.id });
+    else if (action === 'chat-review') onAddToChat?.({ kind: 'review', id: row.id, title: row.concept_title, courseId: course.id });
+  }, [nav, openDetail, todoWrite, onAddToChat, course.id]);
 
   const q = query.trim().toLowerCase();
   const match = (...xs) => !q || xs.some((x) => String(x ?? '').toLowerCase().includes(q));
@@ -96,6 +104,7 @@ export function DataView({ api, course, revision, topics, selected, onSelectConc
       link: (r) => (r.board_cards.length ? { label: r.board_cards.length > 1 ? `▦ 主卡片（共 ${r.board_cards.length} 张）›` : '▦ 白板卡片 ›', action: 'card' } : null),
       empty: () => '还没有白板卡片' },
     { id: 'detail', title: '详情', width: 74, link: () => ({ label: '详情 ›', action: 'detail' }) },
+    { id: 'chat', title: '对话', width: 90, link: () => ({ label: '添加到对话', action: 'chat-concept' }) },
     { id: 'topic', title: '主题', width: 110, value: (r) => `${r.topic_index + 1}. ${r.topic_title}`, sortValue: (r) => r.topic_index * 1000 + r.sub_index },
     { id: 'mastery', title: '掌握度', width: 76, value: (r) => MASTERY_LABEL[r.mastery] ?? r.mastery },
     { id: 'attempts', title: '作答', width: 58, value: (r) => r.attempts },
@@ -112,6 +121,7 @@ export function DataView({ api, course, revision, topics, selected, onSelectConc
     { id: 'reps', title: '复习次数', width: 70, value: (r) => r.reps },
     { id: 'lapses', title: '遗忘', width: 52, value: (r) => r.lapses },
     { id: 'stab', title: '记忆稳定性（天）', width: 112, value: (r) => (r.stability == null ? null : Math.round(r.stability * 10) / 10) },
+    { id: 'chat', title: '对话', width: 90, link: () => ({ label: '添加到对话', action: 'chat-review' }) },
   ], []);
   const qCols = useMemo(() => [
     { id: 'question', title: '题目', width: 220, value: (r) => r.question },
@@ -137,6 +147,7 @@ export function DataView({ api, course, revision, topics, selected, onSelectConc
     { id: 'due', title: '到期', width: 110, value: (r) => fmtLocal(r.due_at), sortValue: (r) => r.due_at },
     { id: 'kp', title: '知识点', width: 116, link: (r) => (r.concept_id ? { label: `${r.concept_title ?? '知识点'} ›`, action: 'detail' } : null), empty: () => '—' },
     { id: 'by', title: '创建', width: 54, value: (r) => (r.created_by === 'learner' ? '你' : 'AI') },
+    { id: 'chat', title: '对话', width: 90, link: () => ({ label: '添加到对话', action: 'chat-todo' }) },
   ], []);
 
   const gridH = Math.max(220, (height ?? 460) - (detailId ? 300 : 0));
@@ -155,7 +166,7 @@ export function DataView({ api, course, revision, topics, selected, onSelectConc
         )}
       </div>
       {err && <div className="banner warn"><span>读取数据失败：{err}</span></div>}
-      {(sub === 'todos' || sub === 'calendar' || sub === 'reviews') && <DueToday dueToday={dueToday} overdue={overdue} reviewsDue={reviewsDue} dayStart={dayStart} busy={busy} onRate={rate} picked={picked} onPick={setPicked} onToggle={(t) => onAction('toggle', t)} onDetail={openDetail} />}
+      {(sub === 'todos' || sub === 'calendar' || sub === 'reviews') && <DueToday dueToday={dueToday} overdue={overdue} reviewsDue={reviewsDue} dayStart={dayStart} busy={busy} onRate={rate} picked={picked} onPick={setPicked} onToggle={(t) => onAction('toggle', t)} onDetail={openDetail} onAddToChat={onAddToChat} courseId={course.id} />}
       {sub === 'kp' && <DataGrid testId="grid-kp" columns={kpCols} rows={kpRows} rowKey={(r) => r.concept_id} onAction={onAction} height={gridH} highlightKey={detailId ?? selected} />}
       {sub === 'questions' && <DataGrid testId="grid-questions" columns={qCols} rows={(data.questions ?? []).filter((r) => match(r.question, r.concept_title, r.lesson_title))} rowKey={(r) => r.assessment_id} onAction={onAction} height={gridH} />}
       {sub === 'attempts' && <DataGrid testId="grid-attempts" columns={aCols} rows={(data.attempts ?? []).filter((r) => match(r.question, r.student_answer, r.concept_title, r.feedback))} rowKey={(r) => r.assessment_id} onAction={onAction} height={gridH} />}
@@ -170,13 +181,13 @@ export function DataView({ api, course, revision, topics, selected, onSelectConc
         <TodoCalendar todos={todos} reviews={reviews} onSelectReview={(r) => openDetail(r.concept_id)} height={Math.max(420, (height ?? 460) - 60)} now={now} onSelect={(t) => { setPicked(t.id); if (t.concept_id) onSelectConcept(t.concept_id); }}
           onMove={(t, iso) => todoWrite('update', { id: t.id, baseRevision: t.revision, dueAt: iso })} />
       )}
-      {detailId && <ConceptDrawer detail={detail} topics={topics} nav={nav} busy={busy} onRate={(rating) => detail?.review && reviewRate({ conceptId: detail.concept_id, rating, baseRevision: detail.review.card.revision })} onClose={() => setDetailId(null)} onNewTodo={() => setSub('todos')} />}
+      {detailId && <ConceptDrawer detail={detail} topics={topics} nav={nav} busy={busy} onRate={(rating) => detail?.review && reviewRate({ conceptId: detail.concept_id, rating, baseRevision: detail.review.card.revision })} onClose={() => setDetailId(null)} onNewTodo={() => setSub('todos')} onAddToChat={onAddToChat} courseId={course.id} />}
       <div className="status">表格直接查 SQLite（tutor.db）。点蓝色链接：「白板卡片」跳到知识白板并高亮那张卡片，「详情」打开知识点详情；点表头排序。待办到期时间按你电脑的时区显示。</div>
     </div>
   );
 }
 
-function DueToday({ dueToday, overdue, reviewsDue, dayStart, busy, onRate, picked, onPick, onToggle, onDetail }) {
+function DueToday({ dueToday, overdue, reviewsDue, dayStart, busy, onRate, picked, onPick, onToggle, onDetail, onAddToChat, courseId }) {
   const n = dueToday.length + reviewsDue.length;
   return (
     <div className="card duetoday" data-testid="due-today">
@@ -189,6 +200,7 @@ function DueToday({ dueToday, overdue, reviewsDue, dayStart, busy, onRate, picke
             <span className="grow"><button className="linkbtn" onClick={() => onDetail(r.concept_id)}>{r.concept_title} ›</button></span>
             <span className="small">{late ? `已过期 · ${fmtDay(r.due_at)}` : fmtLocal(r.due_at, false)}</span>
             <span className="rates" data-testid="review-rate">{RATING.map(([v, label]) => <button key={v} className={`tbtn rate r${v}`} disabled={busy} data-rating={v} onClick={() => onRate(r, v)}>{label}</button>)}</span>
+            <AddToChatButton resource={{ kind: 'review', id: r.id, title: r.concept_title, courseId }} onAddToChat={onAddToChat} testId="add-to-chat-review" />
           </div>
         );
       })}
@@ -199,6 +211,7 @@ function DueToday({ dueToday, overdue, reviewsDue, dayStart, busy, onRate, picke
           <span className="grow">{t.title}</span>
           <span className="small">{late ? `已过期 · ${fmtLocal(t.due_at)}` : fmtLocal(t.due_at, false)}</span>
           {t.concept_id && <button className="linkbtn" onClick={(e) => { e.stopPropagation(); onDetail(t.concept_id); }}>{t.concept_title ?? '知识点'} ›</button>}
+          <AddToChatButton resource={{ kind: 'todo', id: t.id, title: t.title, courseId }} onAddToChat={onAddToChat} testId="add-to-chat-todo" />
         </div>
       ))}
     </div>
@@ -229,7 +242,7 @@ function TodoForm({ busy, kps, defaultConcept, onCreate }) {
 }
 
 const REL = { prerequisite: '前置', partOf: '属于', explains: '解释', contrasts: '对比', applies: '应用', exampleOf: '例子', relatedTo: '相关' };
-function ConceptDrawer({ detail, topics, nav, busy, onRate, onClose, onNewTodo }) {
+function ConceptDrawer({ detail, topics, nav, busy, onRate, onClose, onNewTodo, onAddToChat, courseId }) {
   if (!detail) return <div className="card kpdrawer" data-testid="kp-detail"><span className="small">正在读取知识点…</span></div>;
   if (detail.error) return <div className="card kpdrawer" data-testid="kp-detail"><span className="small">读取失败：{detail.error}</span> <button className="tbtn" onClick={onClose}>关闭</button></div>;
   const topic = topics[detail.topic_index];
@@ -248,6 +261,7 @@ function ConceptDrawer({ detail, topics, nav, busy, onRate, onClose, onNewTodo }
         <button className="linkbtn" data-testid="kp-go-outline" onClick={() => nav.toOutline(detail.concept_id)}>☰ 在大纲中查看 ›</button>
         <button className="linkbtn" data-testid="kp-go-graph" onClick={() => nav.toGraph(detail.concept_id)}>◎ 在图谱中查看 ›</button>
         <button className="linkbtn" onClick={onNewTodo}>＋ 给它加待办</button>
+        <AddToChatButton resource={{ kind: 'concept', id: detail.concept_id, title: detail.title, courseId }} onAddToChat={onAddToChat} testId="add-to-chat-kp" />
       </div>
       <ReviewSection review={detail.review} busy={busy} onRate={onRate} />
       {detail.relations.length > 0 && (

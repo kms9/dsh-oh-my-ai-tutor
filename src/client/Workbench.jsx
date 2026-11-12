@@ -4,6 +4,7 @@ import { arrangeOps } from '../board-layout.mjs';
 import { markdownToHtml, MASTERY_LABEL, ACTION_LABEL, relTime } from './layout.mjs';
 import { DataView } from './data-view.jsx';
 import { refView } from '../links.mjs';
+import { AddToChatButton } from './AddToChat.jsx';
 
 // heavy views load on first use (DSH: package-local chunks lib/client.flow.js and lib/client.mindmap.js)
 const BoardFlow = lazyComponent('flow', 'BoardFlow');
@@ -71,7 +72,7 @@ function InlineEdit({ value, onCommit, onCancel, testId }) {
  * The three-column learning workbench. All reads come from the tutor domain state through `api.call('workbench')`;
  * all learner edits go through `api.call('mutate')` (same transitions, gates and CAS the AI tools use).
  */
-export function Workbench({ api, visible = true, initialView, navRevision, focus, pollMs = 1000, chrome = true, openExternal }) {
+export function Workbench({ api, visible = true, initialView, navRevision, focus, pollMs = 1000, chrome = true, openExternal, onAddToChat, onCourseChange }) {
   const rootRef = useRef(null);
   const widthClass = useWidthClass(rootRef);
   const [rightRef, rightWidth] = useElementWidth();
@@ -100,6 +101,8 @@ export function Workbench({ api, visible = true, initialView, navRevision, focus
   const [outlineFocus, setOutlineFocus] = useState(null);
   const [noteFocus, setNoteFocus] = useState(null);
   const [lessonFocus, setLessonFocus] = useState(null);
+  const [mindmapFocus, setMindmapFocus] = useState(null);
+  const [graphFocus, setGraphFocus] = useState(null);
   const nav = useMemo(() => ({
     toLesson(id, part) { if (!id) return; setLessonId(id); setPartIndex(Number.isInteger(part) ? part : null); setLessonFocus({ id, nonce: Date.now() }); },
     toNote(id) { if (!id) return; pendingFocus.current = { kind: 'note', id }; setFocusTick((n) => n + 1); }, // resolved against the model below
@@ -140,6 +143,7 @@ export function Workbench({ api, visible = true, initialView, navRevision, focus
   }, [api]);
 
   useEffect(() => { reload().catch((e) => setError(e.message)); }, [reload, courseId]);
+  useEffect(() => { if (model?.course?.id) onCourseChange?.(model.course.id); }, [model?.course?.id, onCourseChange]);
   useEffect(() => {
     if (!visible) return undefined;
     let stop = false, inflight = false;
@@ -236,6 +240,15 @@ export function Workbench({ api, visible = true, initialView, navRevision, focus
     } else if (f.kind === 'topic') {
       nav.toTopic(f.id);
     } else if (f.kind === 'outline') setTab('outline');
+    else if (f.kind === 'mindmapNode') { setTab('mindmap'); setMindmapFocus({ id: f.id, nonce: Date.now() }); }
+    else if (f.kind === 'graphNode') { setTab('graph'); setSelected(f.id); setGraphFocus({ id: f.id, nonce: Date.now() }); }
+    else if (f.kind === 'relation') {
+      const rel = (m.relations ?? []).find((r) => r.id === f.id);
+      setTab('graph');
+      setSelected(rel?.from ?? rel?.fromConceptId ?? null);
+      setGraphFocus({ id: rel?.from, relationId: f.id, nonce: Date.now() });
+    } else if (f.kind === 'todo') { setTab('data'); setDataFocus({ todoId: f.id, nonce: Date.now() }); }
+    else if (f.kind === 'review') { setTab('data'); setDataFocus({ reviewId: f.id, nonce: Date.now() }); }
   }, [model, focusTick]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const id = noteFocus?.id ?? (lessonFocus ? '__lesson' : null);
@@ -279,6 +292,14 @@ export function Workbench({ api, visible = true, initialView, navRevision, focus
   };
   const lessonAssessments = lesson ? model.assessments.filter((a) => a.lessonId === lesson.id).sort((a, b) => String(a.recordedAt).localeCompare(String(b.recordedAt))) : [];
   const selectedConcept = conceptById.get(selected) ?? concepts[0];
+  const addToChat = async (resource) => {
+    if (!onAddToChat) return false;
+    try {
+      const ok = await onAddToChat({ courseId: course.id, ...resource });
+      if (ok !== false) flash('已添加到对话');
+      return ok !== false;
+    } catch (e) { flash(e.message || '未能添加到对话', true); return false; }
+  };
 
   return (
     <div className={`omt ${widthClass}${zoom !== 'off' ? ` mmz-${zoom}` : ''}`} ref={rootRef} data-testid="tutor-workbench" data-revision={model.revision} data-mm-zoom={zoom}>
@@ -333,7 +354,7 @@ export function Workbench({ api, visible = true, initialView, navRevision, focus
           {lesson ? (
             <>
               <div className="eyebrow">LESSON {String(lessonNo).padStart(2, '0')} / {course.title}</div>
-              <h1 className={`h lessonhead${lessonFocus?.id === lesson.id ? ' linkflash' : ''}`} data-testid="lesson-title" data-lesson-id={lesson.id}>{lesson.title}</h1>
+              <h1 className={`h lessonhead${lessonFocus?.id === lesson.id ? ' linkflash' : ''}`} data-testid="lesson-title" data-lesson-id={lesson.id}>{lesson.title} <AddToChatButton resource={{ kind: 'lesson', id: lesson.id, title: lesson.title }} onAddToChat={addToChat} testId="add-to-chat-lesson" /></h1>
               <LessonLinks lesson={lesson} topics={topics} conceptById={conceptById} nav={nav} />
               <div className="lead">目标：{goal?.expectedOutcome ?? lesson.parts.map((p) => p.objective).join('；')}</div>
               {lessons.length > 1 && (
@@ -393,6 +414,7 @@ export function Workbench({ api, visible = true, initialView, navRevision, focus
                             {noteCardOf.has(n.id)
                               ? <button className="chip-link" data-testid="note-go-card" onClick={() => nav.toCard(noteCardOf.get(n.id), n.conceptIds?.[0])}>▦ 白板上的卡片 ›</button>
                               : <button className="chip-link" disabled={busy} data-testid="note-to-board" onClick={() => putNoteOnBoard(n)}>▦ 放到白板</button>}
+                            <AddToChatButton resource={{ kind: 'note', id: n.id, title: n.title }} onAddToChat={addToChat} testId="add-to-chat-note" />
                           </div>
                           <SourceRefs refs={n.sourceRefs} state={sourcesState} openExternal={openExternal} />
                         </div>
@@ -422,12 +444,12 @@ export function Workbench({ api, visible = true, initialView, navRevision, focus
           {(tab === 'outline' || tab === 'mindmap') && <ApprovalBanner course={course} busy={busy} since={model.outlineSinceApproved}
             onApprove={() => mutate('course.approve', { courseId: course.id, syllabusRevision }, `学习者批准大纲第 ${syllabusRevision} 版`, '大纲已批准')}
             onMode={(mode) => mutate('course.setApproval', { courseId: course.id, mode }, mode === 'delegated' ? '学习者把批准交给 AI' : '学习者收回批准', mode === 'delegated' ? '已交给 AI 批准：之后大纲和课时计划由 AI 代你批准（随时可收回）' : '已恢复为由你批准')} />}
-          {tab === 'outline' && <OutlineView changes={course.syllabusChanges ?? []} topics={topics} busy={busy} edit={outlineEdit} syllabusRevision={syllabusRevision} selected={selectedConcept?.id} onSelect={setSelected} focus={outlineFocus} nav={nav} />}
-          {tab === 'mindmap' && <MindmapView view={views.mindmap} courseId={course.id} topics={topics} busy={busy} edit={mindmapEdit} promote={(from, title) => mutate('concept.promote', { courseId: course.id, from, title }, `升格「${title}」为知识点`, '已升格为知识点（尚未写入大纲）')} mapRevision={mindmapRevision} selected={selectedConcept?.id} onSelectConcept={setSelected} flash={flash} wide={rightWidth >= 640} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} />}
-          {tab === 'graph' && <GraphView view={views.graph} topics={topics} selected={selectedConcept?.id} onSelect={setSelected} conceptById={conceptById} relations={model.relations} nav={nav} boardElements={views.board.elements} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} wide={rightWidth >= 760} />}
-          {tab === 'board' && <BoardView onOpenNote={(id) => { const n = model.notes.find((x) => x.id === id); if (n?.lessonId) { setLessonId(n.lessonId); setPartIndex(null); } setNoteFocus({ id, nonce: Date.now() }); }} view={views.board} course={course} topics={topics} concepts={concepts} busy={busy} mutate={mutate} outlineEdit={outlineEdit} syllabusRevision={syllabusRevision} onSelectConcept={setSelected} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} wide={rightWidth >= 760} focus={boardFocus} nav={nav} />}
+          {tab === 'outline' && <OutlineView changes={course.syllabusChanges ?? []} topics={topics} busy={busy} edit={outlineEdit} syllabusRevision={syllabusRevision} selected={selectedConcept?.id} onSelect={setSelected} focus={outlineFocus} nav={nav} courseId={course.id} onAddToChat={addToChat} />}
+          {tab === 'mindmap' && <MindmapView view={views.mindmap} courseId={course.id} topics={topics} busy={busy} edit={mindmapEdit} promote={(from, title) => mutate('concept.promote', { courseId: course.id, from, title }, `升格「${title}」为知识点`, '已升格为知识点（尚未写入大纲）')} mapRevision={mindmapRevision} selected={selectedConcept?.id} onSelectConcept={setSelected} flash={flash} wide={rightWidth >= 640} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} focus={mindmapFocus} onAddToChat={addToChat} />}
+          {tab === 'graph' && <GraphView view={views.graph} topics={topics} selected={selectedConcept?.id} onSelect={setSelected} conceptById={conceptById} relations={model.relations} nav={nav} boardElements={views.board.elements} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} wide={rightWidth >= 760} focus={graphFocus} onAddToChat={addToChat} />}
+          {tab === 'board' && <BoardView onOpenNote={(id) => { const n = model.notes.find((x) => x.id === id); if (n?.lessonId) { setLessonId(n.lessonId); setPartIndex(null); } setNoteFocus({ id, nonce: Date.now() }); }} view={views.board} course={course} topics={topics} concepts={concepts} busy={busy} mutate={mutate} outlineEdit={outlineEdit} syllabusRevision={syllabusRevision} onSelectConcept={setSelected} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} wide={rightWidth >= 760} focus={boardFocus} nav={nav} onAddToChat={addToChat} />}
           {tab === 'data' && <DataPane api={api} course={course} revision={model.revision} topics={topics} selected={selectedConcept?.id} onSelectConcept={setSelected} nav={nav}
-            todoWrite={todoWrite} reviewRate={reviewRate} busy={busy} focus={dataFocus} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} />}
+            todoWrite={todoWrite} reviewRate={reviewRate} busy={busy} focus={dataFocus} zoom={zoom} setZoom={setMmZoom} fill={widthClass === '' || zoom !== 'off'} rootRef={rootRef} onAddToChat={addToChat} />}
           <Activity events={model.events} />
         </section>
       </div>
@@ -435,10 +457,10 @@ export function Workbench({ api, visible = true, initialView, navRevision, focus
   );
 }
 
-function DataPane({ zoom, setZoom, fill, rootRef, ...props }) {
+function DataPane({ zoom, setZoom, fill, rootRef, onAddToChat, ...props }) {
   const wrapRef = useRef(null);
   const height = useFillHeight(wrapRef, rootRef, fill, 460, 40);
-  return <div ref={wrapRef}><DataView {...props} height={height} zoomButtons={<ZoomButtons zoom={zoom} setZoom={setZoom} prefix="data" what="数据表" />} /></div>;
+  return <div ref={wrapRef}><DataView {...props} height={height} onAddToChat={onAddToChat} zoomButtons={<ZoomButtons zoom={zoom} setZoom={setZoom} prefix="data" what="数据表" />} /></div>;
 }
 
 function NoteBox({ busy, onSave, concepts, lessonConceptIds, selectedId }) {
@@ -592,7 +614,7 @@ function ChangeLog({ changes }) {
   );
 }
 
-function OutlineView({ topics, busy, edit, syllabusRevision, selected, onSelect, focus, nav, changes = [] }) {
+function OutlineView({ topics, busy, edit, syllabusRevision, selected, onSelect, focus, nav, changes = [], courseId, onAddToChat }) {
   const treeRef = useRef(null);
   const [flashId, setFlashId] = useState(null);
   useEffect(() => {
@@ -644,8 +666,11 @@ function OutlineView({ topics, busy, edit, syllabusRevision, selected, onSelect,
   return (
     <div data-testid="outline-view" ref={treeRef}>
       <div className="title2">课程大纲
-        <span className="tools"><button className="tbtn" disabled={busy} data-testid="add-topic"
-          onClick={() => edit([{ op: 'addTopic', title: '新主题', subtopics: [{ title: '新知识点' }] }], '添加主题')}>＋ 主题</button></span>
+        <span className="tools">
+          <AddToChatButton resource={{ kind: 'outline', id: courseId, title: '课程大纲' }} onAddToChat={onAddToChat} testId="add-to-chat-outline" />
+          <button className="tbtn" disabled={busy} data-testid="add-topic"
+          onClick={() => edit([{ op: 'addTopic', title: '新主题', subtopics: [{ title: '新知识点' }] }], '添加主题')}>＋ 主题</button>
+        </span>
       </div>
       {topics.map((t, i) => (
         <div className={`card${flashId === t.id ? ' linkflash' : ''}`} key={t.id} data-topic-id={t.id}
@@ -664,6 +689,7 @@ function OutlineView({ topics, busy, edit, syllabusRevision, selected, onSelect,
               <button className="tbtn" title="上移" disabled={busy || i === 0} onClick={() => step('topic', topics, i, -1, t)}>↑</button>
               <button className="tbtn" title="下移" disabled={busy || i === topics.length - 1} onClick={() => step('topic', topics, i, 1, t)}>↓</button>
               <button className="tbtn" title="添加知识点" disabled={busy} onClick={() => edit([{ op: 'addSubtopic', topicId: t.id, title: '新知识点' }], `在「${t.title}」下添加知识点`)}>＋</button>
+              <AddToChatButton resource={{ kind: 'topic', id: t.id, title: t.title }} onAddToChat={onAddToChat} testId="add-to-chat-topic" />
               <button className="tbtn danger" title="删除主题" disabled={busy || topics.length === 1} onClick={() => edit([{ op: 'removeTopic', topicId: t.id }], `删除主题「${t.title}」`)}>✕</button>
             </span>
           </div>
@@ -680,6 +706,7 @@ function OutlineView({ topics, busy, edit, syllabusRevision, selected, onSelect,
                   : <>{i + 1}.{j + 1} {s.title}　<span className="small">知识点</span></>}
               </span>
               <span className="rowtools">
+                {s.conceptId && <AddToChatButton resource={{ kind: 'concept', id: s.conceptId, title: s.title }} onAddToChat={onAddToChat} testId="add-to-chat-concept" />}
                 <button className="tbtn" title="打开知识点详情" data-testid="outline-detail" onClick={(e) => { e.stopPropagation(); nav.toDetail(s.conceptId); }}>详情</button>
                 <button className="tbtn" title="上移" disabled={busy || j === 0} onClick={(e) => { e.stopPropagation(); step('sub', t.subtopics, j, -1, s); }}>↑</button>
                 <button className="tbtn" title="下移" disabled={busy || j === t.subtopics.length - 1} onClick={(e) => { e.stopPropagation(); step('sub', t.subtopics, j, 1, s); }}>↓</button>
@@ -727,7 +754,7 @@ function MindmapList({ node, depth, onSelect }) {
     </>
   );
 }
-function MindmapView({ view, topics, busy, edit, promote, mapRevision, selected, onSelectConcept, flash, wide, zoom = 'off', setZoom, fill, rootRef }) {
+function MindmapView({ view, topics, busy, edit, promote, mapRevision, selected, onSelectConcept, flash, wide, zoom = 'off', setZoom, fill, rootRef, focus, onAddToChat }) {
   const [sel, setSel] = useState(null); // { id, kind, refersTo?, conceptId?, belongsTo? }
   const [mode, setMode] = useState('side');
   const [fitInfo, setFitInfo] = useState({ overflow: false });
@@ -743,6 +770,11 @@ function MindmapView({ view, topics, busy, edit, promote, mapRevision, selected,
   const selectedNodeId = all.find((n) => (n.conceptId ?? n.refersTo) === selected)?.id;
   const canPromote = node && node.kind !== 'root' && !(node.refersTo || node.conceptId) && promote;
   const submit = (ops, summary, rev, opts) => edit(ops, summary, rev, opts);
+  useEffect(() => {
+    if (!focus?.id) return;
+    const n = all.find((x) => x.id === focus.id);
+    if (n) setSel(n);
+  }, [focus?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <div data-testid="mindmap-view">
       <div className="title2">课程思维导图
@@ -760,6 +792,7 @@ function MindmapView({ view, topics, busy, edit, promote, mapRevision, selected,
             <div className="tools mmbar" data-testid="mindmap-toolbar">
               {node ? <>
                 <span className="small mmsel" title={node.title}>已选：{node.title}</span>
+                <AddToChatButton resource={{ kind: 'mindmapNode', id: node.id, title: node.title }} onAddToChat={onAddToChat} testId="add-to-chat-mindmap" />
                 <button className="tbtn" disabled={busy} onClick={() => mapRef.current?.beginRename(node.id)}>改名</button>
                 <button className="tbtn" disabled={busy || idx <= 0} onClick={() => mapRef.current?.run('step', { id: node.id, dir: -1 })}>上移</button>
                 <button className="tbtn" disabled={busy || idx < 0 || idx >= sibs.length - 1} onClick={() => mapRef.current?.run('step', { id: node.id, dir: 1 })}>下移</button>
@@ -799,7 +832,7 @@ function ZoomButtons({ zoom, setZoom, prefix, what }) {
 
 const GRAPH_HINT = '悬停或点击：高亮一跳邻居；双击主题：收起 / 展开它的知识点；双击知识点：展开它关系所在的主题；拖动节点时力导向会带动邻居（只改这次的摆放，不保存）。';
 const GRAPH_LAZY = 60; // same as LAZY_THRESHOLD in graph-flow.jsx: bigger courses start collapsed
-function GraphView({ view, topics, selected, onSelect, conceptById, relations, zoom, setZoom, fill, rootRef, wide, nav, boardElements = [] }) {
+function GraphView({ view, topics, selected, onSelect, conceptById, relations, zoom, setZoom, fill, rootRef, wide, nav, boardElements = [], focus, onAddToChat }) {
   const graphNode = view.nodes.find((n) => n.id === selected || n.conceptId === selected || n.refersTo === selected);
   const c = (graphNode?.conceptId && conceptById.get(graphNode.conceptId)) ?? conceptById.get(selected) ?? null;
   const selectedGraphId = graphNode?.id ?? null;
@@ -813,6 +846,10 @@ function GraphView({ view, topics, selected, onSelect, conceptById, relations, z
     const n = view.nodes.find((x) => x.id === id);
     onSelect(n?.conceptId ?? n?.refersTo ?? id);
   };
+  useEffect(() => {
+    if (!focus?.id) return;
+    selectNode(focus.id);
+  }, [focus?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
   const wrapRef = useRef(null);
   const flowRef = useRef(null);
   const [fitInfo, setFitInfo] = useState({ overflow: false });
@@ -864,7 +901,11 @@ function GraphView({ view, topics, selected, onSelect, conceptById, relations, z
         <div className="card" data-testid="graph-detail">
           <b>{c?.title ?? graphNode?.label}</b>
           <p className="kmeta">{c ? `知识点 ID: ${c.id}` : '扩展节点（尚未升格为知识点）'}</p>
-          {c.kind !== 'topic' && (() => {
+          <p className="kplinks">
+            {graphNode && <AddToChatButton resource={{ kind: 'graphNode', id: graphNode.id, title: graphNode.label ?? c?.title }} onAddToChat={onAddToChat} testId="add-to-chat-graph" />}
+            {c && <AddToChatButton resource={{ kind: 'concept', id: c.id, title: c.title }} onAddToChat={onAddToChat} testId="add-to-chat-graph-concept" />}
+          </p>
+          {c && c.kind !== 'topic' && (() => {
             const cardIds = boardElements.filter((e) => e.type === 'concept' && e.conceptId === c.id).map((e) => e.id);
             return (
               <p className="kplinks">
@@ -874,7 +915,14 @@ function GraphView({ view, topics, selected, onSelect, conceptById, relations, z
               </p>
             );
           })()}
-          <p className="small">理解状态：{MASTERY_LABEL[c.mastery]}（{c.mastery}）。{related.length ? `相关候选关系：${related.map((r) => `${conceptById.get(r.from)?.title} —${r.type}→ ${conceptById.get(r.to)?.title}`).join('；')}。` : '暂无候选关系。'}这里只展示候选关系，不把图形箭头误认为已验证知识。</p>
+          <p className="small">理解状态：{c ? `${MASTERY_LABEL[c.mastery]}（${c.mastery}）。` : '扩展节点没有掌握状态。'}{related.length ? `相关候选关系：${related.map((r) => `${conceptById.get(r.from)?.title ?? r.from} —${r.type}→ ${conceptById.get(r.to)?.title ?? r.to}`).join('；')}。` : '暂无候选关系。'}这里只展示候选关系，不把图形箭头误认为已验证知识。</p>
+          {related.length > 0 && (
+            <div className="kplinks">
+              {related.map((r) => (
+                <AddToChatButton key={r.id} resource={{ kind: 'relation', id: r.id, title: `${conceptById.get(r.from)?.title ?? r.from} —${r.type}→ ${conceptById.get(r.to)?.title ?? r.to}` }} onAddToChat={onAddToChat} testId="add-to-chat-relation" />
+              ))}
+            </div>
+          )}
         </div>
       )}
       <p className="legend">圆点颜色 = 课程主题（大圆是主题，小圆是知识点，外圈颜色是理解状态）；细线箭头 = 主题包含知识点（来自大纲）；<b style={{ color: '#9a6b16' }}>金色虚线箭头</b> = 候选语义关系，标签是关系类型。收起主题后，它的知识点的关系会接到主题圆上（×n 表示合并了几条）。</p>
@@ -882,8 +930,8 @@ function GraphView({ view, topics, selected, onSelect, conceptById, relations, z
   );
 }
 
-const BOARD_HINT = '拖动卡片移动；从卡片边上的圆点拖到另一张卡片连线；双击卡片编辑（知识点卡片改名会改课程大纲）；双击空白处加便签；选中后按 Delete 删除；拖动空白处平移，Ctrl+滚轮缩放。';
-function BoardView({ view, course, topics, concepts, busy, mutate, outlineEdit, syllabusRevision, onSelectConcept, zoom, setZoom, fill, rootRef, wide, focus, nav, onOpenNote }) {
+const BOARD_HINT = '拖动卡片移动；从卡片边上的圆点拖到另一张卡片连线；双击卡片编辑（知识点卡片改名会改知识点，不改大纲）；双击空白处加便签；选中后按 Delete 删除；拖动空白处平移，Ctrl+滚轮缩放。';
+function BoardView({ view, course, topics, concepts, busy, mutate, outlineEdit, syllabusRevision, onSelectConcept, zoom, setZoom, fill, rootRef, wide, focus, nav, onOpenNote, onAddToChat }) {
   const [selection, setSelection] = useState([]);
   const [focusNote, setFocusNote] = useState(null);
   const [linkMode, setLinkMode] = useState(false);
@@ -923,13 +971,14 @@ function BoardView({ view, course, topics, concepts, busy, mutate, outlineEdit, 
         </span>
       </div>
       <div className="tools rfbar" data-testid="board-toolbar">
-        <button className="tbtn" disabled={busy || !missing} onClick={() => mutate('board.seed', { courseId: course.id, baseRevision: view.boardRevision }, '白板：从大纲生成知识点卡片', '已生成白板卡片')} data-testid="board-seed">{missing ? `从大纲生成（${missing}）` : '已同步大纲'}</button>
+        <button className="tbtn" disabled={busy || !missing} onClick={() => mutate('board.seed', { courseId: course.id, baseRevision: view.boardRevision }, '白板：补齐缺失的知识点与扩展卡片', '已补齐白板卡片')} data-testid="board-seed">{missing ? `补齐缺失卡片（${missing}）` : '卡片已齐'}</button>
         <button className={`tbtn${arrange.length >= 3 ? ' suggest' : ''}`} disabled={busy || !arrange.length} data-testid="board-arrange" title="把卡片按课程主题放进各自的分区（一次保存，可被冲突检测拦下）"
           onClick={async () => { if (await patch(arrange, '白板：按主题整理', '已按主题整理')) setTimeout(() => flowRef.current?.fit(), 60); }}>按主题整理</button>
         <button className="tbtn" disabled={busy || !cards.length} data-testid="board-add-note" onClick={() => flowRef.current?.addNote()}>＋ 便签</button>
         <button className={`tbtn ${linkMode ? 'on' : ''}`} disabled={busy || cards.length < 2} data-testid="board-link" onClick={() => setLinkMode((v) => !v)}>{linkMode ? '连线中：依次点两张卡片' : '连线'}</button>
         <button className="tbtn danger" disabled={busy || !selection.length} data-testid="board-delete" onClick={() => flowRef.current?.deleteSelected()}>删除{selection.length > 1 ? `（${selection.length}）` : ''}</button>
         {selConcepts.length === 1 && <button className="tbtn" data-testid="board-detail" onClick={() => nav.toDetail(selConcepts[0])} title="在「数据」里打开这个知识点的详情">知识点详情 ›</button>}
+        {selection.length === 1 && (() => { const el = els.find((e) => e.id === selection[0] && e.type !== 'arrow'); return el ? <AddToChatButton resource={{ kind: 'card', id: el.id, title: el.text ?? concepts.find((c) => c.id === el.conceptId)?.title ?? '卡片' }} onAddToChat={onAddToChat} testId="add-to-chat-card" /> : null; })()}
         <span className="rflegend"><i className="lg-ai" />AI<i className="lg-me" />你<i className="lg-rel" />候选关系</span>
       </div>
       <div className="small rf-hint" title={BOARD_HINT} data-testid="board-hint">{arrange.length >= 3
@@ -944,6 +993,7 @@ function BoardView({ view, course, topics, concepts, busy, mutate, outlineEdit, 
                   onClick={() => { flowRef.current?.focusCard(id); setFocusNote((n) => ({ ...n, current: id })); }}>{i === 0 ? '主卡片' : `第 ${i + 1} 张`}</button>
               ))}
               {focusNote.conceptId && <button className="linkbtn" data-testid="board-focus-detail" onClick={() => nav.toDetail(focusNote.conceptId)}>知识点详情 ›</button>}
+              {focusNote.current && <AddToChatButton resource={{ kind: 'card', id: focusNote.current, title: focusNote.title }} onAddToChat={onAddToChat} testId="add-to-chat-card-focus" />}
             </span>
           )}
           <button className="tbtn" onClick={() => setFocusNote(null)} title="关闭">✕</button>
@@ -955,7 +1005,7 @@ function BoardView({ view, course, topics, concepts, busy, mutate, outlineEdit, 
             linkMode={linkMode} onLinkModeDone={() => setLinkMode(false)} onPatch={patch} onRenameConcept={renameConcept} syllabusRevision={syllabusRevision}
             onSelectConcept={onSelectConcept} onSelectionChange={setSelection} minimap={wide} onFit={(f) => setFitInfo((x) => (x.overflow === f.overflow ? x : f))} />
         ) : (
-          <div className="board" data-testid="board" style={{ height: Math.min(height, 320) }}><div className="empty" style={{ padding: 24 }}>白板还是空的。点「从大纲生成」放入全部知识点卡片（按主题分区），或让 AI 用 tutor_board_patch 布置白板。</div></div>
+          <div className="board" data-testid="board" style={{ height: Math.min(height, 320) }}><div className="empty" style={{ padding: 24 }}>白板还是空的。点「补齐缺失卡片」放入相关知识点与扩展（按主题分区），或让 AI 用 tutor_board_patch 布置白板。</div></div>
         )}
       </div>
       <div className="status">白板保存在课程状态里：拖动、连线、编辑、删除都会立即保存；AI 用 tutor_board_patch 编辑同一块白板，双方修改都按版本号校验，冲突时不覆盖、会提示。分区按课程主题自动归组（只是视图）；箭头只是视觉连线，不会自动变成知识关系。</div>
