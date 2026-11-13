@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildGraph, NODE_KINDS } from '../src/client/graph-model.mjs';
-import { focusGraph, learningPath, learningPathTo, weakIds, isWeak, prereqEdges, FOLD_AT, PREREQ } from '../src/client/graph-focus.mjs';
-import { layoutGraph } from '../src/client/coa/graphLayout.mjs';
+import { focusGraph, learningPath, learningPathTo, weakIds, isWeak, prereqEdges, topicGraph, FOLD_AT, PREREQ } from '../src/client/graph-focus.mjs';
+import { layoutGraph, nodeBox, wrapRanks, placeEdgeLabels, labelChip } from '../src/client/coa/graphLayout.mjs';
 
 // Synthetic course: topics T1..T3; "A —前置→ B" means learn A before B.
 function course({ nodes, edges, topics = ['T1', 'T2', 'T3'] }) {
@@ -155,4 +155,87 @@ test('fold edges: relations between two fold cards are not drawn but count on th
   assert.equal(from2[0].members.length, 7, 'including the relation into the other fold');
   assert.equal(fg.graph.edges.filter((e) => e.target.startsWith('fold:')).length, 0, 'no fold → fold arrow');
   assert.equal(fg.graph.edges.filter((e) => e.source === 'fold:T3').length, 1);
+});
+
+test('topic view: one topic card + its cross-topic relation neighbours as ghosts (no other topic cards)', () => {
+  const tg = course({
+    nodes: [['a', 'T1'], ['b', 'T1'], ['c', 'T2'], ['d', 'T2'], ['e', 'T3'], ['z', 'T3']],
+    edges: [['a', 'b'], ['b', 'c'], ['e', 'a', 'related'], ['d', 'z']],
+  });
+  const v = topicGraph(tg, 'T1');
+  assert.equal(v.kind, 'topic');
+  const ids = v.graph.nodes.map((n) => n.id);
+  const topicNodes = v.graph.nodes.filter((n) => n.kind === 'topic');
+  assert.equal(topicNodes.length, 1);
+  assert.equal(topicNodes[0].topicId, 'T1');
+  assert.equal(topicNodes[0].collapsed, false);
+  assert.equal(v.memberCount, 2);
+  // c (T2) and e (T3) touch T1 → ghosts; d and z do not
+  const ghosts = v.graph.nodes.filter((n) => n.ghost).map((n) => n.label).sort();
+  assert.deepEqual(ghosts, ['C', 'E']);
+  assert.equal(v.ghostCount, 2);
+  assert.ok(!ids.some((id) => v.graph.nodes.find((n) => n.id === id)?.label === 'D'));
+  // every edge stays inside the shown nodes; relations carry members (labels / ×N)
+  for (const e of v.graph.edges) { assert.ok(ids.includes(e.source) && ids.includes(e.target)); assert.ok(e.members?.length >= 1); }
+  assert.equal(v.graph.edges.filter((e) => e.kind === 'relation').length, 3);
+  // ghost cap
+  assert.equal(topicGraph(tg, 'T1', { ghostMax: 1 }).hiddenGhosts, 1);
+  assert.equal(topicGraph(tg, 'nope'), null);
+});
+
+test('wrapRanks: a rank wider than the canvas wraps into staggered rows; lower ranks move down; nothing overlaps', () => {
+  const nodes = [...Array.from({ length: 9 }, (_, i) => ({ id: `p${i}`, kind: 'concept', label: `前置${i}` })), { id: 'f', kind: 'concept', label: '聚焦' }];
+  const pos = new Map(nodes.map((n, i) => [n.id, i < 9 ? { x: i * 160, y: 0 } : { x: 640, y: 120 }]));
+  wrapRanks(pos, nodes, 560);
+  const box = (id) => { const p = pos.get(id), b = nodeBox(nodes.find((n) => n.id === id)); return { ...p, ...b }; };
+  const rows = new Set(nodes.slice(0, 9).map((n) => Math.round(pos.get(n.id).y)));
+  assert.ok(rows.size >= 2, 'wrapped into several rows');
+  const xs = nodes.slice(0, 9).map((n) => box(n.id));
+  assert.ok(Math.max(...xs.map((b) => b.x + b.w)) - Math.min(...xs.map((b) => b.x)) <= 560 + 1, 'each row fits the width');
+  for (let i = 0; i < xs.length; i++) for (let j = i + 1; j < xs.length; j++) {
+    const a = xs[i], b = xs[j];
+    assert.ok(!(a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h), `p${i} and p${j} overlap`);
+  }
+  assert.ok(box('f').y > Math.max(...xs.map((b) => b.y + b.h)), 'the focus row is pushed below the wrapped rows');
+  // rows of equal length are staggered by half a slot
+  const ys = [...rows].sort((a, b) => a - b);
+  const row0 = xs.filter((b) => Math.round(b.y) === ys[0]).map((b) => b.x);
+  const row1 = xs.filter((b) => Math.round(b.y) === ys[1]).map((b) => b.x);
+  assert.ok(row1.every((x) => row0.every((y) => Math.abs(x - y) > 20)), 'second row sits in the gaps of the first');
+});
+
+test('fold view: 9 direct prerequisites wrap so the local graph fits a 3-column canvas at a readable zoom', () => {
+  const nodes = [['f', 'T1'], ...Array.from({ length: 9 }, (_, i) => [`p${i}`, i % 2 ? 'T2' : 'T3'])];
+  const fg = course({ nodes, edges: Array.from({ length: 9 }, (_, i) => [`p${i}`, 'f']) });
+  const v = focusGraph(fg, 'f', { up: 1, down: 1 });
+  const canvas = { w: 620, h: 560 };
+  const pos = layoutGraph(v.graph.nodes, v.graph.edges, 'tb', { canvas, readableZoom: 0.8 });
+  const bs = v.graph.nodes.map((n) => ({ ...pos.get(n.id), ...nodeBox(n) }));
+  const w = Math.max(...bs.map((b) => b.x + b.w)) - Math.min(...bs.map((b) => b.x));
+  assert.ok(w * 0.8 <= canvas.w - 64 + 1, `width ${w} fits at 0.8`);
+});
+
+test('placeEdgeLabels: a chip that would cover a node slides along the edge, or is dropped', () => {
+  const boxes = new Map([['a', { x: 0, y: 0, w: 120, h: 40 }], ['b', { x: 0, y: 300, w: 120, h: 40 }], ['m', { x: 10, y: 150, w: 100, h: 40 }]]);
+  const t = placeEdgeLabels([{ id: 'e', source: 'a', target: 'b', text: '前置 · 候选' }], boxes).get('e');
+  assert.ok(t != null && t !== 0.5, `moved off the node in the middle (t=${t})`);
+  const chip = labelChip('前置 · 候选');
+  const y = 40 + (300 - 40) * t;
+  assert.ok(y + chip.h / 2 <= 150 - 2 || y - chip.h / 2 >= 190 + 2);
+  // no room at all: adjacent boxes → null (label shows only on hover)
+  const tight = new Map([['a', { x: 0, y: 0, w: 120, h: 40 }], ['b', { x: 0, y: 50, w: 120, h: 40 }]]);
+  assert.equal(placeEdgeLabels([{ id: 'e', source: 'a', target: 'b', text: '前置' }], tight).get('e'), null);
+  // two chips on the same spot: the second one moves
+  const par = new Map([['a', { x: 0, y: 0, w: 120, h: 40 }], ['b', { x: 0, y: 400, w: 120, h: 40 }]]);
+  const two = placeEdgeLabels([{ id: 'e1', source: 'a', target: 'b', text: '前置' }, { id: 'e2', source: 'a', target: 'b', text: '相关' }], par);
+  assert.notEqual(two.get('e1'), two.get('e2'));
+});
+
+test('placeEdgeLabels: a vertical edge passing a node finds the narrow gap beside it (「适用于什么情境」 case)', () => {
+  const boxes = new Map([['top', { x: 186, y: 0, w: 168, h: 47 }], ['mid', { x: 209, y: 57, w: 121, h: 36 }], ['bot', { x: 214, y: 119, w: 168, h: 47 }]]);
+  const t = placeEdgeLabels([{ id: 'e', source: 'bot', target: 'top', text: '前置 · 候选' }], boxes).get('e');
+  assert.ok(t != null);
+  const chip = labelChip('前置 · 候选');
+  const y = 119 - 72 * t; // free span from the bottom box (y 119) up to the top box (y 47)
+  assert.ok(y - chip.h / 2 >= 93 + 2 && y + chip.h / 2 <= 119 - 2, `chip y ${y} sits between 「情境」 and the source`);
 });

@@ -24,13 +24,13 @@ import Dagre from '@dagrejs/dagre';
  * most 4 lines. `nodeBox(n)` → { w, h } is the single source of the rendered size; dagre, the packed cluster layout,
  * the live simulation's rectangle collision and the floating edges all use it.
  */
-export const NODE_FONT = { topic: 13, concept: 12.5, extension: 12.5, fold: 12 };
-const LINE_H = { topic: 17, concept: 16.5, extension: 16.5, fold: 15.5 };
+export const NODE_FONT = { topic: 13, concept: 12.5, extension: 12.5, fold: 13.5 };
+const LINE_H = { topic: 17, concept: 16.5, extension: 16.5, fold: 17 };
 /** Horizontal padding incl. the mastery stripe on knowledge points; vertical padding. */
 const PAD_X = { topic: 24, concept: 24, extension: 22, fold: 20 };
 const PAD_Y = 14;
-export const NODE_W = { topic: [128, 184], concept: [120, 168], extension: [120, 168], fold: [140, 168] };
-export const NODE_MIN_H = { topic: 40, concept: 36, extension: 36, fold: 52 };
+export const NODE_W = { topic: [128, 184], concept: [120, 168], extension: [120, 168], fold: [150, 188] };
+export const NODE_MIN_H = { topic: 40, concept: 36, extension: 36, fold: 58 };
 export const MAX_LINES = 4;
 /** Smallest box per kind (one short line), e.g. for a node whose label is not known. */
 export const NODE_SIZE = Object.fromEntries(Object.keys(NODE_W).map((k) => [k, { w: NODE_W[k][0], h: NODE_MIN_H[k] }]));
@@ -185,10 +185,108 @@ export function layoutGraph(nodes, edges, layout, { canvas, readableZoom } = {})
     }
   }
   Dagre.layout(g);
-  return new Map(nodes.map((n) => {
+  const pos = new Map(nodes.map((n) => {
     const p = g.node(n.id), b = nodeBox(n);
     return [n.id, p ? { x: p.x - b.w / 2, y: p.y - b.h / 2 } : { x: 0, y: 0 }];
   }));
+  // local views: a rank wider than the canvas can show at the readable zoom wraps into staggered rows
+  if (layout === 'tb' && canvas?.w) wrapRanks(pos, nodes, Math.max(3 * NODE_W.concept[1], (canvas.w - 64) / (readableZoom ?? 0.8)));
+  return pos;
+}
+
+export const WRAP_GAP = { x: 28, y: 40 };
+/**
+ * (ours) Wrap wide top → bottom ranks: a rank (same dagre row) wider than `maxRowW` is split into balanced rows,
+ * centred on the rank, every other row shifted by half a slot so the straight arrows of one row pass through the gaps
+ * of the next; everything below moves down. Mutates and returns `pos` (Map id → top-left).
+ */
+export function wrapRanks(pos, nodes, maxRowW, gap = WRAP_GAP, boxOf = nodeBox) {
+  const ranks = new Map();
+  for (const n of nodes) {
+    const p = pos.get(n.id); if (!p) continue;
+    const b = boxOf(n), cy = Math.round(p.y + b.h / 2);
+    if (!ranks.has(cy)) ranks.set(cy, []);
+    ranks.get(cy).push({ n, b, p });
+  }
+  let shift = 0;
+  const wrapped = [];
+  for (const cy of [...ranks.keys()].sort((a, b) => a - b)) {
+    const row = ranks.get(cy).sort((a, b) => a.p.x - b.p.x);
+    const width = row.reduce((w, r) => w + r.b.w, 0) + gap.x * (row.length - 1);
+    if (width <= maxRowW || row.length <= 3) { for (const r of row) r.p.y += shift; continue; }
+    const centre = (Math.min(...row.map((r) => r.p.x)) + Math.max(...row.map((r) => r.p.x + r.b.w))) / 2;
+    const slot = Math.max(...row.map((r) => r.b.w)) + gap.x;
+    // fewest rows whose widest row (plus the half-slot stagger that equal-length rows get) fits; rows balanced
+    let rows = 2, per = Math.ceil(row.length / 2);
+    for (; rows < row.length; rows++) {
+      per = Math.ceil(row.length / rows);
+      const equal = row.length - per * (rows - 1) === per; // the last row is full too → explicit stagger
+      if (per * slot - gap.x + (equal ? slot / 2 : 0) <= maxRowW) break;
+    }
+    const rowH = Math.max(...row.map((r) => r.b.h));
+    for (let k = 0; k * per < row.length; k++) {
+      const part = row.slice(k * per, (k + 1) * per);
+      // equal-length rows get the half-slot stagger explicitly (a shorter row is already offset by centring)
+      const stagger = k % 2 && part.length === per ? slot / 2 : 0;
+      let x = centre - (part.length * slot - gap.x) / 2 + stagger;
+      for (const r of part) { r.p.x = x + (slot - gap.x - r.b.w) / 2; r.p.y = cy - r.b.h / 2 + shift + k * (rowH + gap.y); x += slot; }
+    }
+    shift += (Math.ceil(row.length / per) - 1) * (rowH + gap.y);
+    wrapped.push(row);
+  }
+  // dagre placed the other ranks for the unwrapped (wide) layout: a rank sticking out of the wrapped band (e.g. the
+  // fold cards, centred over their far-left targets) slides back into it, so the whole view stays narrow
+  if (wrapped.length) {
+    const ext = (rs) => [Math.min(...rs.map((r) => r.p.x)), Math.max(...rs.map((r) => r.p.x + r.b.w))];
+    const [l, r] = ext(wrapped.flat());
+    for (const row of ranks.values()) {
+      if (wrapped.includes(row)) continue;
+      const [a, b] = ext(row);
+      const dx = b - a > r - l ? (l + r) / 2 - (a + b) / 2 : a < l ? l - a : b > r ? r - b : 0;
+      if (dx) for (const q of row) q.p.x += dx;
+    }
+  }
+  return pos;
+}
+
+/** Size of an edge-label chip (11 px text, 7 px side padding). */
+export const labelChip = (text) => ({ w: Math.ceil(labelWeight(text) * 11) + 16, h: 20 });
+const rectReachOf = (b, ux, uy) => Math.min(Math.abs(ux) > 1e-6 ? b.w / 2 / Math.abs(ux) : Infinity, Math.abs(uy) > 1e-6 ? b.h / 2 / Math.abs(uy) : Infinity);
+/**
+ * (ours) Where along each edge its label chip can sit without covering a node or another chip. `items`:
+ * [{ id, source, target, text }]; `boxes`: Map id → { x, y, w, h } (top-left). Tries t = 0.5, then outwards (labelTs);
+ * returns Map id → t, or null when there is no free spot (that label then shows only while the edge is lit).
+ */
+/** Candidate spots along an edge with `free` px between the two boxes: 0.5, then outwards every ~2 px. */
+export function labelTs(free) {
+  const step = Math.min(0.05, 2 / Math.max(1, free)), out = [0.5];
+  for (let d = step; d < 0.5; d += step) out.push(0.5 - d, 0.5 + d);
+  return out;
+}
+export function placeEdgeLabels(items, boxes, { pad = 2 } = {}) {
+  const placed = [];
+  const out = new Map();
+  const hit = (r) => [...boxes.values()].some((b) => r.x < b.x + b.w + pad && b.x < r.x + r.w + pad && r.y < b.y + b.h + pad && b.y < r.y + r.h + pad)
+    || placed.some((q) => r.x < q.x + q.w && q.x < r.x + r.w && r.y < q.y + q.h && q.y < r.y + r.h);
+  for (const it of items) {
+    const a = boxes.get(it.source), b = boxes.get(it.target);
+    if (!a || !b) { out.set(it.id, null); continue; }
+    const s = { x: a.x + a.w / 2, y: a.y + a.h / 2 }, t = { x: b.x + b.w / 2, y: b.y + b.h / 2 };
+    const len = Math.hypot(t.x - s.x, t.y - s.y) || 1, ux = (t.x - s.x) / len, uy = (t.y - s.y) / len;
+    const r0 = rectReachOf(a, ux, uy), r1 = rectReachOf(b, ux, uy);
+    const free = len - r0 - r1;
+    const chip = labelChip(it.text);
+    let got = null;
+    if (free > 0) {
+      for (const k of labelTs(free)) {
+        const d = r0 + free * k, c = { x: s.x + ux * d, y: s.y + uy * d };
+        const r = { x: c.x - chip.w / 2, y: c.y - chip.h / 2, w: chip.w, h: chip.h };
+        if (!hit(r)) { got = k; placed.push(r); break; }
+      }
+    }
+    out.set(it.id, got);
+  }
+  return out;
 }
 
 /** Spread edges that share the same (unordered) node pair so their labels do not stack (upstream parallelEdgeCurves). */

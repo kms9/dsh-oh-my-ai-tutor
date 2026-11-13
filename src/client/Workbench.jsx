@@ -7,7 +7,7 @@ import { CalendarView } from './calendar-view.jsx';
 import { refView } from '../links.mjs';
 import { AddToChatButton } from './AddToChat.jsx';
 import { buildGraph } from './graph-model.mjs';
-import { focusGraph, learningPathTo, FOCUS_DEPTHS, DEFAULT_DEPTH, FOLD_AT } from './graph-focus.mjs';
+import { focusGraph, learningPathTo, topicGraph, FOCUS_DEPTHS, DEFAULT_DEPTH, FOLD_AT } from './graph-focus.mjs';
 import { pickGraphNode, resolveGraphSelection, selectionActions, relationRows } from './graph-select.mjs';
 import { RELATION_LABEL } from './flow-layout.mjs';
 
@@ -855,6 +855,8 @@ function ZoomButtons({ zoom, setZoom, prefix, what }) {
 const GRAPH_HINT = '悬停或点击：高亮一跳邻居；双击主题：收起 / 展开它的知识点；双击知识点：展开它关系所在的主题；拖动节点时力导向会带动邻居（只改这次的摆放，不保存）。选中节点后可「聚焦」看它的前置。';
 const GRAPH_LAZY = 60; // same as LAZY_THRESHOLD in graph-flow.jsx: bigger courses start collapsed
 const DEPTH_KEY = 'omt.graph.focusDepth';
+const SCOPE_KEY = 'omt.graph.scope'; // 「查看全图」 / 「只看当前主题」 is remembered for the session
+const readScope = () => { try { const v = globalThis.sessionStorage?.getItem(SCOPE_KEY); return v === 'all' || v === 'topic' ? v : 'auto'; } catch { return 'auto'; } };
 const DEPTH_LABEL = { 1: '1层', 2: '2层', 3: '3层', all: '全部' };
 function readDepth() {
   try { const v = globalThis.sessionStorage?.getItem(DEPTH_KEY); return FOCUS_DEPTHS.map(String).includes(v) ? (v === 'all' ? 'all' : Number(v)) : DEFAULT_DEPTH; } catch { return DEFAULT_DEPTH; }
@@ -896,11 +898,27 @@ function GraphView({ view, topics, selected, onSelect, pick, setPick, conceptByI
   const [pathTarget, setPathTarget] = useState(null);
   const [sideHidden, setSideHidden] = useState(false);
   const setDepth = (d) => { setDepthState(d); setUnfold(false); try { globalThis.sessionStorage?.setItem(DEPTH_KEY, String(d)); } catch { /* private mode */ } };
+  // Topic view: on a narrow canvas (the default 3-column layout) the whole course only fits far below a readable zoom,
+  // so the graph starts on ONE topic's card (+ its cross-topic neighbours as ghosts); 「查看全图」 switches to the whole
+  // course. scope: 'auto' (topic view when narrow) | 'topic' | 'all'.
+  const [scope, setScopeState] = useState(readScope);
+  const setScope = (v) => { setScopeState(v); try { globalThis.sessionStorage?.setItem(SCOPE_KEY, v); } catch { /* private mode */ } };
+  const narrow = zoom === 'off' && !wide;
+  const [viewTopic, setViewTopic] = useState(null);
+  const selTopic = selNode?.topicId ?? null;
+  useEffect(() => { if (selTopic) setViewTopic(selTopic); }, [selTopic]);
+  const curTopic = topics.some((t) => t.id === viewTopic) ? viewTopic : topics[0]?.id ?? null;
+  const topicScope = !pathMode && !focusId && !pathTarget && curTopic && topics.length > 1 && (scope === 'topic' || (scope === 'auto' && narrow));
   const local = useMemo(() => {
     if (focusId) return focusGraph(fullGraph, focusId, { up: depth, down: 1, unfold });
     if (pathTarget) return learningPathTo(fullGraph, pathTarget);
+    if (topicScope) return topicGraph(fullGraph, curTopic);
     return null;
-  }, [fullGraph, focusId, depth, unfold, pathTarget]);
+  }, [fullGraph, focusId, depth, unfold, pathTarget, topicScope, curTopic]);
+  const stepTopic = (d) => {
+    const i = topics.findIndex((t) => t.id === curTopic), next = topics[(i + d + topics.length) % topics.length];
+    if (next) setViewTopic(next.id); // the selection (shared with the outline) is kept
+  };
   useEffect(() => { if ((focusId || pathTarget) && !local) { setFocusId(null); setPathTarget(null); } }, [local]); // eslint-disable-line react-hooks/exhaustive-deps
   const startFocus = (id) => { if (!id) return; setPathMode(false); setPathInfo(null); setPathTarget(null); setUnfold(false); setFocusId(id); };
   const startPathTo = (id) => { if (!id) return; setPathMode(false); setPathInfo(null); setFocusId(null); setPathTarget(id); };
@@ -917,8 +935,11 @@ function GraphView({ view, topics, selected, onSelect, pick, setPick, conceptByI
   };
   const labelOf = (id) => fullGraph.nodes.find((n) => n.id === id)?.label ?? id;
   const relCount = local ? local.graph.edges.filter((e) => e.kind !== 'skip').length : 0;
+  const topicTitle = (id) => topics.find((t) => t.id === id)?.title ?? id;
   let status;
-  if (local?.kind === 'focus') {
+  if (local?.kind === 'topic') {
+    status = <span data-testid="graph-topic-status">只看主题「{topicTitle(local.topicId)}」：{local.memberCount} 个节点{local.ghostCount ? `，另有 ${local.ghostCount} 个其他主题的相关节点（淡色虚线框，点击切换）${local.hiddenGhosts ? `，还有 ${local.hiddenGhosts} 个未显示` : ''}` : ''}。点「查看全图」看整门课。</span>;
+  } else if (local?.kind === 'focus') {
     status = <span data-testid="graph-focus-status">「{labelOf(local.focusId)}」的局部图 {local.graph.nodes.length} 个节点、{relCount} 条前置。向上 {DEPTH_LABEL[local.up]}，向下 1 层。
       {local.foldedCount ? `较远的 ${local.foldedCount} 个前置按主题折叠。` : ''}{local.ancestorCount === 0 && local.dependentCount === 0 ? '它还没有任何前置关系。' : ''}只沿候选「前置」关系，不是已验证的知识。</span>;
   } else if (local?.kind === 'path') {
@@ -938,7 +959,19 @@ function GraphView({ view, topics, selected, onSelect, pick, setPick, conceptByI
           <ZoomButtons zoom={zoom} setZoom={setZoom} prefix="graph" what="图谱" />
         </span>
       </div>
-      {local ? (
+      {local?.kind === 'topic' ? (
+        <div className="tools rfbar kgbar" data-testid="graph-toolbar">
+          <button className="tbtn kgscope" data-testid="graph-scope-all" onClick={() => setScope('all')} title="显示整门课的全部主题（画布较窄时会缩得较小）">查看全图</button>
+          <span className="kgtopicnav" role="group" aria-label="切换主题">
+            <button className="tbtn" data-testid="graph-topic-prev" onClick={() => stepTopic(-1)} title="上一个主题">‹</button>
+            <span className="kgtopicname" data-testid="graph-topic-name">{topicTitle(local.topicId)}（{topics.findIndex((t) => t.id === local.topicId) + 1}/{topics.length}）</span>
+            <button className="tbtn" data-testid="graph-topic-next" onClick={() => stepTopic(1)} title="下一个主题">›</button>
+          </span>
+          <button className="tbtn" data-testid="graph-focus" disabled={!selectedGraphId || !selectionActions(selNode).focus} onClick={() => startFocus(selectedGraphId)}
+            title={selectedGraphId && selectionActions(selNode).focus ? '只看选中节点和它的前置（沿「前置」关系向上，向下 1 层）' : '先点选一个知识点或扩展节点'}>聚焦</button>
+          <button className="tbtn" data-testid="graph-path" onClick={() => { setPathMode(true); setPathInfo(null); }} title="依次点两个节点，找沿「前置」方向的学习路径（在整门课的图上选）">路径</button>
+        </div>
+      ) : local ? (
         <div className="tools rfbar kgbar" data-testid="graph-toolbar">
           <button className="tbtn" data-testid="graph-exit-local" onClick={exitLocal} title="回到整门课的知识图谱">← 返回全图</button>
           {local.kind === 'focus' && (
@@ -971,6 +1004,7 @@ function GraphView({ view, topics, selected, onSelect, pick, setPick, conceptByI
           <button className="tbtn" data-testid="graph-focus" disabled={!selectedGraphId || !selectionActions(selNode).focus} onClick={() => startFocus(selectedGraphId)}
             title={selectedGraphId && selectionActions(selNode).focus ? '只看选中节点和它的前置（沿「前置」关系向上，向下 1 层）' : '先点选一个知识点或扩展节点'}>聚焦</button>
           <button className={`tbtn ${pathMode ? 'on' : ''}`} data-testid="graph-path" onClick={() => { setPathMode((v) => !v); setPathInfo(null); }} title="依次点两个节点，找沿「前置」方向的学习路径">{pathMode ? '路径：点两个节点' : '路径'}</button>
+          {narrow && topics.length > 1 && <button className="tbtn" data-testid="graph-scope-topic" onClick={() => { setPathMode(false); setScope('topic'); }} title="画布较窄：只看当前主题，字更大">只看当前主题</button>}
         </div>
       )}
       <div className="small rf-hint" data-testid="graph-status" title={GRAPH_HINT}>{status}</div>
@@ -978,7 +1012,7 @@ function GraphView({ view, topics, selected, onSelect, pick, setPick, conceptByI
           beside the graph when the right column is wide, or below it */}
       <div className={`kgsplit${zoom === 'full' ? ' kgsplit-overlay' : wide ? ' kgsplit-side' : ''}`}>
         <div className="rfhost" ref={wrapRef}>
-          <GraphFlow ref={flowRef} view={view} topics={topics} selectedId={selectedGraphId} onSelect={selectNode} height={height} minimap={wide && !local}
+          <GraphFlow ref={flowRef} view={view} topics={topics} selectedId={selectedGraphId} onSelect={selectNode} height={height} minimap={wide && !local && zoom !== 'full'}
             reserve={zoom === 'full' && !sideHidden ? { right: SIDE_OVERLAY_W } : undefined}
             layout={layout} query={local ? '' : query} pathMode={pathMode} collapsed={collapsed} setCollapsed={setCollapsed} onPath={setPathInfo}
             local={local} onLocalClick={onLocalClick} onUnfold={() => setUnfold(true)}
@@ -988,7 +1022,7 @@ function GraphView({ view, topics, selected, onSelect, pick, setPick, conceptByI
           onAddToChat={onAddToChat} local={local} pathInfo={pathInfo} fullGraph={fullGraph} height={zoom === 'full' ? height - 16 : wide ? height : undefined} overlay={zoom === 'full'}
           onFocus={startFocus} onPathTo={startPathTo} focusId={focusId} onSelectNode={selectNode} />
       </div>
-      <p className="legend">圆点颜色 = 课程主题（大圆是主题，小圆是知识点，外圈颜色是理解状态；虚线圆是扩展节点，没有理解状态）；主题色虚线箭头 = 主题包含知识点（来自大纲）；<b style={{ color: '#9a6b16' }}>金色虚线箭头</b> = 候选语义关系，标签是关系类型。收起主题后，它的知识点的关系会接到主题圆上（×n 表示合并了几条）。「聚焦」和「学习路径」只沿候选「前置」关系走：橙色外圈是目标，红色是薄弱点（还没展示掌握的知识点），点线表示省略了中间环节。</p>
+      <p className="legend">边框颜色 = 课程主题（实心色块是主题，浅色卡片是知识点，左侧色条是理解状态；虚线框是扩展节点，没有理解状态）；主题色虚线箭头 = 主题包含知识点（来自大纲）；<b style={{ color: '#9a6b16' }}>金色虚线箭头</b> = 候选语义关系，标签是关系类型。收起主题后，它的知识点的关系会接到主题卡片上（×n 表示合并了几条）。画布较窄时默认只看一个主题，淡色虚线框是其他主题的相关节点。「聚焦」和「学习路径」只沿候选「前置」关系走：橙色外圈是目标，红色是薄弱点（还没展示掌握的知识点），点线表示省略了中间环节。</p>
     </div>
   );
 }

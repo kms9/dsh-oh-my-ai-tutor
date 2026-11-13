@@ -41,7 +41,7 @@ import { ReactFlow, ReactFlowProvider, Background, BackgroundVariant, MiniMap, P
   applyNodeChanges, useInternalNode, useReactFlow, useStore } from '@xyflow/react';
 import { buildGraph, visibleGraph, neighbours, searchNodes, NODE_KINDS } from './graph-model.mjs';
 import { learningPath, weakIds } from './graph-focus.mjs';
-import { NODE_SIZE, FORCE_LINK_DISTANCE, nodeBox, layoutGraph, parallelEdgeCurves } from './coa/graphLayout.mjs';
+import { NODE_SIZE, FORCE_LINK_DISTANCE, nodeBox, layoutGraph, parallelEdgeCurves, placeEdgeLabels } from './coa/graphLayout.mjs';
 import { projectEdgeLabel } from './coa/labelProjection.mjs';
 import { createLiveForceSimulation } from './coa/liveForceSimulation.mjs';
 import { fitViewport, unionBounds, RELATION_LABEL } from './flow-layout.mjs';
@@ -73,7 +73,10 @@ export const LAZY_THRESHOLD = 60;
 /* ─── Highlight state via context (upstream HoverContext): hovering never re-creates node objects ─── */
 const KgContext = createContext({ lit: null, hits: null, ends: [], sel: null, target: null, weak: null, focusId: null, local: null, setHoveredEdgeId: () => {} });
 
+/** Text of a relation edge's label chip (also used to size it for placeEdgeLabels). */
+const relText = (e) => `${RELATION_LABEL[e.label] ?? e.label}${e.status === 'candidate' ? ' · 候选' : ''}${e.members.length > 1 ? ` ×${e.members.length}` : ''}${e.bus ? `（折叠汇总，指向 ${e.via.length} 个节点）` : ''}`;
 function nodeTitle(n, local) {
+  if (n.ghost) return `${n.label} · 其他主题的节点，和本主题有候选关系（点击：切换到它的主题）`;
   if (n.kind === 'topic') return `${n.label} — 主题（类别），双击${n.collapsed ? '展开' : '收起'}它的 ${n.count} 个知识点`;
   if (n.kind === 'fold') return `${n.title}：${n.count} 个较远的前置被折叠，点击展开全部`;
   const more = local ? '（点击：聚焦到它）' : '（双击展开它关系所在的主题）';
@@ -85,7 +88,7 @@ function KgNode({ data }) {
   const n = data.n;
   const { lit, hits, ends, sel, target, weak, focusId, local } = useContext(KgContext);
   const cls = [lit && !lit.has(n.id) ? 'dim' : '', hits?.has(n.id) ? 'hit' : '', n.id === sel ? 'sel' : '', ends.includes(n.id) ? 'end' : '',
-    n.id === target ? 'target' : '', weak?.has(n.id) ? 'weak' : '', n.id === focusId ? 'focus' : ''].filter(Boolean).join(' ');
+    n.id === target ? 'target' : '', weak?.has(n.id) ? 'weak' : '', n.id === focusId ? 'focus' : '', n.ghost ? 'ghost' : ''].filter(Boolean).join(' ');
   const topic = n.kind === 'topic', fold = n.kind === 'fold';
   const box = nodeBox(n);
   // mastery stripe only on knowledge points (extensions have no mastery; folds and topics are groups)
@@ -209,7 +212,8 @@ const GraphFlowInner = forwardRef(function GraphFlowInner({ view, topics, select
   const fullGraph = useMemo(() => buildGraph(view, topics), [view, topics]);
   const graph = local ? local.graph : fullGraph;
   const vis = useMemo(() => (local ? local.graph : visibleGraph(fullGraph, collapsed)), [local, fullGraph, collapsed]);
-  const effLayout = local ? 'tb' : layout;
+  // the topic view (narrow canvas) is one topic card + ghost neighbours: the packed card layout, not dagre
+  const effLayout = local?.kind === 'topic' ? 'force' : local ? 'tb' : layout;
   const isForce = effLayout === 'force';
   const tIndex = useMemo(() => new Map(topics.map((t, i) => [t.id, i])), [topics]);
   const shown = useMemo(() => new Map(vis.nodes.map((n) => [n.id, n])), [vis]);
@@ -221,7 +225,8 @@ const GraphFlowInner = forwardRef(function GraphFlowInner({ view, topics, select
   // the packed layout is chosen for the canvas shape (bucketed so small resizes do not re-pack)
   const aspect = size.w && size.h ? `${Math.round(size.w / 80)}x${Math.round(size.h / 80)}` : '';
   // the whole-course key folds to one line on a narrow canvas; the packing then only keeps that thin strip free
-  const legendCompact = !local && size.w > 0 && size.w < LEGEND_COMPACT_W;
+  // …and in 整个工作台 (the floating side panel already takes the top right; the canvas gets the height)
+  const legendCompact = (!local || local.kind === 'topic') && size.w > 0 && (size.w < LEGEND_COMPACT_W || (reserve?.right ?? 0) > 0);
   const strip = legendCompact && !minimap ? PANEL_STRIP_MIN : PANEL_STRIP;
   // pack for the area the fit can really use: minus the floating side panel and the strip under the key / minimap
   const homes = useMemo(() => layoutGraph(vis.nodes, structuralEdges, effLayout, { readableZoom: AUTO_FIT_MIN_ZOOM, canvas: { w: Math.max(200, size.w - (reserve?.right ?? 0)), h: Math.max(200, size.h - strip) } }), [structure, aspect, strip]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -316,17 +321,21 @@ const GraphFlowInner = forwardRef(function GraphFlowInner({ view, topics, select
   const showEdgeLabels = useStore((s) => s.transform[2] >= EDGE_LABEL_MIN_ZOOM);
   const curves = useMemo(() => { const m = new Map(); const cs = parallelEdgeCurves(vis.edges); vis.edges.forEach((e, i) => m.set(e.id, cs[i])); return m; }, [vis.edges]);
   // Label clutter: in a local view every arrow is a candidate 前置 (the legend says so), so an edge is labelled only
-  // while it is lit (hover); the whole-course view labels one edge per (target, type), lit edges always.
+  // while it is lit (hover); the whole-course view labels one edge per (target, type), lit edges always — and only
+  // where its chip fits without covering a node or another chip (placeEdgeLabels, on the packed homes; Map id → t).
   const labelled = useMemo(() => {
-    if (local) return new Set();
-    const seen = new Set(), out = new Set();
+    if (local && local.kind !== 'topic') return new Map();
+    const seen = new Set(), items = [];
     for (const e of vis.edges) {
       if (e.kind !== 'relation') continue;
       const k = `${e.target}|${e.label}|${e.status}`;
-      if (!seen.has(k)) { seen.add(k); out.add(e.id); }
+      if (!seen.has(k)) { seen.add(k); items.push({ id: e.id, source: e.source, target: e.target, text: relText(e) }); }
     }
+    const boxes = new Map(vis.nodes.map((n) => { const p = homes.get(n.id) ?? { x: 0, y: 0 }, b = nodeBox(n); return [n.id, { x: p.x, y: p.y, w: b.w, h: b.h }]; }));
+    const out = new Map();
+    for (const [id, t] of placeEdgeLabels(items, boxes)) if (t != null) out.set(id, t);
     return out;
-  }, [vis.edges, local]);
+  }, [vis.edges, vis.nodes, homes, local]);
   const busLanes = useMemo(() => new Map(vis.edges.filter((e) => e.bus).map((e, i) => [e.id, i])), [vis.edges]);
   const edges = useMemo(() => {
     const out = vis.edges.map((e) => {
@@ -345,12 +354,12 @@ const GraphFlowInner = forwardRef(function GraphFlowInner({ view, topics, select
           data: { curve: curves.get(e.id) ?? 0 } };
       }
       const candidate = e.status === 'candidate', stroke = candidate ? CANDIDATE : RELATION;
-      const text = `${RELATION_LABEL[e.label] ?? e.label}${candidate ? ' · 候选' : ''}${e.members.length > 1 ? ` ×${e.members.length}` : ''}${e.bus ? `（折叠汇总，指向 ${e.via.length} 个节点）` : ''}`;
+      const text = relText(e);
       return { id: e.id, source: e.source, target: e.target, type: e.bus ? 'bus' : 'floating', zIndex: hot ? 1 : 0,
         className: `kg-rel${dim ? ' dim' : ''}${hot ? ' hot' : ''}${e.aggregated ? ' agg' : ''}${e.bus ? ' merged bus' : ''}`, label: hot || (showEdgeLabels && labelled.has(e.id)) ? text : undefined,
         style: { stroke, strokeWidth: hot ? 2.8 : e.bus ? 2.2 : 1.8, strokeDasharray: candidate ? '6 4' : undefined, opacity: dim ? 0.12 : 1 },
         markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: ARROW_SIZE, height: ARROW_SIZE, markerUnits: 'userSpaceOnUse', strokeWidth: 1.5 },
-        data: { curve: curves.get(e.id) ?? 0, via: e.via, lane: e.bus ? busLanes.get(e.id) : undefined, cls: `${dim ? 'dim' : hot ? 'hot' : ''}${candidate ? ' cand' : ''}`, title: `${text}${candidate ? '（候选关系，未验证）' : ''}` } };
+        data: { curve: curves.get(e.id) ?? 0, labelT: labelled.get(e.id) ?? 0.5, via: e.via, lane: e.bus ? busLanes.get(e.id) : undefined, cls: `${dim ? 'dim' : hot ? 'hot' : ''}${candidate ? ' cand' : ''}`, title: `${text}${candidate ? '（候选关系，未验证）' : ''}` } };
     });
     for (const e of graph.edges) if (!shown.has(e.source) || !shown.has(e.target)) out.push({ id: `hidden:${e.id}`, source: e.source, target: e.target, type: 'floating', hidden: true, data: {} });
     return out;
@@ -425,14 +434,15 @@ const GraphFlowInner = forwardRef(function GraphFlowInner({ view, topics, select
   const toggleTopic = (topicId) => setCollapsed((s) => { const next = new Set(s); if (next.has(topicId)) next.delete(topicId); else next.add(topicId); return next; });
   const onNodeClick = (_e, node) => {
     const n = node.data.n;
-    if (local) { if (n.kind === 'fold') onUnfold?.(); else onLocalClick?.(n.id); return; }
+    if (local && local.kind !== 'topic') { if (n.kind === 'fold') onUnfold?.(); else onLocalClick?.(n.id); return; }
     if (pathMode) { setPathEnds((p) => (p.length >= 2 ? [n.id] : p.includes(n.id) ? p : [...p, n.id])); return; }
     setClickFocus(n.id);
     onSelect?.(n.id); // topics too: the workbench keeps its own graph selection (topic / extension / knowledge point)
   };
   const onNodeDoubleClick = (_e, node) => {
     const n = node.data.n;
-    if (pathMode || local) return;
+    if (pathMode || (local && local.kind !== 'topic') || (local && n.kind === 'topic')) return; // topic view: no collapse
+    if (local) return; // topic view: there is nothing collapsed to reveal
     if (n.kind === 'topic') { toggleTopic(n.topicId); return; }
     // lazy expand: reveal every collapsed topic one of this knowledge point's relations leads into
     const far = graph.edges.filter((e) => e.kind === 'relation' && (e.source === n.id || e.target === n.id))
@@ -453,7 +463,7 @@ const GraphFlowInner = forwardRef(function GraphFlowInner({ view, topics, select
           onNodeDragStop={(_e, node) => simulation.onDragStop(node.id)}
           onNodeMouseEnter={(_e, node) => setHoveredId(node.id)} onNodeMouseLeave={() => setHoveredId(null)}
           onEdgeMouseEnter={(_e, edge) => setHoveredEdgeId(edge.id)} onEdgeMouseLeave={() => setHoveredEdgeId(null)}
-          onPaneClick={() => { setClickFocus(null); if (!pathMode && !local) onSelect?.(null); }}
+          onPaneClick={() => { setClickFocus(null); if (!pathMode && (!local || local.kind === 'topic')) onSelect?.(null); }}
           nodesDraggable nodesConnectable={false} elementsSelectable={false} deleteKeyCode={null} disableKeyboardA11y zoomOnDoubleClick={false}
           panOnScroll zoomOnScroll={false} zoomOnPinch minZoom={0.15} maxZoom={2.5} nodeDragThreshold={3} defaultViewport={{ x: 0, y: 0, zoom: 1 }}>
           <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="#dbe1ee" />
@@ -491,6 +501,7 @@ function GraphLegend({ local, path, compact = false }) {
   } else {
     rows = [dot('big', '主题（类别）· 双击收起', 't'), dot('kp', '知识点（左侧色条 = 掌握）', 'c'), dot('ext', '扩展节点（虚线框）', 'e'),
       line('contains', '主题色虚线 = 主题包含知识点', 'in'), line('rel', '关系', 'r'), line('cand', '金色虚线 = 候选关系', 'cand'),
+      local?.kind === 'topic' ? dot('ghost', '其他主题的相关节点（淡色虚线框，点击切换主题）', 'g') : null,
       path ? dot('target', '目标', 'pt') : null, path ? dot('weak', '薄弱点', 'pw') : null];
   }
   return (

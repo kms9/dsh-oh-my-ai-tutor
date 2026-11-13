@@ -109,7 +109,14 @@ const overlapCount = (bx, pad = 2) => bx.flatMap((p, i) => bx.slice(i + 1).filte
 
 await step('graph (React Flow, after AWS OntologyGraphFlow): circles per topic colour, directed labelled relation, force layout settles', async () => {
   await tab('graph');
-  await page.waitForSelector(`${G} .kg-concept`);
+  // narrow (3-column) canvas: the graph starts on ONE topic's card at a readable zoom; 「查看全图」 shows the whole course
+  await page.waitForSelector(`${G}[data-local=topic] .kg-topic`);
+  assert.equal(await page.locator(`${G} .kg-topic`).count(), 1, 'topic view: one topic card');
+  assert.ok(await page.locator(`${G} .kg-concept`).count() >= 1);
+  await graphStill();
+  assert.ok(Number(await page.getAttribute(G, 'data-scale')) >= 0.8, 'topic view: readable zoom');
+  await page.click('[data-testid=graph-scope-all]');
+  await page.waitForSelector(`${G}:not([data-local]) .kg-concept`);
   assert.equal(await page.getAttribute(G, 'data-layout'), 'force');
   assert.equal(await page.locator(`${G} .kg-concept`).count(), 15);
   assert.equal(await page.locator(`${G} .kg-topic`).count(), (await topics()).length);
@@ -563,12 +570,15 @@ await step('mind map: drag a knowledge point into another topic (re-parent) and 
     await page.click('[data-testid=mindmap-fit]');
     await page.waitForTimeout(250);
   }
-  // pick a source and a different topic that are both on screen (a large map overflows at readable zoom)
+  // pick a source and a different topic that are both on screen (a large map overflows at readable zoom) and clear of
+  // mind-elixir's 50 px edge band: a drag pointer inside that band auto-pans the map, so the target slides away from
+  // under the pointer and the drop lands nowhere (the old 8 px margin made this step flaky, on older commits too)
   const visibleIds = await page.evaluate(() => {
     const c = document.querySelector('[data-testid=mindmap-elixir]').getBoundingClientRect();
+    const m = 60;
     return [...document.querySelectorAll('[data-testid=mindmap-elixir] [data-nodeid]')].flatMap((n) => {
       const r = n.getBoundingClientRect();
-      const ok = r.left >= c.left + 8 && r.right <= c.right - 8 && r.top >= c.top + 8 && r.bottom <= c.bottom - 8;
+      const ok = r.left >= c.left + m && r.right <= c.right - m && r.top >= c.top + m && r.bottom <= c.bottom - m;
       return ok ? [n.getAttribute('data-nodeid').slice(2)] : [];
     });
   });

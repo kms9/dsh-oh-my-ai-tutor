@@ -251,3 +251,31 @@ export function learningPathTo(graph, target, { maxNodes = PATH_MAX } = {}) {
     graph: { nodes: ids.map((id) => ({ ...byId.get(id), level: -dist.get(id) })), edges },
   };
 }
+
+/** Most cross-topic neighbours a topic view shows as ghost nodes (the rest are counted). */
+export const GHOST_MAX = 8;
+
+/**
+ * Topic view (narrow canvas): one topic's card — the topic, its nodes and the relations among them — plus, as `ghost`
+ * nodes, the nodes of OTHER topics that one of its nodes has a (candidate) relation with, so cross-topic links stay
+ * visible without drawing the whole course. Returns null for an unknown topic.
+ */
+export function topicGraph(graph, topicId, { ghostMax = GHOST_MAX } = {}) {
+  const topic = graph.nodes.find((n) => n.kind === 'topic' && n.topicId === topicId);
+  if (!topic) return null;
+  const members = graph.nodes.filter((n) => n.kind !== 'topic' && n.topicId === topicId);
+  const inside = new Set([topic.id, ...members.map((n) => n.id)]);
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const ghostIds = [];
+  for (const e of graph.edges) {
+    if (e.kind !== 'relation') continue;
+    const other = inside.has(e.source) && !inside.has(e.target) ? e.target : inside.has(e.target) && !inside.has(e.source) ? e.source : null;
+    if (other && byId.get(other)?.kind !== 'topic' && !ghostIds.includes(other)) ghostIds.push(other);
+  }
+  const shownGhosts = ghostIds.slice(0, ghostMax);
+  const keep = new Set([...inside, ...shownGhosts]);
+  const nodes = [{ ...topic, collapsed: false, count: members.length }, ...members, ...shownGhosts.map((id) => ({ ...byId.get(id), ghost: true }))];
+  const edges = graph.edges.filter((e) => keep.has(e.source) && keep.has(e.target) && (e.kind === 'contains' ? inside.has(e.target) : e.kind === 'relation'))
+    .map((e) => (e.members ? e : { ...e, members: [e.id] }));
+  return { kind: 'topic', topicId, graph: { nodes, edges }, memberCount: members.length, ghostCount: shownGhosts.length, hiddenGhosts: ghostIds.length - shownGhosts.length };
+}
