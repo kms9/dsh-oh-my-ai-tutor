@@ -67,6 +67,35 @@ function aliasEdges(edges, alias) {
 }
 
 /**
+ * One arrow per fold card. A fold usually feeds many kept nodes (each folded member is the prerequisite of a different
+ * direct prerequisite), which drew a fan of crossing arrows. Per fold, those edges become ONE `bus` edge: a single
+ * stem from the fold card to a rail above the nodes it feeds, with a short tick down to each of them (`via`). It keeps
+ * every member relation id (×n on hover) and stays a candidate 前置 like every member. Edges between two fold cards
+ * are not drawn (both ends are folded); their relations count on the source fold's arrow. A fold feeding a single
+ * kept node keeps its plain (×n) edge.
+ */
+export function mergeFoldEdges(edges, folds) {
+  if (!folds.size) return edges;
+  const rest = [];
+  const byFold = new Map();
+  for (const e of edges) {
+    if (!folds.has(e.source)) { rest.push(e); continue; }
+    if (!byFold.has(e.source)) byFold.set(e.source, []);
+    byFold.get(e.source).push(e);
+  }
+  const merged = [];
+  for (const [fid, es] of byFold) {
+    const kept = es.filter((e) => !folds.has(e.target));
+    const intoFolds = es.filter((e) => folds.has(e.target)).flatMap((e) => e.members);
+    if (!kept.length) { merged.push(...es); continue; } // only feeds other folds: keep those edges
+    if (kept.length === 1) { merged.push(intoFolds.length ? { ...kept[0], members: [...kept[0].members, ...intoFolds] } : kept[0]); continue; }
+    merged.push({ ...kept[0], id: `fold:${fid}>bus`, target: kept[0].target, aggregated: true, merged: true, bus: true,
+      via: kept.map((e) => e.target), members: [...kept.flatMap((e) => e.members), ...intoFolds] });
+  }
+  return [...rest, ...merged];
+}
+
+/**
  * Focus view. `up`: 1 | 2 | 3 | 'all'; `down`: levels of dependents (default 1); `unfold`: show every ancestor.
  * Returns null when the node is not in the graph. Nodes carry `level` (< 0 above, 0 the focus, > 0 below).
  */
@@ -118,11 +147,12 @@ export function focusGraph(graph, focusId, { up = DEFAULT_DEPTH, down = 1, foldA
   }
 
   const members = new Set(level.keys());
-  const nodes = [
+  const kept = [
     ...[...level].filter(([id]) => !alias.has(id)).map(([id, l]) => ({ ...byId.get(id), level: l })),
     ...folds.values(),
   ].sort((a, b) => a.level - b.level);
-  const edges = aliasEdges(pre.filter((e) => members.has(e.source) && members.has(e.target)), alias);
+  const nodes = kept;
+  const edges = mergeFoldEdges(aliasEdges(pre.filter((e) => members.has(e.source) && members.has(e.target)), alias), folds);
   return {
     kind: 'focus', focusId, up: up === Infinity ? 'all' : up, down,
     graph: { nodes, edges },

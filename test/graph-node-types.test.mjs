@@ -31,11 +31,16 @@ test('every node kind the graph emits is a registered React Flow node type', () 
 
 test('extension node renders a labelled, dashed-style node without a mastery class', () => {
   const html = render({ id: 'g1', kind: 'extension', label: '易错点：符号', mastery: null, topicId: 't1' });
-  assert.match(html, /class="kg-node kg-dot kg-extension\s/);
+  assert.match(html, /class="kg-node kg-rect kg-extension\s/);
+  assert.doesNotMatch(html, /kg-stripe/, 'no mastery stripe on an extension');
   assert.match(html, /易错点：符号/);
   assert.doesNotMatch(html, /unverified|developing|demonstrated/);
   assert.match(html, /扩展节点/);
-  // a knowledge point keeps its mastery ring class; a fold shows its count
-  assert.match(render({ id: 'g2', kind: 'concept', label: '定义', mastery: 'developing' }), /kg-concept developing/);
+  // a knowledge point keeps its mastery class and gets the left mastery stripe; a fold shows its count
+  const kp = render({ id: 'g2', kind: 'concept', label: '定义', mastery: 'developing' });
+  assert.match(kp, /kg-concept developing/);
+  assert.match(kp, /class="kg-stripe"/);
+  assert.match(kp, /data-mastery="developing"/);
+  assert.doesNotMatch(render({ id: 'topic:t1', kind: 'topic', topicId: 't1', label: '主题', count: 2 }), /kg-stripe/, 'no stripe on a topic');
   assert.match(render({ id: 'fold:t1', kind: 'fold', title: '主题', label: '主题 · 3个', count: 3, members: [] }), /kg-fold[\s\S]*\+3/);
 });

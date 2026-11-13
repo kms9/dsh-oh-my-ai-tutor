@@ -63,8 +63,14 @@ test('fold: above the threshold, farther ancestors fold into one node per topic 
   const folds = fg.graph.nodes.filter((n) => n.kind === 'fold');
   assert.deepEqual(folds.map((n) => n.label).sort(), ['主题T2 · 30个', '主题T3 · 20个']);
   assert.equal(fg.graph.nodes.filter((n) => n.id.startsWith('p')).length, 10, 'nearest level stays whole');
-  const agg = fg.graph.edges.find((e) => e.source === 'fold:T2' && e.target === 'p0');
-  assert.ok(agg && agg.aggregated && agg.members.length === 3, 'member relations are aggregated onto the fold (×n)');
+  // one arrow per fold card: its 30 / 20 member relations feed all ten p*, so they become one bus edge (×n, via p*)
+  const fromFolds = fg.graph.edges.filter((e) => e.source.startsWith('fold:'));
+  assert.equal(fromFolds.length, 2, 'a single edge per fold node');
+  const agg = fromFolds.find((e) => e.source === 'fold:T2');
+  assert.ok(agg.aggregated && agg.bus && agg.members.length === 30, 'member relations are aggregated onto the fold (×n)');
+  assert.equal(agg.via.length, 10, 'one tick down to each of the ten direct prerequisites');
+  assert.equal(agg.status, 'candidate', 'still a candidate 前置');
+  assert.equal(agg.label, 'prerequisite');
   assert.equal(focusGraph(big, 'f', { up: 'all', unfold: true }).graph.nodes.length, 61, 'expand all');
   assert.equal(focusGraph(big, 'f', { up: 1 }).foldedCount, 0, 'small views never fold');
   assert.ok(NODE_KINDS.includes('fold'));
@@ -119,4 +125,34 @@ test('long learning path is condensed: target, direct prerequisites, weak points
 test('prereqEdges ignores containment and other relation types', () => {
   assert.ok(prereqEdges(g).every((e) => e.kind === 'relation' && e.label === PREREQ));
   assert.equal(prereqEdges(g).length, 7);
+});
+
+test('fold edges: one bus arrow per fold card; dagre keeps the fold above the row it feeds', () => {
+  const nodes = [['f', 'T1'], ['m', 'T1'], ['p0', 'T1'], ['p1', 'T1']], edges = [['m', 'f'], ['p0', 'm'], ['p1', 'm']];
+  for (let i = 0; i < 45; i++) { nodes.push([`q${i}`, 'T2']); edges.push([`q${i}`, i % 2 ? 'p1' : 'p0']); }
+  const fg = focusGraph(course({ nodes, edges }), 'f', { up: 'all', foldAt: 3 });
+  const fe = fg.graph.edges.filter((e) => e.source === 'fold:T2');
+  assert.equal(fe.length, 1);
+  assert.ok(fe[0].bus);
+  assert.deepEqual([...fe[0].via].sort(), ['p0', 'p1']);
+  assert.equal(fe[0].members.length, 45);
+  const pos = layoutGraph(fg.graph.nodes, fg.graph.edges, 'tb');
+  assert.ok(pos.get('fold:T2').y < pos.get('p0').y && pos.get('fold:T2').y < pos.get('p1').y, 'the fold card sits above every node it feeds');
+  // a fold feeding only one node keeps that direct (×n) edge
+  const one = focusGraph(course({ nodes: [['f', 'T1'], ['p', 'T1'], ...Array.from({ length: 6 }, (_, i) => [`q${i}`, 'T2'])], edges: [['p', 'f'], ...Array.from({ length: 6 }, (_, i) => [`q${i}`, 'p'])] }), 'f', { up: 'all', foldAt: 3 });
+  const e1 = one.graph.edges.find((e) => e.source === 'fold:T2');
+  assert.equal(e1.target, 'p'); assert.equal(e1.members.length, 6); assert.ok(!e1.bus);
+});
+
+test('fold edges: relations between two fold cards are not drawn but count on the source fold', () => {
+  const nodes = [['f', 'T1'], ['p0', 'T1'], ['p1', 'T1']], edges = [['p0', 'f'], ['p1', 'f']];
+  for (let i = 0; i < 6; i++) { nodes.push([`a${i}`, 'T2'], [`b${i}`, 'T3']); edges.push([`a${i}`, i % 2 ? 'p1' : 'p0'], [`b${i}`, i % 2 ? 'p1' : 'p0']); }
+  edges.push(['a0', 'b1']);
+  const fg = focusGraph(course({ nodes, edges }), 'f', { up: 'all', foldAt: 3 });
+  const from2 = fg.graph.edges.filter((e) => e.source === 'fold:T2');
+  assert.equal(from2.length, 1, 'one arrow from the T2 fold');
+  assert.ok(from2[0].bus);
+  assert.equal(from2[0].members.length, 7, 'including the relation into the other fold');
+  assert.equal(fg.graph.edges.filter((e) => e.target.startsWith('fold:')).length, 0, 'no fold → fold arrow');
+  assert.equal(fg.graph.edges.filter((e) => e.source === 'fold:T3').length, 1);
 });

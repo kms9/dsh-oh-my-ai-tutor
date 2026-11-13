@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildGraph } from '../src/client/graph-model.mjs';
 import { pickGraphNode, resolveGraphSelection, selectionActions, relationRows } from '../src/client/graph-select.mjs';
-import { sizeOfNode, sizeOfKind, labelWeight } from '../src/client/coa/graphLayout.mjs';
+import { nodeBox, labelLines, labelWeight, NODE_W, NODE_SIZE, MAX_LINES } from '../src/client/coa/graphLayout.mjs';
 
 // one topic, two knowledge points (graph nodes gn-a / gn-b) and one extension node (ext, not a knowledge point)
 const topics = [{ id: 'T1', title: '底层机制', subtopics: [{ id: 's1', conceptIds: ['kp-a'] }, { id: 's2', conceptIds: ['kp-b'] }] }];
@@ -57,10 +57,19 @@ test('relation rows: one compact row per relation with direction and the other e
   assert.deepEqual(relationRows(g, view.edges, 'ext').map((r) => [r.dir, r.otherId]), [['out', 'gn-a']]);
 });
 
-test('long labels get a larger circle (fit 3–4 lines), short ones keep the base size', () => {
-  assert.equal(sizeOfNode({ kind: 'concept', label: '定义' }), sizeOfKind('concept'));
-  assert.ok(sizeOfNode({ kind: 'concept', label: '遗忘曲线与「恰到好处的难度」' }) > sizeOfKind('concept'));
-  assert.ok(sizeOfNode({ kind: 'extension', label: view.nodes[2].label }) >= sizeOfNode({ kind: 'extension', label: '遗忘曲线与难度' }));
+test('rect nodes: width clamps to NODE_W, long labels wrap (≤ 4 lines) and grow the height, short ones keep the base box', () => {
+  assert.deepEqual(nodeBox({ kind: 'concept', label: '定义' }), NODE_SIZE.concept);
+  const long = nodeBox({ kind: 'concept', label: '遗忘曲线与「恰到好处的难度」' });
+  assert.equal(long.w, NODE_W.concept[1], 'a long label takes the widest box');
+  assert.ok(long.h > NODE_SIZE.concept.h, 'and wraps to more lines');
+  const huge = nodeBox({ kind: 'concept', label: '很长'.repeat(40) });
+  assert.equal(labelLines({ kind: 'concept', label: '很长'.repeat(40) }, huge.w), MAX_LINES, 'never more than 4 lines');
+  assert.ok(huge.w <= NODE_W.concept[1] && huge.h < 100);
+  for (const k of ['topic', 'concept', 'extension']) {
+    const b = nodeBox({ kind: k, label: '间隔效应间隔效应' });
+    assert.ok(b.w >= NODE_W[k][0] && b.w <= NODE_W[k][1] && b.w > b.h, `${k}: landscape, clamped`);
+  }
+  assert.ok(nodeBox({ kind: 'extension', label: view.nodes[2].label }).w >= nodeBox({ kind: 'extension', label: '遗忘曲线' }).w);
   assert.ok(labelWeight('spacing') < labelWeight('间隔效应间隔'), 'ASCII counts about half');
-  assert.equal(sizeOfNode({ kind: 'fold', label: '很长很长很长很长很长很长的主题' }), sizeOfKind('fold'));
+  assert.equal(nodeBox({ kind: 'fold', title: '主题' }).w, NODE_W.fold[1]);
 });
